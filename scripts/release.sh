@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
 # Builds a release package for the current platform into dist/:
 #
 #   dist/sope-<version>-<os>-<arch>.tar.gz (+ .sha256), containing
@@ -6,7 +7,8 @@
 #     lib/libsope.<ext>     the shared library (exports only sope_*)
 #     lib/libsope.a         static library
 #     include/sope.h        the ABI
-#     docs/, README.md, CHANGELOG.md, install.sh
+#     docs/, README.md, CHANGELOG.md, LICENSE, install.sh
+#     licenses/             curl's and mbedTLS's, when they are bundled
 #
 # HTTP: macOS links the system libcurl (part of the OS; TLS trusts the
 # Keychain); Linux bundles curl + mbedTLS into libsope. Override with
@@ -82,7 +84,12 @@ cp include/sope.h "$stage/include/"
 cp docs/*.md "$stage/docs/"
 cp README.md CHANGELOG.md "$stage/"
 cp scripts/install.sh "$stage/install.sh"
-[[ -f LICENSE ]] && cp LICENSE "$stage/"
+cp LICENSE "$stage/"
+if [[ "$curl_mode" == bundled ]]; then # their code is inside libsope: ship their licenses
+  mkdir -p "$stage/licenses"
+  cp "$build/curl_ep-prefix/src/curl_ep/COPYING" "$stage/licenses/curl.txt"
+  cp "$build/mbedtls_ep-prefix/src/mbedtls_ep/LICENSE" "$stage/licenses/mbedtls.txt"
+fi
 
 (cd dist && tar -czf "$name.tar.gz" "$name" && shasum -a 256 "$name.tar.gz" >"$name.tar.gz.sha256")
 step "done"

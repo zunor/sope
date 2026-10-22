@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Tools the TUI registers with the agent (and so offers to its subagents).
 // They run on the UI thread's event loop; results go back through
 // sope_tool_result. File tools are confined to the working directory.

@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 iamlinjunhong */
 /*
  * sope.h - public C ABI of sope, an embeddable agent library.
  *
@@ -49,8 +51,8 @@ extern "C" {
 
 #define SOPE_VERSION_MAJOR 0
 #define SOPE_VERSION_MINOR 1
-#define SOPE_VERSION_PATCH 0
-#define SOPE_VERSION_STRING "0.1.0"
+#define SOPE_VERSION_PATCH 1
+#define SOPE_VERSION_STRING "0.1.1"
 #define SOPE_VERSION_NUMBER \
     ((SOPE_VERSION_MAJOR << 16) | (SOPE_VERSION_MINOR << 8) | SOPE_VERSION_PATCH)
 

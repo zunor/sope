@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { describe, expect, test } from "bun:test";
 import { graphemes, stringWidth, truncate } from "../src/unicode/width";
 import { wrapText } from "../src/ui/wrap";

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { afterEach, expect, test } from "bun:test";
 import { abiCompatible, Agent, SopeError, ErrorCode, version, type SopeEvent } from "../src";
 

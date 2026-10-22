@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Colors are 0xRRGGBB numbers, or -1 for the terminal's default color.
 
 export const DEFAULT_COLOR = -1;

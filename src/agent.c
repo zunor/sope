@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * agent.c - public API: agent lifecycle, options, tools, subagent
  * definitions, the event queue and its readable fd.

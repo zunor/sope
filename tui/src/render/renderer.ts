@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Double-buffered renderer: the app draws a full frame into the back buffer,
 // and end() writes only the cells that changed since the previous frame,
 // wrapped in synchronized-output markers so the terminal never shows a
@@ -30,6 +31,11 @@ export class Renderer {
     else this.#back.clear();
     this.cursor = { x: 0, y: 0, visible: false };
     return this.#back;
+  }
+
+  /** The frame on screen, as last flushed by end(). */
+  get screen(): CellBuffer | null {
+    return this.#front;
   }
 
   /** Forces the next frame to repaint everything (after resize, or when the screen was disturbed). */

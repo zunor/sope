@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
 # Installs sope from an unpacked release package (this script ships at its
 # root) or from a repo checkout after scripts/release.sh.
 #
@@ -13,7 +14,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --prefix) prefix="$2"; shift 2 ;;
     --lib) with_lib=1; shift ;;
-    -h | --help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '3,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "install: unknown option $1" >&2; exit 2 ;;
   esac
 done

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /* hello.c - the smallest complete host: send one message, stream the reply. */
 #include <sope.h>
 

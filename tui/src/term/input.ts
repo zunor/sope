@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Decodes raw terminal input bytes into key, text, paste and mouse events.
 //
 // Handles UTF-8 split across reads, CSI/SS3 escape sequences with xterm

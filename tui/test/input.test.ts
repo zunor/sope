@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { expect, test } from "bun:test";
 import { InputParser, keyId, type InputEvent } from "../src/term/input";
 
@@ -48,6 +49,7 @@ test("bracketed paste, including a split terminator", () => {
   expect(parse("\x1b[200~line1\r\nli", "ne2\x1b[20", "1~x")).toEqual(["paste:line1\nline2", "text:x"]);
 });
 
-test("SGR mouse wheel", () => {
+test("SGR mouse wheel and drag", () => {
   expect(parse("\x1b[<64;10;5M\x1b[<65;10;5M")).toEqual(["mouse:wheel-up", "mouse:wheel-down"]);
+  expect(parse("\x1b[<0;3;2M\x1b[<32;9;4M\x1b[<0;9;4m")).toEqual(["mouse:press", "mouse:drag", "mouse:release"]);
 });

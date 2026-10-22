@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { expect, test } from "bun:test";
 import { CellBuffer } from "../src/render/buffer";
 import { Renderer } from "../src/render/renderer";

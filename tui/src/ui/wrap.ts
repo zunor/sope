@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Soft wrapping by display width. Lines break after spaces, and anywhere
 // around wide (CJK) characters; a word longer than the width is split.
 

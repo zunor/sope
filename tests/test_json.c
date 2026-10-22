@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /* test_json.c - unit tests for the internal JSON parser and string helpers. */
 #include "../src/sope_internal.h"
 

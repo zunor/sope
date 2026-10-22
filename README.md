@@ -16,9 +16,9 @@
 从发布包安装：
 
 ```sh
-tar xzf sope-0.1.0-darwin-arm64.tar.gz
-sope-0.1.0-darwin-arm64/install.sh         # 安装 sope 到 ~/.local/bin
-sope-0.1.0-darwin-arm64/install.sh --lib   # 同时安装 libsope 和 sope.h
+tar xzf sope-0.1.1-darwin-arm64.tar.gz
+sope-0.1.1-darwin-arm64/install.sh         # 安装 sope 到 ~/.local/bin
+sope-0.1.1-darwin-arm64/install.sh --lib   # 同时安装 libsope 和 sope.h
 ```
 
 从源码构建并安装：
@@ -51,7 +51,9 @@ git diff | sope -p "review 这段改动"
 sope --version
 ```
 
-TUI 是全屏的（终端的备用屏幕，和 vim、htop 一样）：退出后终端恢复原样，对话内容不会留在滚动历史里。用 `pgup`/`pgdn` 或 `/mouse` 开启滚轮来翻看。
+TUI 是全屏的（终端的备用屏幕，和 vim、htop 一样）：退出后终端恢复原样，对话内容不会留在滚动历史里。用滚轮或 `pgup`/`pgdn` 翻看对话；往上翻时新输出不会把视图拉回底部。
+
+鼠标由 TUI 接管：拖动选中文字，松开即复制到剪贴板（底栏会提示“copied N characters”）。想用终端自己的选择，按住 Shift（iTerm2 是 Option）再拖，或者 `/mouse` 关掉接管；`SOPE_MOUSE=0` 默认关闭。
 
 ### 工具与权限
 
@@ -92,6 +94,7 @@ TUI 是全屏的（终端的备用屏幕，和 vim、htop 一样）：退出后�
 | `SOPE_PROVIDER` | `--provider` | 有 key 时为 `openai`，否则 `mock` |
 | `SOPE_COMPACT_THRESHOLD` | | `100000`（`0` 关闭自动压缩） |
 | `SOPE_LIB` | | 加载另一份 libsope，而不是内嵌的那份 |
+| `SOPE_MOUSE` | | `1`；`0` 时鼠标留给终端（滚轮会变成 ↑/↓） |
 | `SOPE_TRUECOLOR` | | 自动检测；`0`/`1` 强制 256 色/真彩色 |
 
 ## 嵌入 libsope
@@ -118,6 +121,10 @@ sope_agent_free(agent);
 ## 版本
 
 库、绑定和 `sope` 使用同一个版本号（定义在 `include/sope.h`），同时发布；`sope` 内嵌同版本的 libsope。两者之间的契约是 ABI 版本，加载时会检查。详见 [`docs/release.md`](docs/release.md)，变更记录见 [`CHANGELOG.md`](CHANGELOG.md)。
+
+## 许可证
+
+MIT，见 [`LICENSE`](LICENSE)。
 
 ## 开发
 

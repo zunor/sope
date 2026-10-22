@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // The sope TUI: wires the terminal, input decoding, the agent bridge and the
 // views together, and lays out each frame.
 //
@@ -24,12 +25,13 @@ import { toolsFor, type PreviewLine, type Tool } from "./agent/tools";
 import { agentOptions, configPath, type Config } from "./config";
 import type { CellBuffer } from "./render/buffer";
 import { Renderer } from "./render/renderer";
-import { InputParser, keyId, type InputEvent } from "./term/input";
+import { InputParser, keyId, type InputEvent, type MouseEvent as MouseInput } from "./term/input";
 import { Terminal } from "./term/terminal";
 import { palette, SPINNER } from "./theme";
 import { ChatView, summarizeInput, type Message, type Step } from "./ui/chat";
 import { Editor } from "./ui/editor";
 import { EventLog } from "./ui/eventlog";
+import { copyToClipboard, Selection } from "./ui/selection";
 import { stringWidth, truncate } from "./unicode/width";
 
 const PAD = 1;
@@ -52,7 +54,7 @@ const HELP = (tools: Tool[]) => [
   "  /model <name>      switch model (next turn)",
   "  /thinking          show or hide the model's full reasoning",
   "  /trace             toggle the ABI trace panel (ctrl+t)",
-  "  /mouse             toggle mouse wheel scrolling (disables text selection)",
+  "  /mouse             toggle mouse capture (wheel scroll, drag to copy); off gives selection back to the terminal",
   "  /set <key> [val]   sope_agent_set_option; omit val to unset",
   "  /permissions       show which tools run without asking",
   "  /quit              exit",
@@ -91,6 +93,9 @@ export class App {
   #chat = new ChatView();
   #editor = new Editor();
   #trace = new EventLog();
+  #selection = new Selection();
+  #notice: string | null = null;
+  #noticeTimer: ReturnType<typeof setTimeout> | null = null;
   #bridge: AgentBridge;
   #tools: Tool[];
   #runner: ToolRunner;
@@ -135,6 +140,7 @@ export class App {
       (fn, detail) => (fn === "note" ? this.#trace.note(detail) : this.#trace.call(fn, detail)),
     );
     this.#runner.allowAll = allowAll;
+    this.#term.setMouse(config.mouse);
   }
 
   start(): void {
@@ -183,6 +189,8 @@ export class App {
   }
 
   #handle(ev: InputEvent): void {
+    if (ev.type === "mouse") return this.#handleMouse(ev);
+    this.#selection.clear();
     if (this.#approvals.length && (ev.type === "text" || ev.type === "paste")) {
       if (ev.type === "text" && [...ev.text].length === 1) this.#handleApprovalKey(ev.text);
       return; // the input box is hidden while a permission prompt is up
@@ -192,13 +200,44 @@ export class App {
       case "paste":
         this.#editor.insert(ev.text);
         return;
-      case "mouse":
-        if (ev.action === "wheel-up") this.#chat.scrollBy(3);
-        if (ev.action === "wheel-down") this.#chat.scrollBy(-3);
-        return;
       case "key":
         this.#handleKey(keyId(ev));
     }
+  }
+
+  #handleMouse(ev: MouseInput): void {
+    const p = { x: ev.x, y: ev.y };
+    switch (ev.action) {
+      case "wheel-up":
+      case "wheel-down":
+        this.#selection.clear(); // it is in screen cells: the text under it is about to move
+        return this.#chat.scrollBy(ev.action === "wheel-up" ? 3 : -3);
+      case "press":
+        if (ev.button === 0) this.#selection.press(p);
+        return;
+      case "drag":
+        return this.#selection.drag(p);
+      case "release":
+        if (this.#selection.release(p)) this.#copySelection();
+    }
+  }
+
+  #copySelection(): void {
+    const screen = this.#renderer.screen;
+    const text = screen ? this.#selection.text(screen) : "";
+    if (!text.trim()) return;
+    copyToClipboard(text, (s) => this.#term.write(s));
+    this.#flash(`copied ${[...text].length} characters`);
+  }
+
+  /** Shows a short message in place of the key hints. */
+  #flash(text: string): void {
+    this.#notice = text;
+    if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
+    this.#noticeTimer = setTimeout(() => {
+      this.#notice = null;
+      this.#scheduleRender();
+    }, 2000);
   }
 
   #handleKey(id: string): void {
@@ -638,6 +677,7 @@ export class App {
     else this.#drawInput(buf, inputY, inputRows, layout, promptWidth);
     buf.text(PAD, ruleBottomY, "─".repeat(inner), { fg: palette.faint });
     this.#drawHints(buf, footerY, inner);
+    this.#selection.highlight(buf);
 
     const bytes = this.#renderer.end();
     this.#frame = { ms: performance.now() - t0, bytes };
@@ -763,6 +803,7 @@ export class App {
   }
 
   #drawHints(buf: CellBuffer, y: number, inner: number): void {
+    if (this.#notice) return void buf.text(PAD, y, truncate(this.#notice, inner), { fg: palette.ok });
     let x = PAD;
     const end = PAD + inner;
     HINTS.forEach(([key, what], i) => {

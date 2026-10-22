@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Command-line parsing for the sope executable. Pure: no terminal, no libsope.
 
 export interface CliOptions {

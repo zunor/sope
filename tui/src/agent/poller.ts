@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Worker thread: blocks in sope_poll so the UI thread never does, and
 // forwards events to the main thread in batches.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // The openai provider against a local fake server: request shape, SSE
 // parsing (text, reasoning, fragmented parallel tool calls, usage), the
 // multi-round tool loop, and HTTP errors. No network access needed.

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * provider_openai.c - OpenAI-compatible Chat Completions with streaming.
  *

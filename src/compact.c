@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * compact.c - prompts for history compaction.
  *

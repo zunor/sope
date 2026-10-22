@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # BundledCurl.cmake - builds libcurl and mbedTLS from source as static,
 # position-independent archives, so libsope carries its own HTTP/TLS stack
 # (SOPE_CURL=bundled). Only HTTP(S) is enabled. Defines the INTERFACE target

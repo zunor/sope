@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * sope_internal.h - declarations shared between the library's translation
  * units. Nothing here is part of the ABI.

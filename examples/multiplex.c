@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /* multiplex.c - one thread drives many agents through their readable fds.
  *
  * Each agent's fd is readable exactly while sope_poll would not block, so a

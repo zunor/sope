@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+// SPDX-License-Identifier: MIT
 // The sope executable: `sope` opens the TUI, `sope -p` answers without it.
 //
 // Release builds embed libsope (bun build --compile ... libsope.dylib); the

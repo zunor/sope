@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Owns the native agent on the UI thread. Calls into libsope that never block
 // (send, cancel, tool results) happen here; polling happens in poller.ts.
 

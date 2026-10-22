@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { expect, test } from "bun:test";
 import { renderMarkdown, slice } from "../src/ui/markdown";
 

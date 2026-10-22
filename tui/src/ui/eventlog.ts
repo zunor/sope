@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // A live trace of everything crossing the C ABI: calls from the TUI into
 // libsope (→) and events coming back out of sope_poll (←).
 

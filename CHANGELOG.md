@@ -2,6 +2,12 @@
 
 版本号以 `include/sope.h` 为准，库、绑定和 `sope` 可执行文件同步发布，规则见 [docs/release.md](docs/release.md)。
 
+## 0.1.1 — 2026-10-23
+
+- 许可证：MIT（`LICENSE`，源文件带 SPDX 标识）；bundled 发布包附带 curl 和 mbedTLS 的许可证
+- TUI 默认接管鼠标：滚轮滚动对话（之前滚轮在备用屏幕里变成 ↑/↓，翻的是输入历史）；拖动选中文字、松开复制到剪贴板（OSC 52 + pbcopy/wl-copy/xclip）；`SOPE_MOUSE=0` 或 `/mouse` 还给终端
+- 往上翻看时，新输出不再把视图往下推
+
 ## 0.1.0 — 2026-10-22
 
 第一个发布版本。

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * loop.c - turn execution: the agent loop and subagents.
  *

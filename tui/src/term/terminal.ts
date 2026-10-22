@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Raw terminal control: raw mode, alternate screen, bracketed paste, mouse
 // reporting, and guaranteed restoration on exit.
 
@@ -13,8 +14,9 @@ const ENTER = [
 
 const LEAVE = ["\x1b[0m", "\x1b[?2004l", "\x1b[?7h", "\x1b[?25h", "\x1b[?1049l"].join("");
 
-const MOUSE_ON = "\x1b[?1000h\x1b[?1006h"; // button events, SGR encoding
-const MOUSE_OFF = "\x1b[?1006l\x1b[?1000l";
+// Button presses, motion while a button is held (for drag selection), SGR encoding.
+const MOUSE_ON = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MOUSE_OFF = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 
 export class Terminal {
   readonly truecolor = detectTruecolor();
@@ -52,7 +54,11 @@ export class Terminal {
     process.off("exit", this.#restoreOnExit);
   }
 
-  /** Mouse reporting enables wheel scrolling but disables the terminal's own text selection. */
+  /**
+   * Mouse reporting gives the TUI the wheel and drags (it selects and copies
+   * text itself), at the cost of the terminal's own selection. Without it,
+   * terminals turn the wheel into arrow keys on the alternate screen.
+   */
   setMouse(on: boolean): void {
     if (on === this.#mouse) return;
     this.#mouse = on;

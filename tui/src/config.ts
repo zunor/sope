@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Agent configuration. Later sources win:
 //
 //   1. defaults
@@ -11,6 +12,8 @@
 //   SOPE_MODEL              default glm-5.3
 //   SOPE_BASE_URL           any OpenAI-compatible endpoint
 //   SOPE_COMPACT_THRESHOLD  compact the history past this many tokens (0: never)
+//   SOPE_MOUSE              0 leaves the mouse to the terminal (default: the TUI
+//                           takes it for wheel scrolling and drag-to-copy)
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -26,6 +29,7 @@ export interface Config {
   baseUrl: string;
   apiKey?: string;
   compactThreshold: number;
+  mouse: boolean;
 }
 
 export type Overrides = Partial<Pick<Config, "provider" | "model" | "baseUrl">>;
@@ -73,6 +77,7 @@ export function loadConfig(
     baseUrl: overrides.baseUrl || get("SOPE_BASE_URL") || DEFAULT_BASE_URL,
     apiKey,
     compactThreshold: Number.isFinite(threshold) && threshold >= 0 ? threshold : DEFAULT_COMPACT_THRESHOLD,
+    mouse: !/^(0|false|off|no)$/i.test(get("SOPE_MOUSE") ?? ""),
   };
 }
 

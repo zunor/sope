@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

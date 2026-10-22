@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Colors are chosen to read on both dark and light backgrounds; the UI keeps
 // the terminal's own foreground and background for body text.
 

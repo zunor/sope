@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 #include "sope_internal.h"
 
 #include <stdio.h>

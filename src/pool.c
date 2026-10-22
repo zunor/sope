@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * pool.c - the shared worker pool that runs every agent.
  *

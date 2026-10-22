@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Executes the agent's tool calls (from the agent and its subagents): checks
 // permission for tools that change things, runs the tool with an
 // AbortSignal, and hands the result back through sope_tool_result. Shared by

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // The input line: a multi-line text buffer with a grapheme-aware cursor,
 // word motions (dictionary-based for CJK via Intl.Segmenter) and history.
 

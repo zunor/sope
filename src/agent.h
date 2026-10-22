@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * agent.h - the agent object, shared by agent.c (public API, events,
  * lifecycle) and loop.c (turn execution, subagents). Private.

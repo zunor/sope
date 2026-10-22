@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * provider_mock.c - a deterministic stand-in for a model, for tests and
  * offline debugging. It reads the history like a real model and drives the

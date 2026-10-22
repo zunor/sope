@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // A small Markdown subset for assistant text, rendered to plain text plus
 // style runs so it can be wrapped like any other text: headings, bullet and
 // quote lines, fenced code blocks, **bold** and `inline code`. Anything else

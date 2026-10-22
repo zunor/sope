@@ -42,7 +42,8 @@ sope-0.1.0-darwin-arm64/
   bin/sope            单文件可执行程序（Bun 运行时 + TUI + 内嵌 libsope）
   lib/libsope.*       共享库（只导出 sope_*）和静态库
   include/sope.h
-  docs/  README.md  CHANGELOG.md
+  docs/  README.md  CHANGELOG.md  LICENSE
+  licenses/           bundled 模式下 curl 和 mbedTLS 的许可证
   install.sh          安装 sope 到 ~/.local/bin；--lib 同时安装库和头文件
 ```
 
@@ -61,6 +62,18 @@ sope-0.1.0-darwin-arm64/
 
 `bin/sope` 约 58 MB，其中绝大部分是 Bun 运行时，libsope 本身不到 100 KB（bundled 模式约 1.1 MB）。如果以后要更小，可以把 TUI 用 C 或 Zig 重写后直接静态链接 libsope，ABI 不需要任何改动。
 
+## 许可证
+
+sope 使用 MIT 许可证，全文在 `LICENSE`。每个源文件第一行是简写的 SPDX 标识：
+
+```c
+/* SPDX-License-Identifier: MIT */
+```
+
+这是 Linux 内核、curl 等项目通用的写法，工具（如 `reuse`、GitHub）能识别它。`include/sope.h` 还多一行版权声明，因为嵌入方常常只拷贝这一个头文件。
+
+bundled 模式把 curl（curl 许可证，MIT 风格）和 mbedTLS（Apache-2.0）编进了 libsope，发布包会在 `licenses/` 里附上它们的许可证全文，这是这两个许可证的要求。
+
 ## 发布步骤
 
 ```sh
@@ -75,6 +88,5 @@ dist/sope-0.1.0-darwin-arm64/install.sh # 本机安装
 
 ## 尚未决定的事
 
-- **许可证**：仓库还没有 LICENSE。对外分发前需要选定；如果用 bundled 模式，还要在包里附上 curl 和 mbedTLS 的许可证文本（curl 许可证，以及 Apache-2.0 或 GPL-2.0+）。
 - **macOS 签名与公证**：目前只有 ad-hoc 签名。通过浏览器下载的包会被 Gatekeeper 拦截，`install.sh` 会去掉隔离属性；正式分发应使用 Developer ID 签名并公证。
 - **Windows**：fd、线程池和 HTTP 层都还没有 Windows 实现。

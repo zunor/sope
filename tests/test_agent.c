@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /* test_agent.c - behavioural tests for the public ABI, driven by the mock provider. */
 #define _POSIX_C_SOURCE 200809L
 

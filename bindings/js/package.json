@@ -1,6 +1,7 @@
 {
   "name": "sope",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "license": "MIT",
   "description": "Bun bindings for the sope C ABI",
   "type": "module",
   "main": "src/index.ts",

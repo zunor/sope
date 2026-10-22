@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // A grid of terminal cells. Each cell holds one grapheme plus its colors and
 // attributes. A wide grapheme occupies its cell and the next one, which
 // holds "" (a continuation cell).

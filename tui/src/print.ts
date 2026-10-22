@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Print mode (sope -p): one turn without the TUI. The answer streams to
 // stdout; tool activity and errors go to stderr, so the output can be piped.
 // Tools that change things are denied unless --allow-all.

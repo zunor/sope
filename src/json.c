@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * json.c - a small DOM-style JSON parser.
  *

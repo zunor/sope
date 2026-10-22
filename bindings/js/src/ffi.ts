@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Raw symbol table for libsope. Keep in sync with include/sope.h.
 // size_t is declared as u64: only 64-bit targets are supported for now.
 //

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Terminal column widths for graphemes.
 //
 // WIDE covers East Asian Wide/Fullwidth (Unicode 15 EastAsianWidth.txt) plus

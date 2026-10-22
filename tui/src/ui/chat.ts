@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // The conversation transcript: a list of messages rendered into wrapped,
 // styled lines with a one-glyph gutter, scrollable from the bottom.
 
@@ -203,6 +204,7 @@ export class ChatView {
   #scroll = 0; // rows scrolled up from the bottom; 0 follows new output
   #maxScroll = 0;
   #height = 0;
+  #lastLayout = { lines: 0, width: 0 };
   showThinking = false;
 
   add(m: Omit<Message, "id" | "version">): Message {
@@ -246,6 +248,9 @@ export class ChatView {
       for (const line of this.#linesFor(m, contentWidth)) all.push({ line, msg: m });
     }
 
+    // Scrolled up, the view stays on the same text while new output arrives below.
+    if (this.#scroll > 0 && this.#lastLayout.width === contentWidth) this.#scroll += all.length - this.#lastLayout.lines;
+    this.#lastLayout = { lines: all.length, width: contentWidth };
     this.#height = r.h;
     this.#maxScroll = Math.max(0, all.length - r.h);
     this.#scroll = Math.min(this.#scroll, this.#maxScroll);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Typed, idiomatic wrapper over the sope C ABI. See docs/abi.md for semantics.
 import { toArrayBuffer, type Pointer } from "bun:ffi";
 import { C } from "./ffi";

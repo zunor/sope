@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * http.c - non-blocking HTTP for providers, on libcurl's multi interface.
  *
