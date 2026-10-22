@@ -25,9 +25,10 @@ typedef struct ev_node {
     size_t data_len;
 } ev_node;
 
-typedef struct msg_node { /* queued user input, one per turn */
+typedef struct msg_node { /* queued input, one per turn */
     struct msg_node *next;
     uint64_t turn_id;
+    int compact; /* sope_compact: text holds optional instructions */
     char *text;
     size_t len;
 } msg_node;
@@ -69,7 +70,7 @@ typedef struct pending_call {
     size_t len;
 } pending_call;
 
-typedef enum { PHASE_START, PHASE_CALL, PHASE_TOOLS } turn_phase;
+typedef enum { PHASE_START, PHASE_CALL, PHASE_TOOLS, PHASE_COMPACT } turn_phase;
 
 typedef struct turn_state {
     int active;
@@ -78,11 +79,14 @@ typedef struct turn_state {
     uint64_t round;
     int32_t max_rounds;
     const sope_provider *provider;
-    sope_call *call;     /* current model call, PHASE_CALL only */
+    sope_call *call;     /* current model call, PHASE_CALL and PHASE_COMPACT */
     sope_message *asst;  /* assistant message of the last call, PHASE_TOOLS only */
     char *system;
     sope_tool_spec *specs; /* snapshot of offered tools for this turn; strings owned */
     size_t n_specs;
+    uint64_t compact_threshold; /* option compact.threshold; 0: never compact automatically */
+    int compact_tried;          /* compaction already ran (or failed) before this round */
+    sope_message *held;         /* the turn's user message, kept out of a compaction at turn start */
 } turn_state;
 
 struct sope_agent {
@@ -120,6 +124,7 @@ struct sope_agent {
     /* ---- owned by the running task, no lock ---- */
     turn_state turn;
     sope_history history;
+    uint64_t context_tokens; /* size of the history as of the last model call */
     int turns_finished;
     int32_t last_stop;
 };

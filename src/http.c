@@ -11,6 +11,9 @@
  * owner's release marks it cancelled and clears `wake` under the transfer's
  * lock, so the task is never woken after release returns. Lock order:
  * IO.mu, then a transfer's mu, then the pool lock (via sope__task_wake).
+ *
+ * With SOPE_CURL=bundled, curl uses mbedTLS, which has no access to the
+ * system trust store; we locate the platform's CA bundle file instead.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -28,9 +31,9 @@ int sope__http_available(void)
 }
 
 sope_http *sope__http_post(const char *url, const char *const *headers, size_t nheaders, const char *body,
-                           size_t body_len, sope_task *wake)
+                           size_t body_len, const char *ca_file, sope_task *wake)
 {
-    (void)url, (void)headers, (void)nheaders, (void)body, (void)body_len, (void)wake;
+    (void)url, (void)headers, (void)nheaders, (void)body, (void)body_len, (void)ca_file, (void)wake;
     sope__set_error(SOPE_ERROR, "sope was built without libcurl");
     return NULL;
 }
@@ -89,9 +92,36 @@ static struct {
 static pthread_once_t global_once = PTHREAD_ONCE_INIT;
 static int global_ok;
 
+#ifdef SOPE_CURL_BUNDLED
+#include <unistd.h>
+
+static const char *default_ca_file;
+
+/* SSL_CERT_FILE, else the first well-known bundle that exists. */
+static const char *find_ca_file(void)
+{
+    static const char *const known[] = {
+        "/etc/ssl/cert.pem",                                  /* macOS, Alpine, BSDs */
+        "/etc/ssl/certs/ca-certificates.crt",                 /* Debian, Ubuntu, Arch */
+        "/etc/pki/tls/certs/ca-bundle.crt",                   /* Fedora, RHEL */
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",  /* RHEL 7+ */
+        "/etc/ssl/ca-bundle.pem",                             /* openSUSE */
+    };
+    const char *env = getenv("SSL_CERT_FILE");
+    size_t i;
+    if (env && *env) return env;
+    for (i = 0; i < sizeof known / sizeof known[0]; i++)
+        if (access(known[i], R_OK) == 0) return known[i];
+    return NULL;
+}
+#endif
+
 static void global_init(void)
 {
     global_ok = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
+#ifdef SOPE_CURL_BUNDLED
+    default_ca_file = find_ca_file();
+#endif
 }
 
 int sope__http_available(void)
@@ -234,7 +264,7 @@ static int ensure_started_locked(void)
 }
 
 sope_http *sope__http_post(const char *url, const char *const *headers, size_t nheaders, const char *body,
-                           size_t body_len, sope_task *wake)
+                           size_t body_len, const char *ca_file, sope_task *wake)
 {
     sope_http *h;
     size_t i;
@@ -280,6 +310,10 @@ sope_http *sope__http_post(const char *url, const char *const *headers, size_t n
     curl_easy_setopt(h->easy, CURLOPT_LOW_SPEED_LIMIT, 1L); /* abort a stream silent for 5 minutes */
     curl_easy_setopt(h->easy, CURLOPT_LOW_SPEED_TIME, 300L);
     curl_easy_setopt(h->easy, CURLOPT_USERAGENT, "sope/" SOPE_VERSION_STRING);
+#ifdef SOPE_CURL_BUNDLED
+    if (!ca_file) ca_file = default_ca_file;
+#endif
+    if (ca_file) curl_easy_setopt(h->easy, CURLOPT_CAINFO, ca_file); /* curl copies it */
 
     pthread_mutex_lock(&IO.mu);
     if (!ensure_started_locked()) {

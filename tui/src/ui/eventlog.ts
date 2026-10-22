@@ -21,6 +21,7 @@ const KIND_COLORS: Record<string, number> = {
   usage: palette.faint,
   subagent_start: palette.accent,
   subagent_end: palette.accent,
+  compact: palette.accent,
   tool_call: palette.tool,
   turn_end: palette.accent,
   error: palette.error,
@@ -57,6 +58,8 @@ function describe(ev: SopeEvent): string {
       return `${who} #${ev.callId} ${ev.subagentType} ${ev.input}`;
     case "subagent_end":
       return `${who} #${ev.callId} ${ev.stopReason} ${JSON.stringify(ev.result)}`;
+    case "compact":
+      return `${who} ${ev.trigger} ${JSON.stringify(ev.summary)}`;
   }
 }
 

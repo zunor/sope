@@ -31,6 +31,9 @@ typedef struct {
     double subs_done_at; /* when the last subagent ended */
     int32_t stop;
     uint64_t last_call_id;
+    int compacts;
+    char compact_kind[16];
+    char summary[2048];
 } turn_log;
 
 static void append(char *buf, size_t *len, size_t cap, const char *s, size_t n)
@@ -105,6 +108,11 @@ static int drain_turn(sope_agent_t *a, turn_log *log, int answer_tools)
             break;
         case SOPE_EVENT_USAGE:
             log->usage++;
+            break;
+        case SOPE_EVENT_COMPACT:
+            log->compacts++;
+            snprintf(log->compact_kind, sizeof log->compact_kind, "%.*s", (int)ev.name_len, ev.name);
+            snprintf(log->summary, sizeof log->summary, "%.*s", (int)ev.data_len, ev.data);
             break;
         case SOPE_EVENT_ERROR:
             if (!ev.agent_id) log->errors++;
@@ -479,6 +487,102 @@ static void *concurrent_worker(void *arg)
     return NULL;
 }
 
+/* ---- compaction -------------------------------------------------------- */
+
+static void send_and_drain(sope_agent_t *a, const char *text, turn_log *log)
+{
+    memset(log, 0, sizeof *log);
+    CHECK(sope_send(a, text, strlen(text), NULL) == SOPE_OK);
+    CHECK(drain_turn(a, log, 1) == 0);
+}
+
+static void test_manual_compact(void)
+{
+    sope_agent_t *a = new_agent("0");
+    turn_log log;
+
+    send_and_drain(a, "first", &log);
+    send_and_drain(a, "second", &log);
+    memset(&log, 0, sizeof log);
+    CHECK(sope_compact(a, "keep it short", 13, NULL) == SOPE_OK);
+    CHECK(drain_turn(a, &log, 0) == 0);
+    CHECK(log.stop == SOPE_STOP_END_TURN);
+    CHECK(log.compacts == 1 && strcmp(log.compact_kind, "manual") == 0);
+    CHECK(strstr(log.summary, "- first") && strstr(log.summary, "- second"));
+    CHECK(log.len == 0);   /* the summary never streams as assistant text */
+    CHECK(log.usage == 1); /* but its tokens are reported */
+
+    send_and_drain(a, "!history", &log);
+    CHECK(strstr(log.text, "history: 2 messages") != NULL); /* summary, !history */
+
+    /* Nothing to compact: the turn just ends. */
+    CHECK(sope_agent_reset(a) == SOPE_OK);
+    memset(&log, 0, sizeof log);
+    CHECK(sope_compact(a, NULL, 0, NULL) == SOPE_OK);
+    CHECK(drain_turn(a, &log, 0) == 0);
+    CHECK(log.stop == SOPE_STOP_END_TURN && log.compacts == 0);
+    sope_agent_free(a);
+}
+
+static void test_auto_compact_at_turn_start(void)
+{
+    sope_agent_t *a = new_agent("0");
+    turn_log log;
+
+    /* The mock reports 10 input tokens per history message plus output/4. */
+    CHECK(sope_agent_set_option(a, "compact.threshold", "25") == SOPE_OK);
+    send_and_drain(a, "one", &log);
+    CHECK(log.compacts == 0);
+    send_and_drain(a, "!history", &log);
+    CHECK(log.compacts == 1 && strcmp(log.compact_kind, "auto") == 0);
+    CHECK(strstr(log.summary, "- one") != NULL);
+    CHECK(strstr(log.summary, "!history") == NULL); /* the new request is kept verbatim */
+    CHECK(strstr(log.text, "history: 2 messages") != NULL);
+    CHECK(log.stop == SOPE_STOP_END_TURN);
+    sope_agent_free(a);
+}
+
+static void test_auto_compact_mid_turn(void)
+{
+    sope_agent_t *a = new_agent("0");
+    turn_log log;
+
+    /* Round 1 reports 10 + 4 tokens, so the history is compacted before round 2. */
+    CHECK(sope_agent_set_option(a, "compact.threshold", "12") == SOPE_OK);
+    send_and_drain(a, "!echo x", &log);
+    CHECK(log.tool_calls == 1);
+    CHECK(log.compacts == 1);
+    CHECK(strstr(log.summary, "- !echo x") != NULL);
+    CHECK(strstr(log.text, "You said: This conversation was compacted") != NULL);
+    CHECK(strstr(log.text, "Continue with the current task") != NULL);
+    CHECK(log.stop == SOPE_STOP_END_TURN);
+    sope_agent_free(a);
+}
+
+static void test_cancel_compaction(void)
+{
+    sope_agent_t *a = new_agent("0");
+    turn_log log;
+
+    send_and_drain(a, "one", &log);
+    CHECK(sope_agent_set_option(a, "mock.delay_ms", "50") == SOPE_OK);
+    memset(&log, 0, sizeof log);
+    CHECK(sope_compact(a, NULL, 0, NULL) == SOPE_OK);
+    {
+        sope_event_t ev;
+        do CHECK(next_event(a, &ev) == 1);
+        while (ev.type != SOPE_EVENT_TURN_START);
+        CHECK(sope_cancel(a) == SOPE_OK);
+    }
+    CHECK(drain_turn(a, &log, 0) == 0);
+    CHECK(log.stop == SOPE_STOP_CANCELLED && log.compacts == 0);
+
+    CHECK(sope_agent_set_option(a, "mock.delay_ms", "0") == SOPE_OK);
+    send_and_drain(a, "!history", &log);
+    CHECK(strstr(log.text, "history: 3 messages") != NULL); /* untouched */
+    sope_agent_free(a);
+}
+
 static void test_concurrent_agents(void)
 {
     pthread_t threads[THREADS];
@@ -557,6 +661,10 @@ int main(void)
     test_cancel_reaches_subagents();
     test_custom_subagent();
     test_free_with_running_subagents();
+    test_manual_compact();
+    test_auto_compact_at_turn_start();
+    test_auto_compact_mid_turn();
+    test_cancel_compaction();
     test_concurrent_agents();
     test_pool_config();
     test_many_agents_few_threads();

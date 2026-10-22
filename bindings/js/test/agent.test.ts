@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { Agent, SopeError, ErrorCode, version, type SopeEvent } from "../src";
+import { abiCompatible, Agent, SopeError, ErrorCode, version, type SopeEvent } from "../src";
 
 let agent: Agent | null = null;
 
@@ -22,8 +22,29 @@ function drainTurn(a: Agent, onToolCall?: (e: Extract<SopeEvent, { type: "tool_c
 const text = (events: SopeEvent[]) =>
   events.map((e) => (e.type === "text_delta" ? e.text : "")).join("");
 
-test("version matches the header", () => {
-  expect(version()).toBe("0.2.0");
+test("version matches the header and the package", async () => {
+  const header = await Bun.file(new URL("../../../include/sope.h", import.meta.url)).text();
+  expect(version()).toBe(header.match(/SOPE_VERSION_STRING "([^"]+)"/)![1]!);
+  expect(version()).toBe((await Bun.file(new URL("../package.json", import.meta.url)).json()).version);
+});
+
+test("checks ABI compatibility", () => {
+  const v = (major: number, minor: number, patch = 0) => (major << 16) | (minor << 8) | patch;
+  expect(abiCompatible(v(0, 1, 7))).toBe(true);
+  expect(abiCompatible(v(0, 2))).toBe(false); // 0.x: minor versions may break the ABI
+  expect(abiCompatible(v(1, 1))).toBe(false);
+});
+
+test("compacts the history", () => {
+  agent = Agent.create({ "mock.delay_ms": "0" });
+  agent.send("remember the number 42");
+  drainTurn(agent);
+  const turnId = agent.compact("focus on numbers");
+  const events = drainTurn(agent);
+  const compact = events.find((e) => e.type === "compact");
+  expect(compact).toMatchObject({ type: "compact", turnId, trigger: "manual" });
+  expect(compact && "summary" in compact && compact.summary).toContain("remember the number 42");
+  expect(text(events)).toBe("");
 });
 
 test("streams a turn, including multi-byte text", () => {

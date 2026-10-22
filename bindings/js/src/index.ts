@@ -2,6 +2,8 @@
 import { toArrayBuffer, type Pointer } from "bun:ffi";
 import { C } from "./ffi";
 
+export { ABI, abiCompatible, libraryPath, useLibrary } from "./ffi";
+
 export const ErrorCode = {
   Error: -1,
   Invalid: -2,
@@ -39,6 +41,8 @@ export type SopeEvent =
   | ({ type: "usage"; inputTokens: number; outputTokens: number } & Origin)
   | ({ type: "subagent_start"; callId: number; subagentType: string; input: string } & Origin)
   | ({ type: "subagent_end"; callId: number; stopReason: StopReason; result: string } & Origin)
+  /** The history was replaced by `summary`: automatically (compact.threshold) or by compact(). */
+  | ({ type: "compact"; trigger: "auto" | "manual"; summary: string } & Origin)
   /** Synthesized when sope_poll returns SOPE_ECLOSED: no further events will arrive. */
   | { type: "closed" };
 
@@ -78,7 +82,7 @@ const str = (s: { toString(): string } | null) => (s ? s.toString() : "");
 
 function check(rc: number, what: string): number {
   if (rc >= 0) return rc;
-  const detail = str(C.sope_last_error()) || str(C.sope_strerror(rc));
+  const detail = str(C().sope_last_error()) || str(C().sope_strerror(rc));
   throw new SopeError(rc, `${what}: ${detail}`);
 }
 
@@ -88,21 +92,21 @@ function readString(ptr: number, len: number): string {
 }
 
 export function version(): string {
-  return str(C.sope_version());
+  return str(C().sope_version());
 }
 
 export function versionNumber(): number {
-  return C.sope_version_number();
+  return C().sope_version_number();
 }
 
 /** Sizes the shared worker pool (0 = default). Only before the first agent exists. */
 export function setThreads(n: number): void {
-  check(C.sope_set_threads(n), "sope_set_threads");
+  check(C().sope_set_threads(n), "sope_set_threads");
 }
 
 /** Stops the worker pool. Every agent must have been freed. */
 export function shutdown(): void {
-  check(C.sope_shutdown(), "sope_shutdown");
+  check(C().sope_shutdown(), "sope_shutdown");
 }
 
 export class Agent {
@@ -119,7 +123,7 @@ export class Agent {
 
   static create(options: Record<string, string> = {}): Agent {
     const out = new BigUint64Array(1);
-    check(C.sope_agent_new(out), "sope_agent_new");
+    check(C().sope_agent_new(out), "sope_agent_new");
     const agent = new Agent(Number(out[0]) as Pointer, true);
     for (const [key, value] of Object.entries(options)) agent.setOption(key, value);
     return agent;
@@ -135,13 +139,13 @@ export class Agent {
   }
 
   setOption(key: string, value: string | null): void {
-    check(C.sope_agent_set_option(this.#ptr(), cstr(key), value === null ? null : cstr(value)), "sope_agent_set_option");
+    check(C().sope_agent_set_option(this.#ptr(), cstr(key), value === null ? null : cstr(value)), "sope_agent_set_option");
   }
 
   registerTool(tool: ToolSpec): void {
     const schema = typeof tool.inputSchema === "string" ? tool.inputSchema : JSON.stringify(tool.inputSchema ?? {});
     check(
-      C.sope_tool_register(this.#ptr(), cstr(tool.name), cstr(tool.description ?? ""), cstr(schema)),
+      C().sope_tool_register(this.#ptr(), cstr(tool.name), cstr(tool.description ?? ""), cstr(schema)),
       "sope_tool_register",
     );
   }
@@ -150,14 +154,22 @@ export class Agent {
   send(text: string): number {
     const bytes = encoder.encode(text);
     const out = new BigUint64Array(1);
-    check(C.sope_send(this.#ptr(), bytes.length ? bytes : EMPTY, bytes.length, out), "sope_send");
+    check(C().sope_send(this.#ptr(), bytes.length ? bytes : EMPTY, bytes.length, out), "sope_send");
+    return Number(out[0]);
+  }
+
+  /** Queues a compaction turn (see sope_compact) and returns its turn id. */
+  compact(instructions = ""): number {
+    const bytes = encoder.encode(instructions);
+    const out = new BigUint64Array(1);
+    check(C().sope_compact(this.#ptr(), bytes.length ? bytes : EMPTY, bytes.length, out), "sope_compact");
     return Number(out[0]);
   }
 
   toolResult(callId: number, content: string, isError = false): void {
     const bytes = encoder.encode(content);
     check(
-      C.sope_tool_result(this.#ptr(), callId, isError ? 1 : 0, bytes.length ? bytes : EMPTY, bytes.length),
+      C().sope_tool_result(this.#ptr(), callId, isError ? 1 : 0, bytes.length ? bytes : EMPTY, bytes.length),
       "sope_tool_result",
     );
   }
@@ -174,32 +186,32 @@ export class Agent {
         max_rounds: def.maxRounds,
       }),
     );
-    check(C.sope_subagent_register(this.#ptr(), json, json.length), "sope_subagent_register");
+    check(C().sope_subagent_register(this.#ptr(), json, json.length), "sope_subagent_register");
   }
 
   cancel(): void {
-    check(C.sope_cancel(this.#ptr()), "sope_cancel");
+    check(C().sope_cancel(this.#ptr()), "sope_cancel");
   }
 
   /** Forgets the conversation history from the next turn on. */
   reset(): void {
-    check(C.sope_agent_reset(this.#ptr()), "sope_agent_reset");
+    check(C().sope_agent_reset(this.#ptr()), "sope_agent_reset");
   }
 
   /** A file descriptor readable while events are pending (for poll/epoll/kqueue loops). Owned by the agent. */
   fd(): number {
-    return check(C.sope_agent_fd(this.#ptr()), "sope_agent_fd");
+    return check(C().sope_agent_fd(this.#ptr()), "sope_agent_fd");
   }
 
   close(): void {
-    check(C.sope_agent_close(this.#ptr()), "sope_agent_close");
+    check(C().sope_agent_close(this.#ptr()), "sope_agent_close");
   }
 
   /** Frees the native agent. No other call on it may be in flight, including a poll in another thread. */
   free(): void {
     if (!this.#handle) return;
     if (!this.#owned) throw new Error("sope: cannot free an attached agent");
-    C.sope_agent_free(this.#handle);
+    C().sope_agent_free(this.#handle);
     this.#handle = null;
   }
 
@@ -210,7 +222,7 @@ export class Agent {
   poll(timeoutMs = -1): SopeEvent | null {
     const v = this.#eventView;
     v.setUint32(0, EVENT_SIZE, true);
-    const rc = C.sope_poll(this.#ptr(), this.#eventBytes, timeoutMs);
+    const rc = C().sope_poll(this.#ptr(), this.#eventBytes, timeoutMs);
     if (rc === 0) return null;
     if (rc === ErrorCode.Closed) return { type: "closed" };
     check(rc, "sope_poll");
@@ -246,6 +258,8 @@ export class Agent {
         return { type: "subagent_start", ...origin, callId, subagentType: name(), input: data() };
       case 10:
         return { type: "subagent_end", ...origin, callId, stopReason, result: data() };
+      case 11:
+        return { type: "compact", ...origin, trigger: name() === "manual" ? "manual" : "auto", summary: data() };
       default:
         // Unknown event type from a newer library: skip it rather than fail.
         return this.poll(0);

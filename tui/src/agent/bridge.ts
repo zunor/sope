@@ -1,7 +1,7 @@
 // Owns the native agent on the UI thread. Calls into libsope that never block
 // (send, cancel, tool results) happen here; polling happens in poller.ts.
 
-import { Agent, type SopeEvent } from "sope";
+import { Agent, libraryPath, type SopeEvent } from "sope";
 
 export class AgentBridge {
   readonly agent: Agent;
@@ -12,12 +12,22 @@ export class AgentBridge {
     this.agent = Agent.create(options);
     let resolveClosed!: () => void;
     this.#closed = new Promise((resolve) => (resolveClosed = resolve));
-    this.#worker = new Worker(new URL("./poller.ts", import.meta.url).href);
+    // From source the worker resolves relative to this file. A compiled
+    // executable resolves plain specifiers against the build's --root, the
+    // repo root (scripts/release.sh).
+    this.#worker = import.meta.url.includes("$bunfs")
+      ? new Worker("./tui/src/agent/poller.ts")
+      : new Worker(new URL("./poller.ts", import.meta.url).href);
+    this.#worker.onerror = (e) => {
+      // Without the poller nothing would ever happen: fail loudly.
+      console.error(`sope: event poller failed: ${e.message}`);
+      process.exit(70);
+    };
     this.#worker.onmessage = (msg: MessageEvent<SopeEvent[]>) => {
       if (msg.data.at(-1)?.type === "closed") resolveClosed();
       onEvents(msg.data);
     };
-    this.#worker.postMessage({ handle: this.agent.handle });
+    this.#worker.postMessage({ handle: this.agent.handle, library: libraryPath() });
   }
 
   /** Closes the agent, waits for the poller to drain it, then frees it. */

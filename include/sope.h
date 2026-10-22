@@ -48,14 +48,16 @@ extern "C" {
 /* ------------------------------------------------------------------------ */
 
 #define SOPE_VERSION_MAJOR 0
-#define SOPE_VERSION_MINOR 2
+#define SOPE_VERSION_MINOR 1
 #define SOPE_VERSION_PATCH 0
-#define SOPE_VERSION_STRING "0.2.0"
+#define SOPE_VERSION_STRING "0.1.0"
 #define SOPE_VERSION_NUMBER \
     ((SOPE_VERSION_MAJOR << 16) | (SOPE_VERSION_MINOR << 8) | SOPE_VERSION_PATCH)
 
 /* Version of the library actually loaded, which may differ from the header
- * the caller was compiled against. */
+ * the caller was compiled against. Compatibility follows semver on the ABI:
+ * a host built against X.Y works with any loaded X.Z where Z >= Y (while
+ * X is 0, Y must match exactly). */
 SOPE_API uint32_t sope_version_number(void);
 SOPE_API const char *sope_version(void);
 
@@ -114,9 +116,14 @@ SOPE_API int sope_agent_new(sope_agent_t **out);
  *   system            system prompt (a built-in default is used if unset)
  *   max_rounds        model calls allowed per turn (default 32)
  *   subagents         "off" hides the built-in `agent` tool
+ *   compact.threshold compact the history automatically once a model call
+ *                     reports this many tokens (input + output); unset or
+ *                     0 never compacts on its own (see sope_compact)
  *   openai.base_url   default https://api.openai.com/v1
  *   openai.api_key    sent as a Bearer token
  *   openai.max_tokens optional output limit
+ *   tls.ca_file       PEM file of trusted CAs, for builds with bundled curl
+ *                     (default: $SSL_CERT_FILE, else the system bundle)
  *   mock.delay_ms     delay between streamed chunks of the mock provider */
 SOPE_API int sope_agent_set_option(sope_agent_t *agent, const char *key, const char *value);
 
@@ -156,6 +163,13 @@ SOPE_API int sope_tool_result(sope_agent_t *agent, uint64_t call_id, int is_erro
  * SOPE_EVENT_TURN_END. */
 SOPE_API int sope_cancel(sope_agent_t *agent);
 
+/* Queues a compaction turn: the model summarizes the conversation and the
+ * summary replaces the history, freeing context for what comes next. The
+ * turn emits SOPE_EVENT_COMPACT (and USAGE), never TEXT_DELTA. instructions
+ * (optional, may be NULL with len 0) steer the summary, e.g. "keep the
+ * test failures". Runs in order with sends, like a turn. */
+SOPE_API int sope_compact(sope_agent_t *agent, const char *instructions, size_t len, uint64_t *turn_id_out);
+
 /* Forgets the conversation history. Takes effect when the next turn starts. */
 SOPE_API int sope_agent_reset(sope_agent_t *agent);
 
@@ -191,6 +205,7 @@ SOPE_API int sope_agent_fd(sope_agent_t *agent);
 #define SOPE_EVENT_USAGE          8  /* data: {"input_tokens":N,"output_tokens":N} for one model call */
 #define SOPE_EVENT_SUBAGENT_START 9  /* call_id, name: subagent type, data: JSON input (description, prompt) */
 #define SOPE_EVENT_SUBAGENT_END   10 /* call_id, code: SOPE_STOP_*, data: the subagent's final report */
+#define SOPE_EVENT_COMPACT        11 /* name: "auto" or "manual", data: the summary now standing in for the history */
 
 #define SOPE_STOP_END_TURN  0
 #define SOPE_STOP_CANCELLED 1

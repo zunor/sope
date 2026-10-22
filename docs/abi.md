@@ -2,7 +2,11 @@
 
 `include/sope.h` 是 ABI 的唯一事实来源。本文解释头文件注释里放不下的东西：线程模型、生命周期、回合与子 agent 语义、所有权，以及给语言绑定作者的说明。
 
-> 当前版本 0.2.0。1.0 之前 ABI 可能有破坏性变更，每次变更都会改 `SOPE_VERSION_MINOR`。0.2 相对 0.1 的破坏性变更：`sope_event_t` 新增 `agent_id` 字段（64 → 72 字节）。
+> 当前版本 0.1.0。兼容规则（`sope_version_number()` 返回运行时实际加载的版本）：
+> - 1.0 之后按语义化版本：针对 X.Y 编译的宿主，可以使用任何 X.Z（Z ≥ Y）的库；破坏性变更只出现在主版本号。
+> - 1.0 之前，次版本号变化就可能破坏 ABI：宿主要求主、次版本号都相同，修订号可以不同。
+>
+> 绑定层应该在加载库时检查版本（JS 绑定已经这样做）。发布与版本策略见 [release.md](release.md)。
 
 ## 1. 基本约定
 
@@ -93,6 +97,7 @@ sope_agent_close ─▶ 继续取事件直到 SOPE_ECLOSED ─▶ sope_agent_fre
 - 每个回合最多调用模型 `max_rounds` 次（默认 32），超出则以 `ERROR` + `TURN_END(error)` 结束。
 - 模型调用了未提供的工具时，库直接以错误结果回给模型，不会打扰宿主。
 - 对话历史（用户消息、助手消息与工具调用、工具结果）由 agent 保存，跨回合累积。回合被取消时，没有结果的工具调用会补上 `cancelled` 结果，保证历史对模型 API 始终合法。
+- 历史过长时可以压缩，见第 5.1 节。
 
 库保证的不变式：
 
@@ -103,6 +108,19 @@ sope_agent_close ─▶ 继续取事件直到 SOPE_ECLOSED ─▶ sope_agent_fre
 5. 回合结束后，它未完成的工具调用全部失效；迟到的 `sope_tool_result` 返回 `SOPE_ENOTFOUND`。
 
 `sope_cancel` 只取消**正在运行**的回合（连同其子 agent），不影响排队的回合。
+
+### 5.1 历史压缩
+
+长对话会撑满模型的上下文窗口。压缩就是让模型把历史总结成一段摘要，再用这段摘要（作为一条用户消息）替换整个历史。
+
+- **自动**：设置选项 `compact.threshold`（token 数）。某次模型调用报告的 `input_tokens + output_tokens` 达到阈值后，下一次调用模型之前先压缩。
+  - 在回合开头触发时，压缩的是之前的历史，新的用户消息原样保留在摘要之后。
+  - 在回合中途触发时（例如工具循环很长），压缩全部历史，摘要末尾提示模型继续当前任务。
+  - 未设置或设为 0 时，库从不自行压缩。嵌入式库不应在宿主不知情时额外调用模型，所以默认关闭；`sope` 命令行默认阈值为 100000。
+- **手动**：`sope_compact(agent, instructions, len, &turn_id)` 排入一个压缩回合，和 `sope_send` 一样按顺序执行。`instructions` 可选，用来引导摘要，例如 "保留测试失败的细节"。历史为空时直接以 `end_turn` 结束。
+- 压缩调用本身不带工具，也不产生 `TEXT_DELTA` 和 `THINKING_DELTA`。它照常产生 `USAGE`（token 确实消耗了），完成后产生 `SOPE_EVENT_COMPACT`：`name` 是 `"auto"` 或 `"manual"`，`data` 是摘要全文。
+- 压缩失败时历史保持不变：手动压缩以 `TURN_END(error)` 结束；自动压缩产生 `ERROR` 事件后继续用完整历史调用模型。取消压缩同样不改动历史。
+- 模型看到的是一份纯文本对话记录，不是原始的消息结构。单个工具结果在记录中截断到 2000 字节，以免压缩请求本身超出上下文。提示词在 `src/compact.c`。
 
 ## 6. 子 agent
 
@@ -148,6 +166,7 @@ sope_subagent_register(agent, def, sizeof def - 1);
 | `USAGE` | 8 | `data`：`{"input_tokens":N,"output_tokens":N}`，每次模型调用一条 |
 | `SUBAGENT_START` | 9 | `call_id`，`name`：子 agent 类型，`data`：JSON 输入 |
 | `SUBAGENT_END` | 10 | `call_id`，`code`：`SOPE_STOP_*`，`data`：子 agent 的最终报告 |
+| `COMPACT` | 11 | `name`：`auto` / `manual`，`data`：替换了历史的摘要（见 5.1） |
 
 **宿主必须忽略未知的事件类型**，以便兼容新版本库。
 
@@ -181,16 +200,18 @@ sope_subagent_register(agent, def, sizeof def - 1);
 | `system` | 系统提示词 | 内置的简短提示词 |
 | `max_rounds` | 每个回合最多调用模型的次数 | `32` |
 | `subagents` | `off` 隐藏内置 `agent` 工具 | — |
+| `compact.threshold` | 自动压缩历史的 token 阈值（见 5.1），`0` 表示关闭 | 关闭 |
 | `openai.base_url` | 服务地址 | `https://api.openai.com/v1` |
 | `openai.api_key` | 以 Bearer token 发送 | — |
 | `openai.max_tokens` | 输出上限 | — |
+| `tls.ca_file` | 受信任 CA 的 PEM 文件，仅 bundled 构建需要（见第 11 节） | `$SSL_CERT_FILE`，否则系统证书文件 |
 | `mock.delay_ms` | mock 每块输出间隔 | `25` |
 
 ### openai provider
 
 调用 `POST {base_url}/chat/completions`（`stream: true`），兼容 OpenAI、GLM、DeepSeek、Qwen、vLLM 等。支持流式文本、`reasoning_content`（→ `THINKING_DELTA`）、按 `index` 拼装的并行工具调用、最后的 usage 块。连接失败、429、5xx 在**尚未有任何输出交给宿主时**自动重试（最多 3 次，退避 1s、2s），以 `LOG(warn)` 记录。
 
-网络依赖：libcurl（TLS 由 libcurl 所用的 TLS 库提供）。只有 `src/http.c` 接触 libcurl，见第 11 节。
+网络依赖：libcurl。只有 `src/http.c` 接触 libcurl，见第 11 节。
 
 ### mock provider
 
@@ -203,6 +224,7 @@ sope_subagent_register(agent, def, sizeof def - 1);
 | `!agent[:type] 任务1 \| 任务2 …` | 每个任务启动一个子 agent（并行） |
 | `!history` | 报告当前历史条数 |
 | `!panic` | 模型调用失败，回合以 `error` 结束 |
+| （压缩请求） | 回复一份列出所有用户消息的摘要 |
 
 ## 9. 最小示例
 
@@ -243,13 +265,30 @@ int main(void) {
 
 ## 11. 构建与依赖
 
-- CMake 选项 `SOPE_WITH_CURL`（默认 ON）：链接 libcurl，启用 `openai` provider。关闭后库零依赖，只有 `mock` 可用。
-- 当前链接系统自带的 libcurl（macOS 自带；Linux 安装 `libcurl4-openssl-dev` 等）。
-- 计划提供 `SOPE_CURL=bundled`：把 libcurl + TLS 库（如 mbedTLS）静态编进 `libsope`，符号隐藏，嵌入方只需一个库文件。由于只有 `src/http.c` 接触 libcurl，这只是构建层面的改动。
+CMake 选项 `SOPE_CURL` 决定 HTTP 实现：
+
+| 值 | 含义 | 适用 |
+|---|---|---|
+| `system`（默认） | 链接系统的 libcurl | macOS（libcurl 是系统自带的一部分，TLS 走系统钥匙串）；装了 `libcurl-dev` 的 Linux |
+| `bundled` | 构建时下载 curl 8.23.0 + mbedTLS 3.6.7（固定 SHA-256），静态编进 libsope，只开启 HTTP(S) | Linux 发布版；任何不想依赖系统 libcurl 的场合 |
+| `off` | 不带网络，零依赖，只有 `mock` provider | 测试、离线嵌入 |
+
+- 共享库只导出公开的 `sope_*` 函数（19 个）。内部符号（`sope__*`）和打包进来的 curl、mbedTLS 都是隐藏的，不会和宿主自己的 curl 或 OpenSSL 冲突。
+- bundled 模式额外生成 `libsope-bundled.a`：sope、curl、mbedTLS 合并成一个目标文件，只有 `sope_*` 是全局符号，可以直接静态链接（macOS 还需 `-framework SystemConfiguration -framework CoreFoundation -framework CoreServices`）。`system` 模式下的 `libsope.a` 需要宿主自己链接 `-lcurl`。
+- 离线构建：把 `SOPE_CURL_URL` / `SOPE_MBEDTLS_URL` 指向本地的源码包。
+
+**bundled 模式的证书。** mbedTLS 读不了 macOS 钥匙串和 Windows 证书库，只能读 PEM 证书文件。查找顺序：
+
+1. 选项 `tls.ca_file`
+2. 环境变量 `SSL_CERT_FILE`
+3. 系统证书文件：`/etc/ssl/cert.pem`（macOS、Alpine、BSD）、`/etc/ssl/certs/ca-certificates.crt`（Debian/Ubuntu）、`/etc/pki/tls/certs/ca-bundle.crt`（Fedora/RHEL）等
+
+在 Linux 上，公司根证书通常由管理员装进系统证书文件，所以能直接读到。在 macOS 上，只装在钥匙串里的公司证书或 HTTPS 代理证书读不到。这也是 macOS 发布版选用 `system` 模式的原因；确实要在 macOS 上用 bundled 时，导出证书后用 `tls.ca_file` 指定。
 
 ## 12. 已知限制与路线图
 
 - 事件队列无上限：宿主长期不取事件时内存会持续增长，后续会加背压。
 - 定时器基于 `CLOCK_REALTIME`，系统时间跳变会影响 mock 的输出节奏和重试退避。
 - fd 与线程实现目前只有 POSIX（macOS/Linux）；Windows 计划用 event handle。
-- 对话历史只在内存中，不做压缩/截断；长对话需要宿主适时 `sope_agent_reset`。
+- 对话历史只在内存中，不持久化；需要恢复会话的宿主目前只能自己保存消息并重新发送。
+- 压缩用的 token 数来自 provider 报告的 usage；不报告 usage 的服务不会触发自动压缩。

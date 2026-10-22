@@ -1,5 +1,6 @@
 {
   "name": "sope-workspace",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -11,7 +12,8 @@
     "test:native": "ctest --test-dir build --output-on-failure",
     "test": "bun test",
     "typecheck": "tsc --noEmit -p .",
-    "tui": "bun tui/src/main.ts"
+    "tui": "bun tui/src/main.ts",
+    "release": "bash scripts/release.sh"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",

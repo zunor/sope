@@ -9,6 +9,8 @@
  *   !history                   reports how many messages the history holds
  *   !panic                     fails the call
  *
+ * Asked to compact, it replies with a summary listing the user messages.
+ *
  * After tool results it reports them. Text streams in small chunks with
  * option mock.delay_ms between them (default 25).
  */
@@ -126,6 +128,18 @@ static void *mock_start(sope_call *c)
         free(v);
     }
 
+    if (sope__call_is_compaction(c)) { /* one line per user message of the transcript */
+        const char *p = last ? last->content : "", *end = p + (last ? last->content_len : 0);
+        sope__buf_appends(&s->text, "mock summary:");
+        while ((p = strstr(p, "\n[user]\n")) && p < end) {
+            const char *q;
+            p += 8;
+            q = memchr(p, '\n', (size_t)(end - p));
+            sope__buf_appends(&s->text, "\n- ");
+            sope__buf_append(&s->text, p, (size_t)((q ? q : end) - p));
+        }
+        return s;
+    }
     if (last && last->role == SOPE__MSG_TOOL) {
         plan_tool_results(c, s);
         return s;

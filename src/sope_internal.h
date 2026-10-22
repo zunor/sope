@@ -139,9 +139,10 @@ typedef struct sope_http sope_http;
 
 int sope__http_available(void);
 /* Starts a POST on the I/O thread. `wake` is woken whenever bytes arrive and
- * when the transfer ends. headers are "Name: value" strings. */
+ * when the transfer ends. headers are "Name: value" strings. ca_file: PEM
+ * bundle of trusted CAs, NULL for the default. */
 sope_http *sope__http_post(const char *url, const char *const *headers, size_t nheaders, const char *body,
-                           size_t body_len, sope_task *wake);
+                           size_t body_len, const char *ca_file, sope_task *wake);
 /* Moves received bytes to `out`. Returns 1 once the transfer is over; then
  * *status is the HTTP status (0 if none) and err holds a transport error
  * message (empty if none). */
@@ -232,6 +233,8 @@ int sope__call_has_tool(sope_call *c, const char *name);
 char *sope__call_option(sope_call *c, const char *key);
 sope_task *sope__call_task(sope_call *c);
 uint64_t sope__call_round(sope_call *c);
+/* The call summarizes the history for compaction (no tools, output hidden). */
+int sope__call_is_compaction(sope_call *c);
 
 /* Outputs. Text and thinking stream to the host immediately; tool uses are
  * collected and dispatched by the loop when the call is done. */
@@ -241,5 +244,16 @@ int sope__call_tool_use(sope_call *c, const char *id, const char *name, const ch
 void sope__call_usage(sope_call *c, uint64_t input_tokens, uint64_t output_tokens);
 void sope__call_log(sope_call *c, int level, const char *fmt, ...) SOPE_PRINTF(3, 4);
 void sope__call_error(sope_call *c, int code, const char *fmt, ...) SOPE_PRINTF(3, 4);
+
+/* ======================================================================== */
+/* compact.c                                                                 */
+/* ======================================================================== */
+
+extern const char sope__compact_system[];
+/* The request asking the model to summarize `h`, as one user message:
+ * instructions, optional extra instructions, then a transcript. NULL on OOM. */
+char *sope__compact_request(const sope_history *h, const char *extra, size_t extra_len, size_t *len);
+/* The user message that replaces the history. NULL on OOM. */
+char *sope__compact_summary(const char *summary, size_t n, int mid_turn, size_t *len);
 
 #endif /* SOPE_INTERNAL_H */

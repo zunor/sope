@@ -1,13 +1,14 @@
 // Worker thread: blocks in sope_poll so the UI thread never does, and
 // forwards events to the main thread in batches.
 
-import { Agent, type SopeEvent } from "sope";
+import { Agent, useLibrary, type SopeEvent } from "sope";
 
 declare const self: Worker;
 
 const MAX_BATCH = 512;
 
-self.onmessage = async (msg: MessageEvent<{ handle: number }>) => {
+self.onmessage = async (msg: MessageEvent<{ handle: number; library: string }>) => {
+  useLibrary(msg.data.library); // workers share no module state: open the main thread's file
   const agent = Agent.attach(msg.data.handle);
   for (;;) {
     const batch: SopeEvent[] = [];

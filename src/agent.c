@@ -414,25 +414,28 @@ int sope_subagent_register(sope_agent_t *a, const char *definition_json, size_t 
     return add_subagent(a, d);
 }
 
-int sope_send(sope_agent_t *a, const char *text, size_t len, uint64_t *turn_id_out)
+/* Queues one turn: a user message, or a compaction request with optional
+ * instructions. */
+static int enqueue(sope_agent_t *a, const char *fn, int compact, const char *text, size_t len, uint64_t *turn_id_out)
 {
     msg_node *m;
 
-    if (!a || (!text && len)) return sope__set_error(SOPE_EINVAL, "sope_send: invalid argument");
+    if (!a || (!text && len)) return sope__set_error(SOPE_EINVAL, "%s: invalid argument", fn);
 
     m = calloc(1, sizeof *m);
     if (!m || !(m->text = sope__strndup(text ? text : "", len))) {
         free(m);
-        return sope__set_error(SOPE_ENOMEM, "sope_send: out of memory");
+        return sope__set_error(SOPE_ENOMEM, "%s: out of memory", fn);
     }
     m->len = len;
+    m->compact = compact;
 
     pthread_mutex_lock(a->mu);
     if (a->closing) {
         pthread_mutex_unlock(a->mu);
         free(m->text);
         free(m);
-        return sope__set_error(SOPE_ECLOSED, "sope_send: agent is closed");
+        return sope__set_error(SOPE_ECLOSED, "%s: agent is closed", fn);
     }
     m->turn_id = ++a->next_turn_id;
     if (a->in_tail)
@@ -445,6 +448,16 @@ int sope_send(sope_agent_t *a, const char *text, size_t len, uint64_t *turn_id_o
 
     sope__task_wake(&a->task);
     return SOPE_OK;
+}
+
+int sope_send(sope_agent_t *a, const char *text, size_t len, uint64_t *turn_id_out)
+{
+    return enqueue(a, "sope_send", 0, text, len, turn_id_out);
+}
+
+int sope_compact(sope_agent_t *a, const char *instructions, size_t len, uint64_t *turn_id_out)
+{
+    return enqueue(a, "sope_compact", 1, instructions, len, turn_id_out);
 }
 
 int sope_tool_result(sope_agent_t *a, uint64_t call_id, int is_error, const char *content, size_t len)

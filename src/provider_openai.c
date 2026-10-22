@@ -26,6 +26,7 @@ typedef struct {
 
 typedef struct {
     sope_buf url, body, auth; /* kept for retries */
+    char *ca_file;            /* option tls.ca_file, or NULL */
     sope_http *http;          /* NULL while waiting to retry */
     int attempts;
     int emitted; /* output reached the host: retrying would duplicate it */
@@ -134,7 +135,7 @@ static sope_http *post(sope_call *c, oa_state *s)
     headers[n++] = "Accept: text/event-stream";
     if (s->auth.len) headers[n++] = s->auth.ptr;
     s->attempts++;
-    return sope__http_post(s->url.ptr, headers, n, s->body.ptr, s->body.len, sope__call_task(c));
+    return sope__http_post(s->url.ptr, headers, n, s->body.ptr, s->body.len, s->ca_file, sope__call_task(c));
 }
 
 static void oa_free(oa_state *s)
@@ -144,6 +145,7 @@ static void oa_free(oa_state *s)
     sope__buf_free(&s->url);
     sope__buf_free(&s->body);
     sope__buf_free(&s->auth);
+    free(s->ca_file);
     sope__buf_free(&s->in);
     for (i = 0; i < MAX_TOOL_CALLS; i++) {
         sope__buf_free(&s->calls[i].id);
@@ -181,6 +183,7 @@ static void *oa_start(sope_call *c)
     sope__buf_appends(&s->url, "/chat/completions");
     build_body(c, &s->body, model, max_tokens);
     if (key && *key) sope__buf_appendf(&s->auth, "Authorization: Bearer %s", key);
+    s->ca_file = sope__call_option(c, "tls.ca_file");
     if (s->url.oom || s->body.oom || s->auth.oom) {
         sope__call_error(c, SOPE_ENOMEM, "openai: out of memory");
         oa_free(s);
