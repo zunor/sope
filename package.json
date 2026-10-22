@@ -1,0 +1,20 @@
+{
+  "name": "sope-workspace",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "bindings/js",
+    "tui"
+  ],
+  "scripts": {
+    "build:native": "cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build",
+    "test:native": "ctest --test-dir build --output-on-failure",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p .",
+    "tui": "bun tui/src/main.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.6.0"
+  }
+}

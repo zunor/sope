@@ -1,0 +1,10 @@
+{
+  "name": "sope",
+  "version": "0.1.0",
+  "description": "Bun bindings for the sope C ABI",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

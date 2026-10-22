@@ -1,0 +1,12 @@
+build/
+build-*/
+node_modules/
+.DS_Store
+*.dylib
+*.so
+*.dll
+
+# local secrets
+.env
+.env.*
+!.env.example

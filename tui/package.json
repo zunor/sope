@@ -1,0 +1,12 @@
+{
+  "name": "sope-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "sope": "src/main.ts"
+  },
+  "dependencies": {
+    "sope": "workspace:*"
+  }
+}
