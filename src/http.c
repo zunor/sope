@@ -39,6 +39,18 @@ sope_http *sope__http_post(const char *url, const char *const *headers, size_t n
     return NULL;
 }
 
+sope_http *sope__http_get(const char *url, const char *ca_file, sope_task *wake)
+{
+    return sope__http_post(url, NULL, 0, NULL, 0, ca_file, wake);
+}
+
+void sope__http_info(sope_http *h, char *content_type, size_t ctlen, char *url, size_t urllen)
+{
+    (void)h;
+    if (ctlen) *content_type = '\0';
+    if (urllen) *url = '\0';
+}
+
 int sope__http_take(sope_http *h, sope_buf *out, long *status, char *err, size_t errlen)
 {
     (void)h, (void)out, (void)errlen;
@@ -78,6 +90,8 @@ struct sope_http {
     int done;
     long status;
     char err[CURL_ERROR_SIZE];
+    char *content_type;  /* GET: set when done */
+    char *effective_url; /* GET: after redirects, set when done */
 };
 
 static struct {
@@ -137,6 +151,8 @@ static void destroy(sope_http *h)
     curl_slist_free_all(h->headers);
     free(h->url);
     free(h->body);
+    free(h->content_type);
+    free(h->effective_url);
     sope__buf_free(&h->in);
     pthread_mutex_destroy(&h->mu);
     free(h);
@@ -172,9 +188,14 @@ static size_t on_data(char *ptr, size_t size, size_t nmemb, void *userdata)
 
 static void finished(sope_http *h, CURLcode result)
 {
+    char *ct = NULL, *url = NULL;
     pthread_mutex_lock(&h->mu);
     h->done = 1;
     curl_easy_getinfo(h->easy, CURLINFO_RESPONSE_CODE, &h->status);
+    curl_easy_getinfo(h->easy, CURLINFO_CONTENT_TYPE, &ct);
+    curl_easy_getinfo(h->easy, CURLINFO_EFFECTIVE_URL, &url);
+    if (ct) h->content_type = sope__strdup(ct);
+    if (url) h->effective_url = sope__strdup(url);
     if (result != CURLE_OK)
         snprintf(h->err, sizeof h->err, "%s", h->curl_err[0] ? h->curl_err : curl_easy_strerror(result));
     if (h->wake) sope__task_wake(h->wake);
@@ -264,8 +285,9 @@ static int ensure_started_locked(void)
     return 1;
 }
 
-sope_http *sope__http_post(const char *url, const char *const *headers, size_t nheaders, const char *body,
-                           size_t body_len, const char *ca_file, sope_task *wake)
+/* body == NULL: a GET that follows redirects. */
+static sope_http *start(const char *url, const char *const *headers, size_t nheaders, const char *body,
+                        size_t body_len, const char *ca_file, sope_task *wake)
 {
     sope_http *h;
     size_t i;
@@ -283,7 +305,7 @@ sope_http *sope__http_post(const char *url, const char *const *headers, size_t n
     h->refs = 2; /* owner + I/O thread */
     h->wake = wake;
     h->url = sope__strdup(url);
-    h->body = sope__strndup(body, body_len);
+    h->body = body ? sope__strndup(body, body_len) : NULL;
     h->body_len = body_len;
     h->easy = curl_easy_init();
     for (i = 0; i < nheaders; i++) {
@@ -291,16 +313,31 @@ sope_http *sope__http_post(const char *url, const char *const *headers, size_t n
         if (!l) break;
         h->headers = l;
     }
-    if (!h->url || !h->body || !h->easy || i < nheaders) {
+    if (!h->url || (body && !h->body) || !h->easy || i < nheaders) {
         destroy(h);
         sope__set_error(SOPE_ENOMEM, "http: out of memory");
         return NULL;
     }
 
     curl_easy_setopt(h->easy, CURLOPT_URL, h->url);
-    curl_easy_setopt(h->easy, CURLOPT_POST, 1L);
-    curl_easy_setopt(h->easy, CURLOPT_POSTFIELDS, h->body);
-    curl_easy_setopt(h->easy, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)h->body_len);
+    if (body) {
+        curl_easy_setopt(h->easy, CURLOPT_POST, 1L);
+        curl_easy_setopt(h->easy, CURLOPT_POSTFIELDS, h->body);
+        curl_easy_setopt(h->easy, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)h->body_len);
+    } else {
+        curl_easy_setopt(h->easy, CURLOPT_HTTPGET, 1L);
+        curl_easy_setopt(h->easy, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(h->easy, CURLOPT_MAXREDIRS, 5L);
+        curl_easy_setopt(h->easy, CURLOPT_TIMEOUT, 60L);
+        curl_easy_setopt(h->easy, CURLOPT_ACCEPT_ENCODING, ""); /* whatever this curl can decode */
+#if LIBCURL_VERSION_NUM >= 0x075500
+        curl_easy_setopt(h->easy, CURLOPT_PROTOCOLS_STR, "http,https");
+        curl_easy_setopt(h->easy, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
+        curl_easy_setopt(h->easy, CURLOPT_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+        curl_easy_setopt(h->easy, CURLOPT_REDIR_PROTOCOLS, (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+#endif
+    }
     curl_easy_setopt(h->easy, CURLOPT_HTTPHEADER, h->headers);
     curl_easy_setopt(h->easy, CURLOPT_WRITEFUNCTION, on_data);
     curl_easy_setopt(h->easy, CURLOPT_WRITEDATA, h);
@@ -328,6 +365,25 @@ sope_http *sope__http_post(const char *url, const char *const *headers, size_t n
     curl_multi_wakeup(IO.multi);
     pthread_mutex_unlock(&IO.mu);
     return h;
+}
+
+sope_http *sope__http_post(const char *url, const char *const *headers, size_t nheaders, const char *body,
+                           size_t body_len, const char *ca_file, sope_task *wake)
+{
+    return start(url, headers, nheaders, body ? body : "", body_len, ca_file, wake);
+}
+
+sope_http *sope__http_get(const char *url, const char *ca_file, sope_task *wake)
+{
+    return start(url, NULL, 0, NULL, 0, ca_file, wake);
+}
+
+void sope__http_info(sope_http *h, char *content_type, size_t ctlen, char *url, size_t urllen)
+{
+    pthread_mutex_lock(&h->mu);
+    snprintf(content_type, ctlen, "%s", h->content_type ? h->content_type : "");
+    snprintf(url, urllen, "%s", h->effective_url ? h->effective_url : "");
+    pthread_mutex_unlock(&h->mu);
 }
 
 int sope__http_take(sope_http *h, sope_buf *out, long *status, char *err, size_t errlen)

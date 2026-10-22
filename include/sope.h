@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT
- * Copyright (c) 2026 iamlinjunhong */
+ * Copyright (c) 2026 Zonor */
 /*
  * sope.h - public C ABI of sope, an embeddable agent library.
  *
@@ -50,9 +50,9 @@ extern "C" {
 /* ------------------------------------------------------------------------ */
 
 #define SOPE_VERSION_MAJOR 0
-#define SOPE_VERSION_MINOR 1
-#define SOPE_VERSION_PATCH 1
-#define SOPE_VERSION_STRING "0.1.1"
+#define SOPE_VERSION_MINOR 2
+#define SOPE_VERSION_PATCH 0
+#define SOPE_VERSION_STRING "0.2.0"
 #define SOPE_VERSION_NUMBER \
     ((SOPE_VERSION_MAJOR << 16) | (SOPE_VERSION_MINOR << 8) | SOPE_VERSION_PATCH)
 
@@ -117,6 +117,11 @@ SOPE_API int sope_agent_new(sope_agent_t **out);
  *   model             model name, e.g. "glm-5.3"; required by "openai"
  *   system            system prompt (a built-in default is used if unset)
  *   max_rounds        model calls allowed per turn (default 32)
+ *   cwd               working directory of the built-in tools (default:
+ *                     the process's current directory)
+ *   permissions       "ask" (default): built-in tools that change files,
+ *                     run commands or use the network wait for sope_permit;
+ *                     "allow": run them without asking; "deny": refuse them
  *   subagents         "off" hides the built-in `agent` tool
  *   compact.threshold compact the history automatically once a model call
  *                     reports this many tokens (input + output); unset or
@@ -129,6 +134,21 @@ SOPE_API int sope_agent_new(sope_agent_t **out);
  *   mock.delay_ms     delay between streamed chunks of the mock provider */
 SOPE_API int sope_agent_set_option(sope_agent_t *agent, const char *key, const char *value);
 
+/* Built-in tools. Every agent can use these without any host code; the
+ * library runs them on its worker pool:
+ *   read, glob, grep          read files, find files, search contents
+ *   write, edit               create and change files                 (ask)
+ *   bash                      run a shell command, optionally in the
+ *                             background                              (ask)
+ *   bash_output, bash_kill    follow and stop background commands
+ *   web_fetch                 fetch a URL as text                     (ask)
+ *   todo_write                keep a task list
+ * Each call emits SOPE_EVENT_TOOL_START and ends with SOPE_EVENT_TOOL_END.
+ * Tools marked (ask) first emit SOPE_EVENT_PERMISSION and wait for
+ * sope_permit, unless the "permissions" option says otherwise. A host tool
+ * registered under a built-in's name replaces it. docs/abi.md describes
+ * each tool. */
+
 /* Registers a host tool the model may call, replacing any tool with the same
  * name. name: 1-64 chars of [A-Za-z0-9_-]; "agent" is reserved.
  * input_schema_json must be a JSON Schema object (NULL: any object). */
@@ -140,7 +160,8 @@ SOPE_API int sope_tool_register(sope_agent_t *agent, const char *name,
  *   name           required, 1-64 chars of [A-Za-z0-9_-]
  *   description    required: when the model should use it
  *   system_prompt  required
- *   tools          optional: array of host tool names, or "*" (default)
+ *   tools          optional: array of tool names (built-in or host), or
+ *                  "*" (default: all)
  *   model          optional: overrides the parent's model
  *   max_rounds     optional
  * A "general-purpose" type with all tools is built in. Subagents get a fresh
@@ -159,6 +180,12 @@ SOPE_API int sope_send(sope_agent_t *agent, const char *text, size_t len, uint64
  * its turn was cancelled. */
 SOPE_API int sope_tool_result(sope_agent_t *agent, uint64_t call_id, int is_error,
                               const char *content, size_t len);
+
+/* Answers a SOPE_EVENT_PERMISSION: allow != 0 runs the tool, 0 refuses it.
+ * message (optional, may be NULL with len 0) tells the model why, or what
+ * to do instead. Returns SOPE_ENOTFOUND if the call is not waiting, e.g.
+ * because its turn was cancelled. */
+SOPE_API int sope_permit(sope_agent_t *agent, uint64_t call_id, int allow, const char *message, size_t len);
 
 /* Requests cancellation of the running turn, if any, including its
  * subagents. Queued turns are not affected. The turn still ends with
@@ -208,6 +235,9 @@ SOPE_API int sope_agent_fd(sope_agent_t *agent);
 #define SOPE_EVENT_SUBAGENT_START 9  /* call_id, name: subagent type, data: JSON input (description, prompt) */
 #define SOPE_EVENT_SUBAGENT_END   10 /* call_id, code: SOPE_STOP_*, data: the subagent's final report */
 #define SOPE_EVENT_COMPACT        11 /* name: "auto" or "manual", data: the summary now standing in for the history */
+#define SOPE_EVENT_TOOL_START     12 /* call_id, name: built-in tool, data: JSON input. The library runs it */
+#define SOPE_EVENT_TOOL_END       13 /* call_id, name, code: 1 if it failed, data: the result the model sees */
+#define SOPE_EVENT_PERMISSION     14 /* call_id, name, data: JSON input. Answer with sope_permit */
 
 #define SOPE_STOP_END_TURN  0
 #define SOPE_STOP_CANCELLED 1
@@ -222,6 +252,10 @@ SOPE_API int sope_agent_fd(sope_agent_t *agent);
  * before each call so the struct can grow in later versions. `name` and
  * `data` are never NULL and stay valid until the next sope_poll or
  * sope_agent_free on the same agent.
+ *
+ * Every tool call the host sees opened (TOOL_CALL for host tools, TOOL_START
+ * for built-ins) is closed by a TOOL_END with the same call_id before its
+ * turn's TURN_END, also when the turn is cancelled.
  *
  * agent_id is 0 for events of the agent itself. Events of a subagent carry
  * the call_id of the SOPE_EVENT_SUBAGENT_START that launched it; its

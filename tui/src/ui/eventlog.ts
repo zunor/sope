@@ -24,6 +24,9 @@ const KIND_COLORS: Record<string, number> = {
   subagent_end: palette.accent,
   compact: palette.accent,
   tool_call: palette.tool,
+  tool_start: palette.tool,
+  tool_end: palette.tool,
+  permission: palette.tool,
   turn_end: palette.accent,
   error: palette.error,
   log: palette.faint,
@@ -46,7 +49,11 @@ function describe(ev: SopeEvent): string {
     case "thinking_delta":
       return `${who} ${JSON.stringify(ev.text)}`;
     case "tool_call":
+    case "tool_start":
+    case "permission":
       return `${who} #${ev.callId} ${ev.name} ${ev.input}`;
+    case "tool_end":
+      return `${who} #${ev.callId} ${ev.name}${ev.isError ? " failed" : ""} ${JSON.stringify(ev.result.slice(0, 300))}`;
     case "turn_end":
       return `${who} ${ev.stopReason}`;
     case "error":

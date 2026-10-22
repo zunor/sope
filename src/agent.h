@@ -58,13 +58,18 @@ typedef struct subagent_def {
     int32_t max_rounds;  /* 0: inherit */
 } subagent_def;
 
-typedef enum { PENDING_TOOL, PENDING_SUBAGENT } pending_kind;
+typedef enum { PENDING_TOOL, PENDING_SUBAGENT, PENDING_BUILTIN } pending_kind;
+
+typedef struct tool_run tool_run; /* a built-in tool call (tools.h) */
 
 typedef struct pending_call {
     struct pending_call *next;
     uint64_t call_id;
     struct sope_agent *owner; /* agent whose turn waits for it */
     pending_kind kind;
+    char *name;     /* tool name, for SOPE_EVENT_TOOL_END */
+    uint64_t turn_id;
+    tool_run *run;  /* built-in waiting for sope_permit; NULL once answered */
     int done;
     int is_error;
     char *content;
@@ -72,6 +77,23 @@ typedef struct pending_call {
 } pending_call;
 
 typedef enum { PHASE_START, PHASE_CALL, PHASE_TOOLS, PHASE_COMPACT } turn_phase;
+
+typedef enum { PERMIT_ASK, PERMIT_ALLOW, PERMIT_DENY } permit_mode;
+
+typedef struct file_state { /* a file the model has read or written */
+    struct file_state *next;
+    char *path;
+    int64_t mtime_sec, mtime_nsec;
+    int64_t size;
+} file_state;
+
+typedef struct bg_shell { /* bash run_in_background */
+    struct bg_shell *next;
+    uint32_t id;
+    char *command;
+    sope_proc *proc;
+    uint64_t read_pos; /* output offset bash_output has returned up to */
+} bg_shell;
 
 typedef struct turn_state {
     int active;
@@ -84,10 +106,13 @@ typedef struct turn_state {
     sope_message *asst;  /* assistant message of the last call, PHASE_TOOLS only */
     char *system;
     sope_tool_spec *specs; /* snapshot of offered tools for this turn; strings owned */
+    const struct sope_builtin **spec_builtin; /* per spec: the built-in it runs, or NULL */
     size_t n_specs;
     uint64_t compact_threshold; /* option compact.threshold; 0: never compact automatically */
     int compact_tried;          /* compaction already ran (or failed) before this round */
     sope_message *held;         /* the turn's user message, kept out of a compaction at turn start */
+    char *cwd;                  /* option cwd: where built-in tools work */
+    permit_mode permit;         /* option permissions */
 } turn_state;
 
 struct sope_agent {
@@ -108,6 +133,8 @@ struct sope_agent {
     int fd_read, fd_write; /* -1 until sope_agent_fd */
     int fd_signaled;
     subagent_def *subagents;
+    bg_shell *shells;
+    uint32_t next_shell_id;
 
     /* ---- every agent, guarded by *mu ---- */
     tool_def *tools;
@@ -121,6 +148,10 @@ struct sope_agent {
     msg_node *in_head, *in_tail;
     struct sope_agent *children; /* live subagents of the running turn */
     struct sope_agent *sibling;
+    tool_run *runs;      /* built-in tool calls running for the current turn */
+    file_state *files;   /* what read/write/edit have seen; edits require a fresh read */
+    char **tool_filter;  /* subagents: tools their type allows; NULL: all */
+    size_t n_tool_filter;
 
     /* ---- owned by the running task, no lock ---- */
     turn_state turn;
@@ -131,6 +162,8 @@ struct sope_agent {
 };
 
 /* agent.c */
+int sope__push_event_locked(sope_agent_t *a, uint32_t type, uint64_t turn_id, uint64_t call_id, int32_t code,
+                            const char *name, size_t name_len, const char *data, size_t data_len);
 int sope__push_event(sope_agent_t *a, uint32_t type, uint64_t turn_id, uint64_t call_id, int32_t code,
                      const char *name, size_t name_len, const char *data, size_t data_len);
 /* Marks the tree's queue readable when the root closed; *mu held. */

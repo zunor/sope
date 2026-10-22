@@ -7,7 +7,9 @@
  *   util.c, json.c   strings, buffers, errors, JSON
  *   pool.c           shared worker pool: runs tasks one short step at a time
  *   http.c           libcurl multi on one I/O thread; wakes tasks as bytes arrive
+ *   proc.c           child processes on one reaper thread; wakes tasks likewise
  *   provider_*.c     one streaming model call ("round"), as a state machine
+ *   tools.c, ...     built-in tools, each call a task of its own (tools.h)
  *   loop.c           a turn: model round -> tools/subagents -> next round ...
  *   agent.c          public API, event queue, readable fd, lifecycle
  */
@@ -48,6 +50,13 @@ typedef struct sope_buf {
 void sope__buf_append(sope_buf *b, const char *s, size_t n);
 void sope__buf_appends(sope_buf *b, const char *s);
 void sope__buf_appendf(sope_buf *b, const char *fmt, ...) SOPE_PRINTF(2, 3);
+/* Makes b valid UTF-8 text from byte `from` on: invalid sequences become
+ * U+FFFD, ANSI escape sequences and control characters other than \n and
+ * \t are dropped, \r\n becomes \n. */
+void sope__buf_sanitize(sope_buf *b, size_t from);
+/* Cuts the middle out of b when it is longer than max bytes, keeping the
+ * start and the end on UTF-8 boundaries. */
+void sope__buf_clip_middle(sope_buf *b, size_t max);
 /* Appends s as a quoted, escaped JSON string. */
 void sope__buf_append_json_string(sope_buf *b, const char *s, size_t n);
 /* Drops the first n bytes. */
@@ -144,6 +153,10 @@ int sope__http_available(void);
  * bundle of trusted CAs, NULL for the default. */
 sope_http *sope__http_post(const char *url, const char *const *headers, size_t nheaders, const char *body,
                            size_t body_len, const char *ca_file, sope_task *wake);
+/* Starts a GET that follows redirects (http and https only). */
+sope_http *sope__http_get(const char *url, const char *ca_file, sope_task *wake);
+/* After the transfer: its Content-Type ("" if none) and final URL. */
+void sope__http_info(sope_http *h, char *content_type, size_t ctlen, char *url, size_t urllen);
 /* Moves received bytes to `out`. Returns 1 once the transfer is over; then
  * *status is the HTTP status (0 if none) and err holds a transport error
  * message (empty if none). */
@@ -153,6 +166,32 @@ int sope__http_take(sope_http *h, sope_buf *out, long *status, char *err, size_t
 void sope__http_release(sope_http *h);
 /* Stops the I/O thread; only when no transfer is alive. */
 void sope__http_shutdown(void);
+
+/* ======================================================================== */
+/* proc.c                                                                    */
+/* ======================================================================== */
+
+typedef struct sope_proc sope_proc;
+
+/* Runs `command` with bash -c in `cwd`, in a new session, stdin from
+ * /dev/null, stdout and stderr together. `wake` (may be NULL) is woken on
+ * output and once the process is done. On failure returns NULL with a
+ * message in err. */
+sope_proc *sope__proc_start(const char *command, const char *cwd, sope_task *wake, char *err, size_t errlen);
+/* 1 once the shell exited and its output is collected; *status is the exit
+ * code (128+N after signal N, -1 if unknown). */
+int sope__proc_done(sope_proc *p, int *status);
+int sope__proc_killed(sope_proc *p);
+/* Appends output from absolute offset `from` (a gap where output was
+ * dropped is marked) and returns the offset of the end. */
+uint64_t sope__proc_output(sope_proc *p, uint64_t from, sope_buf *out);
+void sope__proc_set_wake(sope_proc *p, sope_task *wake);
+/* Kills the process group. */
+void sope__proc_kill(sope_proc *p);
+/* Kills it if still running and drops the caller's reference. */
+void sope__proc_release(sope_proc *p);
+/* Stops the reaper thread once every process is reaped. */
+void sope__proc_shutdown(void);
 
 /* ======================================================================== */
 /* conversation history (loop.c)                                             */

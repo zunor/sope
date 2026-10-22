@@ -8,7 +8,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
-#include "agent.h"
+#include "tools.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -125,12 +125,11 @@ void sope__signal_closed_locked(sope_agent_t *root)
     pthread_cond_broadcast(&root->poll_cv);
 }
 
-int sope__push_event(sope_agent_t *a, uint32_t type, uint64_t turn_id, uint64_t call_id, int32_t code,
-                     const char *name, size_t name_len, const char *data, size_t data_len)
+static ev_node *event_new(sope_agent_t *a, uint32_t type, uint64_t turn_id, uint64_t call_id, int32_t code,
+                          const char *name, size_t name_len, const char *data, size_t data_len)
 {
-    sope_agent_t *root = a->root;
     ev_node *n = calloc(1, sizeof *n);
-    if (!n) return SOPE_ENOMEM;
+    if (!n) return NULL;
     n->type = type;
     n->code = code;
     n->turn_id = turn_id;
@@ -142,10 +141,13 @@ int sope__push_event(sope_agent_t *a, uint32_t type, uint64_t turn_id, uint64_t 
     n->data = sope__strndup(data ? data : "", n->data_len);
     if (!n->name || !n->data) {
         ev_free(n);
-        return SOPE_ENOMEM;
+        return NULL;
     }
+    return n;
+}
 
-    pthread_mutex_lock(a->mu);
+static void event_enqueue_locked(sope_agent_t *root, ev_node *n)
+{
     if (root->ev_tail)
         root->ev_tail->next = n;
     else
@@ -153,13 +155,35 @@ int sope__push_event(sope_agent_t *a, uint32_t type, uint64_t turn_id, uint64_t 
     root->ev_tail = n;
     fd_signal_locked(root);
     pthread_cond_broadcast(&root->poll_cv);
+}
+
+int sope__push_event_locked(sope_agent_t *a, uint32_t type, uint64_t turn_id, uint64_t call_id, int32_t code,
+                            const char *name, size_t name_len, const char *data, size_t data_len)
+{
+    ev_node *n = event_new(a, type, turn_id, call_id, code, name, name_len, data, data_len);
+    if (!n) return SOPE_ENOMEM;
+    event_enqueue_locked(a->root, n);
+    return SOPE_OK;
+}
+
+int sope__push_event(sope_agent_t *a, uint32_t type, uint64_t turn_id, uint64_t call_id, int32_t code,
+                     const char *name, size_t name_len, const char *data, size_t data_len)
+{
+    ev_node *n = event_new(a, type, turn_id, call_id, code, name, name_len, data, data_len);
+    if (!n) return SOPE_ENOMEM;
+    pthread_mutex_lock(a->mu);
+    event_enqueue_locked(a->root, n);
     pthread_mutex_unlock(a->mu);
     return SOPE_OK;
 }
 
 void sope__agent_free_memory(sope_agent_t *a)
 {
+    size_t i;
     sope__history_clear(&a->history);
+    sope__files_clear(a);
+    for (i = 0; i < a->n_tool_filter; i++) free(a->tool_filter[i]);
+    free(a->tool_filter);
     while (a->in_head) {
         msg_node *m = a->in_head;
         a->in_head = m->next;
@@ -183,6 +207,7 @@ void sope__agent_free_memory(sope_agent_t *a)
         return;
     }
 
+    sope__shells_free(a);
     ev_free(a->delivered);
     while (a->ev_head) {
         ev_node *n = a->ev_head;
@@ -484,9 +509,63 @@ int sope_tool_result(sope_agent_t *a, uint64_t call_id, int is_error, const char
     p->is_error = is_error != 0;
     p->done = 1;
     owner = p->owner;
+    sope__push_event_locked(owner, SOPE_EVENT_TOOL_END, p->turn_id, call_id, p->is_error, p->name, strlen(p->name),
+                            copy, len);
     /* Wake under the lock: the owner cannot be freed while its call is pending. */
     sope__task_wake(&owner->task);
     pthread_mutex_unlock(a->mu);
+    return SOPE_OK;
+}
+
+int sope_permit(sope_agent_t *a, uint64_t call_id, int allow, const char *message, size_t len)
+{
+    pending_call *p;
+    tool_run *r;
+    sope_buf why = { 0 };
+
+    if (!a || (!message && len)) return sope__set_error(SOPE_EINVAL, "sope_permit: invalid argument");
+    if (!allow) {
+        sope__buf_appends(&why, "The user denied this tool call, so it did not run.");
+        if (len) {
+            sope__buf_appends(&why, " They said: ");
+            sope__buf_append(&why, message, len);
+        } else {
+            sope__buf_appends(&why, " Do not retry it as is: adjust your approach, or ask the user how to proceed.");
+        }
+        if (why.oom) {
+            sope__buf_free(&why);
+            return sope__set_error(SOPE_ENOMEM, "sope_permit: out of memory");
+        }
+    }
+
+    pthread_mutex_lock(a->mu);
+    for (p = a->root->pending; p; p = p->next)
+        if (p->call_id == call_id && p->kind == PENDING_BUILTIN && p->run && !p->done) break;
+    if (!p) {
+        pthread_mutex_unlock(a->mu);
+        sope__buf_free(&why);
+        return sope__set_error(SOPE_ENOTFOUND, "sope_permit: no tool call %" PRIu64 " is waiting for permission",
+                               call_id);
+    }
+    r = p->run;
+    p->run = NULL;
+    if (allow) {
+        /* Started under the lock, so a cancelled turn waits for it like any run. */
+        sope__tool_run_start_locked(r);
+        r = NULL;
+    } else {
+        sope__push_event_locked(p->owner, SOPE_EVENT_TOOL_END, p->turn_id, call_id, 1, p->name, strlen(p->name),
+                                why.ptr, why.len);
+        p->content = why.ptr;
+        p->len = why.len;
+        p->is_error = 1;
+        p->done = 1;
+        why.ptr = NULL;
+        sope__task_wake(&p->owner->task);
+    }
+    pthread_mutex_unlock(a->mu);
+    sope__tool_run_discard(r);
+    sope__buf_free(&why);
     return SOPE_OK;
 }
 

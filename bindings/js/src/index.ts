@@ -35,7 +35,14 @@ export type SopeEvent =
   | ({ type: "turn_start" } & Origin)
   | ({ type: "text_delta"; text: string } & Origin)
   | ({ type: "thinking_delta"; text: string } & Origin)
+  /** A host tool call: answer it with toolResult(). */
   | ({ type: "tool_call"; callId: number; name: string; input: string } & Origin)
+  /** A built-in tool call the library runs itself. */
+  | ({ type: "tool_start"; callId: number; name: string; input: string } & Origin)
+  /** Any tool call (host or built-in) finished; `result` is what the model sees. */
+  | ({ type: "tool_end"; callId: number; name: string; isError: boolean; result: string } & Origin)
+  /** A built-in tool waits for permit(). */
+  | ({ type: "permission"; callId: number; name: string; input: string } & Origin)
   | ({ type: "turn_end"; stopReason: StopReason } & Origin)
   | ({ type: "error"; code: number; message: string } & Origin)
   | ({ type: "log"; level: LogLevel; message: string } & Origin)
@@ -52,7 +59,7 @@ export interface SubagentDefinition {
   /** When the model should use this subagent. */
   description: string;
   systemPrompt: string;
-  /** Host tool names, or "*" for all (default). */
+  /** Tool names (built-in or host), or "*" for all (default). */
   tools?: string[] | "*";
   model?: string;
   maxRounds?: number;
@@ -175,6 +182,15 @@ export class Agent {
     );
   }
 
+  /** Answers a "permission" event: run the built-in tool, or refuse it (message tells the model why). */
+  permit(callId: number, allow: boolean, message = ""): void {
+    const bytes = encoder.encode(message);
+    check(
+      C().sope_permit(this.#ptr(), callId, allow ? 1 : 0, bytes.length ? bytes : EMPTY, bytes.length),
+      "sope_permit",
+    );
+  }
+
   /** Registers a subagent type the model can launch through the built-in `agent` tool. */
   registerSubagent(def: SubagentDefinition): void {
     const json = encoder.encode(
@@ -261,9 +277,15 @@ export class Agent {
         return { type: "subagent_end", ...origin, callId, stopReason, result: data() };
       case 11:
         return { type: "compact", ...origin, trigger: name() === "manual" ? "manual" : "auto", summary: data() };
+      case 12:
+        return { type: "tool_start", ...origin, callId, name: name(), input: data() };
+      case 13:
+        return { type: "tool_end", ...origin, callId, name: name(), isError: code !== 0, result: data() };
+      case 14:
+        return { type: "permission", ...origin, callId, name: name(), input: data() };
       default:
         // Unknown event type from a newer library: skip it rather than fail.
-        return this.poll(0);
+        return this.poll(timeoutMs);
     }
   }
 

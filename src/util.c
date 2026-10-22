@@ -168,3 +168,106 @@ void sope__buf_free(sope_buf *b)
     b->len = b->cap = 0;
     b->oom = 0;
 }
+
+/* Length of the valid UTF-8 sequence at s (n bytes available), or 0. */
+static size_t utf8_valid(const unsigned char *s, size_t n)
+{
+    size_t len, i;
+    uint32_t cp;
+    if (s[0] < 0x80) return 1;
+    if (s[0] >= 0xc2 && s[0] <= 0xdf) len = 2, cp = s[0] & 0x1f;
+    else if (s[0] >= 0xe0 && s[0] <= 0xef) len = 3, cp = s[0] & 0x0f;
+    else if (s[0] >= 0xf0 && s[0] <= 0xf4) len = 4, cp = s[0] & 0x07;
+    else return 0;
+    if (n < len) return 0;
+    for (i = 1; i < len; i++) {
+        if ((s[i] & 0xc0) != 0x80) return 0;
+        cp = cp << 6 | (s[i] & 0x3f);
+    }
+    if ((len == 3 && cp < 0x800) || (len == 4 && (cp < 0x10000 || cp > 0x10ffff)) || (cp >= 0xd800 && cp <= 0xdfff))
+        return 0;
+    return len;
+}
+
+void sope__buf_sanitize(sope_buf *b, size_t from)
+{
+    sope_buf out = { 0 };
+    const unsigned char *s;
+    size_t i, n;
+
+    if (b->oom || from >= b->len) return;
+    s = (const unsigned char *)b->ptr;
+    n = b->len;
+    for (i = from; i < n; i++) { /* the common case: nothing to change */
+        if (s[i] >= 0x80 ? !utf8_valid(s + i, n - i) : (s[i] < 0x20 && s[i] != '\n' && s[i] != '\t') || s[i] == 0x7f)
+            break;
+        if (s[i] >= 0x80) i += utf8_valid(s + i, n - i) - 1;
+    }
+    if (i == n) return;
+
+    sope__buf_append(&out, b->ptr, i);
+    while (i < n) {
+        unsigned char c = s[i];
+        size_t len;
+        if (c == 0x1b) { /* ANSI escape: CSI ... final byte, OSC ... BEL/ST, or ESC + one char */
+            i++;
+            if (i < n && s[i] == '[') {
+                for (i++; i < n && !(s[i] >= 0x40 && s[i] <= 0x7e); i++) {}
+                i++;
+            } else if (i < n && s[i] == ']') {
+                for (i++; i < n && s[i] != 0x07 && !(s[i] == 0x1b && i + 1 < n && s[i + 1] == '\\'); i++) {}
+                i += i < n && s[i] == 0x1b ? 2 : 1;
+            } else if (i < n) {
+                i++;
+            }
+            continue;
+        }
+        if (c == '\r') {
+            if (i + 1 >= n || s[i + 1] != '\n') sope__buf_append(&out, "\n", 1);
+            i++;
+            continue;
+        }
+        if (c < 0x80) {
+            if (c >= 0x20 || c == '\n' || c == '\t') sope__buf_append(&out, (const char *)s + i, 1);
+            i++;
+            continue;
+        }
+        if ((len = utf8_valid(s + i, n - i))) {
+            sope__buf_append(&out, (const char *)s + i, len);
+            i += len;
+        } else {
+            sope__buf_append(&out, "\xef\xbf\xbd", 3);
+            i++;
+        }
+    }
+    if (out.oom) {
+        sope__buf_free(&out);
+        return;
+    }
+    sope__buf_free(b);
+    *b = out;
+}
+
+void sope__buf_clip_middle(sope_buf *b, size_t max)
+{
+    size_t head, tail_start, omitted;
+    char note[96];
+    sope_buf out = { 0 };
+
+    if (b->len <= max || max < 200) return;
+    head = max / 2;
+    while (head > 0 && ((unsigned char)b->ptr[head] & 0xc0) == 0x80) head--;
+    tail_start = b->len - max / 2;
+    while (tail_start < b->len && ((unsigned char)b->ptr[tail_start] & 0xc0) == 0x80) tail_start++;
+    omitted = tail_start - head;
+    snprintf(note, sizeof note, "\n\n[... %zu bytes omitted ...]\n\n", omitted);
+    sope__buf_append(&out, b->ptr, head);
+    sope__buf_appends(&out, note);
+    sope__buf_append(&out, b->ptr + tail_start, b->len - tail_start);
+    if (out.oom) {
+        sope__buf_free(&out);
+        return;
+    }
+    sope__buf_free(b);
+    *b = out;
+}

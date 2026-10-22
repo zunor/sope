@@ -6,6 +6,8 @@
  *
  *   <text>                     streams a reply quoting the input
  *   !<tool> [arg]              calls a tool with {"input": arg}
+ *   !<tool> {json}             calls a tool with that JSON as its input
+ *   !<tool> {json} ;; !<t2> .. several tool calls in one response
  *   !agent[:type] t1 | t2 ...  spawns one subagent per task, in parallel
  *   !history                   reports how many messages the history holds
  *   !panic                     fails the call
@@ -105,6 +107,42 @@ static void plan_agents(sope_call *c, mock_state *s, const char *arg, size_t len
     sope__buf_appendf(&s->text, "Delegating to %zu subagent%s.\n", n, n == 1 ? "" : "s");
 }
 
+/* "!name arg ;; !name2 {json} ..." -> one tool use per part. */
+static void plan_calls(sope_call *c, mock_state *s, const char *in, size_t len)
+{
+    const char *end = in + len, *p = in;
+    while (p < end) {
+        const char *sep = p, *arg, *name_end;
+        char name[MAX_TOOL_NAME + 1];
+        sope_buf input = { 0 };
+        size_t n;
+        while (sep < end && !(sep + 4 <= end && !memcmp(sep, " ;; ", 4))) sep++;
+        if (*p == '!') p++;
+        for (name_end = p; name_end < sep && *name_end != ' '; name_end++) {}
+        n = (size_t)(name_end - p);
+        if (n && n <= MAX_TOOL_NAME) {
+            memcpy(name, p, n);
+            name[n] = '\0';
+            arg = name_end < sep ? name_end + 1 : sep;
+            if (arg < sep && *arg == '{') {
+                sope__buf_append(&input, arg, (size_t)(sep - arg));
+            } else {
+                sope__buf_appends(&input, "{\"input\":");
+                sope__buf_append_json_string(&input, arg, (size_t)(sep - arg));
+                sope__buf_appends(&input, "}");
+            }
+            if (sope__call_has_tool(c, name)) {
+                sope__buf_appendf(&s->text, "Calling `%s`.\n", name);
+                add_use(s, name, &input);
+            } else {
+                sope__buf_appendf(&s->text, "mock: no tool named `%s` is available.\n", name);
+            }
+        }
+        sope__buf_free(&input);
+        p = sep < end ? sep + 4 : end;
+    }
+}
+
 static void *mock_start(sope_call *c)
 {
     static const char tail[] =
@@ -175,14 +213,7 @@ static void *mock_start(sope_call *c)
             if (!sope__call_has_tool(c, name)) {
                 sope__buf_appendf(&s->text, "mock: no tool named `%s` is available.", name);
             } else {
-                const char *arg = n + 1 < len ? in + n + 2 : in + len;
-                sope_buf input = { 0 };
-                sope__buf_appends(&input, "{\"input\":");
-                sope__buf_append_json_string(&input, arg, (size_t)(in + len - arg));
-                sope__buf_appends(&input, "}");
-                sope__buf_appendf(&s->text, "Calling `%s`.\n", name);
-                add_use(s, name, &input);
-                sope__buf_free(&input);
+                plan_calls(c, s, in, len);
             }
         }
     }

@@ -20,15 +20,26 @@
 import { homedir } from "node:os";
 import { version, type SopeEvent } from "sope";
 import { AgentBridge } from "./agent/bridge";
-import { ToolRunner, type Decision, type PermissionRequest } from "./agent/runner";
-import { toolsFor, type PreviewLine, type Tool } from "./agent/tools";
+import { HostToolRunner } from "./agent/runner";
+import {
+  ASKING_TOOLS,
+  describeCall,
+  formatTodos,
+  hostToolsFor,
+  parseInput,
+  previewFor,
+  READ_TOOLS,
+  todosOf,
+  type HostTool,
+  type PreviewLine,
+} from "./agent/tools";
 import { agentOptions, configPath, type Config } from "./config";
 import type { CellBuffer } from "./render/buffer";
 import { Renderer } from "./render/renderer";
 import { InputParser, keyId, type InputEvent, type MouseEvent as MouseInput } from "./term/input";
 import { Terminal } from "./term/terminal";
 import { palette, SPINNER } from "./theme";
-import { ChatView, summarizeInput, type Message, type Step } from "./ui/chat";
+import { ChatView, type Message, type Step } from "./ui/chat";
 import { Editor } from "./ui/editor";
 import { EventLog } from "./ui/eventlog";
 import { copyToClipboard, Selection } from "./ui/selection";
@@ -46,7 +57,7 @@ const HINTS: Array<[string, string]> = [
   ["pgup/pgdn", "scroll"],
   ["ctrl+c", "quit"],
 ];
-const HELP = (tools: Tool[]) => [
+const HELP = (hostTools: HostTool[]) => [
   "Commands:",
   "  /help              show this help",
   "  /clear             clear the transcript and the conversation history",
@@ -58,9 +69,10 @@ const HELP = (tools: Tool[]) => [
   "  /set <key> [val]   sope_agent_set_option; omit val to unset",
   "  /permissions       show which tools run without asking",
   "  /quit              exit",
-  `Tools: ${tools.map((t) => (t.readOnly ? t.name : `${t.name}*`)).join(", ")}, plus \`agent\` for subagents (* asks first).`,
+  `Tools (built into libsope): ${[...READ_TOOLS, ...ASKING_TOOLS.map((t) => `${t}*`)].join(", ")}, plus \`agent\` for subagents (* asks first).`,
+  ...(hostTools.length ? [`Host tools (this TUI): ${hostTools.map((t) => t.name).join(", ")}.`] : []),
   `Config: ${configPath()} or environment variables (SOPE_API_KEY, SOPE_MODEL, SOPE_BASE_URL, ...).`,
-  "Mock provider: plain text streams a reply; !echo <x>, !clock, !sleep <s> call tools; !agent t1 | t2 runs subagents; !panic fails.",
+  "Mock provider: plain text streams a reply; !echo <x>, !clock, !sleep <s> call host tools; !read {\"file_path\":\"README.md\"} (any tool, JSON input); !agent t1 | t2 runs subagents; !panic fails.",
 ].join("\n");
 
 const MAX_PREVIEW_ROWS = 12;
@@ -73,8 +85,17 @@ export interface AppOptions {
   prompt?: string;
 }
 
-interface Approval extends PermissionRequest {
-  resolve(decision: Decision): void;
+/** "stop" denies the call and cancels the whole turn. */
+type Decision = "once" | "always" | "deny" | "stop";
+
+/** A built-in tool call waiting for the user (SOPE_EVENT_PERMISSION). */
+interface Approval {
+  callId: number;
+  turnId: number;
+  name: string;
+  input: Record<string, unknown>;
+  /** Who asks: undefined for the agent itself, else the subagent type. */
+  subagent?: string;
 }
 
 type ToolTarget = { msg: Message } | { sub: Message; step: Step };
@@ -97,9 +118,11 @@ export class App {
   #notice: string | null = null;
   #noticeTimer: ReturnType<typeof setTimeout> | null = null;
   #bridge: AgentBridge;
-  #tools: Tool[];
-  #runner: ToolRunner;
+  #hostTools: HostTool[];
+  #runner: HostToolRunner;
   #approvals: Approval[] = [];
+  #allowAll: boolean;
+  #alwaysAllowed = new Set<string>(); // "a" in the permission prompt
   #provider: string;
   #model: string;
   #hasKey: boolean;
@@ -129,17 +152,13 @@ export class App {
     this.#model = config.model;
     this.#hasKey = !!config.apiKey;
     this.#initialPrompt = prompt;
-    this.#tools = toolsFor(config.provider);
-    this.#bridge = new AgentBridge(agentOptions(config), (events) => this.#onAgentEvents(events));
-    for (const tool of this.#tools) this.#bridge.agent.registerTool(tool);
-    this.#runner = new ToolRunner(
-      this.#bridge.agent,
-      this.#tools,
-      (req) => this.#askPermission(req),
-      (outcome) => this.#onToolDone(outcome.callId, outcome.result, outcome.isError),
-      (fn, detail) => (fn === "note" ? this.#trace.note(detail) : this.#trace.call(fn, detail)),
+    this.#allowAll = allowAll;
+    this.#hostTools = hostToolsFor(config.provider);
+    this.#bridge = new AgentBridge(agentOptions(config, allowAll ? "allow" : "ask"), (events) => this.#onAgentEvents(events));
+    for (const tool of this.#hostTools) this.#bridge.agent.registerTool(tool);
+    this.#runner = new HostToolRunner(this.#bridge.agent, this.#hostTools, (fn, detail) =>
+      fn === "note" ? this.#trace.note(detail) : this.#trace.call(fn, detail),
     );
-    this.#runner.allowAll = allowAll;
     this.#term.setMouse(config.mouse);
   }
 
@@ -152,7 +171,7 @@ export class App {
     });
     const hint =
       this.#provider === "mock" && !this.#hasKey ? " · set SOPE_API_KEY (or .env) to talk to a real model" : "";
-    const yolo = this.#runner.allowAll ? " · --allow-all: edits and commands run without asking" : "";
+    const yolo = this.#allowAll ? " · --allow-all: edits and commands run without asking" : "";
     this.#chat.add({ role: "info", text: `sope ${version()} · ${this.#provider}${this.#model ? ` · ${this.#model}` : ""} · ${process.cwd().replace(homedir(), "~")} · /help for commands${hint}${yolo}` });
     if (this.#initialPrompt) this.#sendMessage(this.#initialPrompt);
     this.#render();
@@ -353,7 +372,7 @@ export class App {
     try {
       switch (cmd) {
         case "help":
-          return void info(HELP(this.#tools));
+          return void info(HELP(this.#hostTools));
         case "compact": {
           const focus = args.join(" ");
           const turnId = this.#bridge.agent.compact(focus);
@@ -364,13 +383,12 @@ export class App {
           return;
         }
         case "permissions": {
-          const asks = this.#tools.filter((t) => !t.readOnly).map((t) => t.name);
-          if (this.#runner.allowAll) return void info("--allow-all: every tool runs without asking");
-          const allowed = [...this.#runner.allowed];
+          if (this.#allowAll) return void info("--allow-all: every tool runs without asking");
+          const allowed = [...this.#alwaysAllowed];
           return void info(
-            `Ask before: ${asks.filter((n) => !allowed.includes(n)).join(", ") || "(nothing)"}\n` +
+            `Ask before: ${ASKING_TOOLS.filter((n) => !allowed.includes(n)).join(", ") || "(nothing)"}\n` +
               `Allowed for this session: ${allowed.join(", ") || "(nothing)"}\n` +
-              "Read-only tools (list_files, read_file, search) never ask.",
+              `Never ask: ${READ_TOOLS.join(", ")}.`,
           );
         }
         case "clear":
@@ -453,13 +471,28 @@ export class App {
         this.#chat.append(m, ev.text);
         return;
       }
-      case "tool_call": {
+      case "tool_call": // a host tool: we run it
+      case "tool_start": {
+        // a built-in: libsope runs it
         this.#endRound(ev.turnId);
-        const msg = this.#chat.add({ role: "tool", title: ev.name, detail: ev.input, text: "", streaming: true, turnId: ev.turnId });
+        const input = parseInput(ev.input);
+        const todos = ev.name === "todo_write" ? todosOf(input) : null;
+        const msg = this.#chat.add({
+          role: "tool",
+          title: ev.name,
+          detail: describeCall(ev.name, input),
+          text: todos ? formatTodos(todos) : "",
+          streaming: true,
+          turnId: ev.turnId,
+        });
         this.#toolCalls.set(ev.callId, { msg });
-        this.#runner.run(ev.callId, ev.turnId, ev.name, ev.input);
+        if (ev.type === "tool_call") this.#runner.run(ev.callId, ev.turnId, ev.name, ev.input);
         return;
       }
+      case "tool_end":
+        return this.#onToolEnd(ev.callId, ev.name, ev.result, ev.isError);
+      case "permission":
+        return this.#onPermission(ev.callId, ev.turnId, ev.name, ev.input);
       case "subagent_start": {
         this.#endRound(ev.turnId);
         let description = "";
@@ -504,7 +537,7 @@ export class App {
       case "turn_end":
         this.#compacting = false;
         this.#runner.endTurn(ev.turnId);
-        this.#dropApprovals(ev.turnId);
+        this.#dropApprovals(ev.turnId, 0);
         this.#endRound(ev.turnId);
         for (const [callId, target] of this.#toolCalls) {
           const m = "msg" in target ? target.msg : target.sub;
@@ -531,14 +564,26 @@ export class App {
       case "text_delta":
         if (sub) this.#chat.update(sub, { tail: ((sub.tail ?? "") + ev.text).slice(-400) });
         return;
-      case "tool_call": {
-        if (!sub) return void this.#bridge.agent.toolResult(ev.callId, "subagent is gone", true);
-        const step: Step = { name: ev.name, detail: summarizeInput(ev.input), done: false };
+      case "tool_call":
+      case "tool_start": {
+        if (!sub) {
+          if (ev.type === "tool_call") this.#bridge.agent.toolResult(ev.callId, "subagent is gone", true);
+          return;
+        }
+        const step: Step = { name: ev.name, detail: describeCall(ev.name, parseInput(ev.input)), done: false };
         this.#chat.update(sub, { steps: [...(sub.steps ?? []), step], tail: "" });
         this.#toolCalls.set(ev.callId, { sub, step });
-        this.#runner.run(ev.callId, sub.turnId ?? 0, ev.name, ev.input, sub.title);
+        if (ev.type === "tool_call") this.#runner.run(ev.callId, sub.turnId ?? 0, ev.name, ev.input);
         return;
       }
+      case "tool_end":
+        return this.#onToolEnd(ev.callId, ev.name, ev.result, ev.isError);
+      case "permission":
+        return this.#onPermission(ev.callId, ev.turnId, ev.name, ev.input, ev.agentId, sub?.title ?? "subagent");
+      case "turn_end":
+        this.#runner.endTurn(ev.turnId);
+        this.#dropApprovals(ev.turnId, ev.agentId);
+        return;
       case "usage":
         this.#tokens.in += ev.inputTokens;
         this.#tokens.out += ev.outputTokens;
@@ -569,12 +614,15 @@ export class App {
     this.#endAssistant(turnId);
   }
 
-  #onToolDone(callId: number, result: string, isError: boolean): void {
+  #onToolEnd(callId: number, name: string, result: string, isError: boolean): void {
     const target = this.#toolCalls.get(callId);
+    this.#dropApproval(callId);
     if (!target) return;
     this.#toolCalls.delete(callId);
     if ("msg" in target) {
-      this.#chat.update(target.msg, { streaming: false, ok: !isError, text: result });
+      // todo_write keeps showing the list it set, not the confirmation the model gets
+      const keep = name === "todo_write" && !isError;
+      this.#chat.update(target.msg, keep ? { streaming: false, ok: true } : { streaming: false, ok: !isError, text: result });
     } else {
       target.step.done = true;
       target.step.ok = !isError;
@@ -585,12 +633,19 @@ export class App {
 
   // ---- permissions ----------------------------------------------------
 
-  #askPermission(req: PermissionRequest): Promise<Decision> {
-    return new Promise((resolve) => {
-      this.#approvals.push({ ...req, resolve });
-      this.#chat.scrollToBottom();
-      this.#scheduleRender();
-    });
+  #onPermission(callId: number, turnId: number, name: string, rawInput: string, agentId = 0, subagent?: string): void {
+    if (this.#alwaysAllowed.has(name)) return this.#permit(callId, true);
+    this.#approvals.push({ callId, turnId: agentId ? -agentId : turnId, name, input: parseInput(rawInput), subagent });
+    this.#chat.scrollToBottom();
+  }
+
+  #permit(callId: number, allow: boolean): void {
+    try {
+      this.#bridge.agent.permit(callId, allow);
+      this.#trace.call("sope_permit", `#${callId} ${allow ? "allow" : "deny"}`);
+    } catch (err) {
+      this.#trace.note((err as Error).message); // its turn ended meanwhile
+    }
   }
 
   #handleApprovalKey(id: string): boolean {
@@ -599,24 +654,29 @@ export class App {
     )[id.toLowerCase()];
     if (!decision) return !["pageup", "pagedown", "ctrl+t", "f2", "ctrl+l"].includes(id); // swallow everything else
     const approval = this.#approvals.shift()!;
-    approval.resolve(decision);
+    this.#permit(approval.callId, decision === "once" || decision === "always");
     if (decision === "always") {
       // Later requests for the same tool are covered too.
-      for (const other of this.#approvals.filter((a) => a.tool.name === approval.tool.name)) other.resolve("once");
-      this.#approvals = this.#approvals.filter((a) => a.tool.name !== approval.tool.name);
+      this.#alwaysAllowed.add(approval.name);
+      for (const other of this.#approvals.filter((a) => a.name === approval.name)) this.#permit(other.callId, true);
+      this.#approvals = this.#approvals.filter((a) => a.name !== approval.name);
     }
     if (decision === "stop") {
-      for (const other of this.#approvals) other.resolve("deny");
+      for (const other of this.#approvals) this.#permit(other.callId, false);
       this.#approvals = [];
-      this.#trace.call("sope_cancel", "");
+      this.#cancel();
     }
     return true;
   }
 
-  /** A turn ended: its pending requests are moot. */
-  #dropApprovals(turnId: number): void {
-    for (const a of this.#approvals.filter((a) => a.turnId === turnId)) a.resolve("deny");
-    this.#approvals = this.#approvals.filter((a) => a.turnId !== turnId);
+  #dropApproval(callId: number): void {
+    this.#approvals = this.#approvals.filter((a) => a.callId !== callId);
+  }
+
+  /** A turn ended: libsope dropped its pending requests. Subagent turns are keyed by -agentId. */
+  #dropApprovals(turnId: number, agentId: number): void {
+    const key = agentId ? -agentId : turnId;
+    this.#approvals = this.#approvals.filter((a) => a.turnId !== key);
   }
 
   // ---- rendering ------------------------------------------------------
@@ -684,7 +744,7 @@ export class App {
   }
 
   #previewRows(a: Approval, max: number): PreviewLine[] {
-    const rows = a.tool.preview?.(a.input) ?? [{ text: summarizeInput(JSON.stringify(a.input)), kind: "plain" as const }];
+    const rows = previewFor(a.name, a.input);
     return rows.length > max ? [...rows.slice(0, max - 1), { text: `… ${rows.length - max + 1} more lines`, kind: "plain" }] : rows;
   }
 
@@ -692,7 +752,7 @@ export class App {
     const who = a.subagent ? `subagent ${a.subagent} wants` : "sope wants";
     let x = buf.text(PAD, y, "? ", { fg: palette.tool, bold: true });
     x = buf.text(x, y, `${who} to run `, { fg: palette.muted });
-    x = buf.text(x, y, a.tool.name, { fg: palette.tool, bold: true });
+    x = buf.text(x, y, a.name, { fg: palette.tool, bold: true });
     if (this.#approvals.length > 1) buf.text(x, y, `  (+${this.#approvals.length - 1} more waiting)`, { fg: palette.faint });
 
     const marks = { add: "+ ", remove: "- ", command: "$ ", plain: "  " } as const;
@@ -705,7 +765,7 @@ export class App {
 
     const options: Array<[string, string]> = [
       ["y", "allow once"],
-      ["a", `always allow ${a.tool.name}`],
+      ["a", `always allow ${a.name}`],
       ["n", "deny"],
       ["esc", "deny and stop"],
     ];

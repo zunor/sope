@@ -1,30 +1,33 @@
 // SPDX-License-Identifier: MIT
 // Print mode (sope -p): one turn without the TUI. The answer streams to
 // stdout; tool activity and errors go to stderr, so the output can be piped.
-// Tools that change things are denied unless --allow-all.
+// Nobody is there to approve edits and commands, so built-in tools that
+// change things are refused unless --allow-all.
 
 import { AgentBridge } from "./agent/bridge";
-import { ToolRunner } from "./agent/runner";
-import { toolsFor } from "./agent/tools";
+import { HostToolRunner } from "./agent/runner";
+import { describeCall, hostToolsFor, parseInput } from "./agent/tools";
 import { agentOptions, type Config } from "./config";
-import { summarizeInput } from "./ui/chat";
 
 export async function runPrint(config: Config, prompt: string, allowAll: boolean): Promise<number> {
   const err = (line: string) => process.stderr.write(`${line}\n`);
-  const tools = toolsFor(config.provider);
+  const tools = hostToolsFor(config.provider);
   let exitCode = 1;
   let endedWithNewline = true;
   let finish!: () => void;
   const finished = new Promise<void>((resolve) => (finish = resolve));
 
-  const bridge = new AgentBridge(agentOptions(config), (events) => {
+  const bridge = new AgentBridge(agentOptions(config, allowAll ? "allow" : "deny"), (events) => {
     for (const ev of events) {
       if (ev.type === "closed") continue;
-      if (ev.type === "tool_call") {
-        err(`· ${ev.name} ${summarizeInput(ev.input).slice(0, 120)}`);
-        runner.run(ev.callId, ev.turnId, ev.name, ev.input);
+      if (ev.type === "tool_call" || ev.type === "tool_start") {
+        err(`· ${ev.name} ${describeCall(ev.name, parseInput(ev.input)).replace(/\s+/g, " ").slice(0, 120)}`);
+        if (ev.type === "tool_call") runner.run(ev.callId, ev.turnId, ev.name, ev.input);
+      } else if (ev.type === "tool_end") {
+        if (ev.isError && ev.result.includes("permissions=deny"))
+          err(`sope: refused ${ev.name} (run with --allow-all to permit edits, commands and fetches)`);
       } else if (ev.agentId) {
-        continue; // subagents: only their tool calls need us
+        continue; // subagents: only their tool calls matter here
       } else if (ev.type === "text_delta") {
         process.stdout.write(ev.text);
         endedWithNewline = ev.text.endsWith("\n");
@@ -40,16 +43,7 @@ export async function runPrint(config: Config, prompt: string, allowAll: boolean
     }
   });
   for (const tool of tools) bridge.agent.registerTool(tool);
-  const runner = new ToolRunner(
-    bridge.agent,
-    tools,
-    async (req) => {
-      err(`sope: denied ${req.tool.name} (run with --allow-all to permit edits and commands)`);
-      return "deny";
-    },
-    () => {},
-  );
-  runner.allowAll = allowAll;
+  const runner = new HostToolRunner(bridge.agent, tools);
 
   // `sope -p ... | head` closes the pipe early: stop quietly, like other CLIs.
   process.stdout.on("error", (e: NodeJS.ErrnoException) => {

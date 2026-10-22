@@ -87,17 +87,22 @@ export function systemPrompt(cwd = process.cwd(), now = new Date()): string {
     `Working directory: ${cwd}`,
     `Platform: ${process.platform}. Today is ${now.toDateString()}.`,
     "",
-    "Use the tools to look things up instead of guessing: list_files, read_file and search are free to use.",
-    "write_file, edit_file and bash need the user's approval each time, so batch work sensibly and explain briefly what you are about to change.",
+    "Use the tools to look things up instead of guessing: read, glob and grep are free to use.",
+    "write, edit, bash and web_fetch need the user's approval each time, so batch work sensibly and explain briefly what you are about to change.",
     "Read a file before editing it. Prefer small, verifiable steps, and check your work (run the tests or the program) when you can.",
+    "For work with several steps, keep a todo list with todo_write so the user can follow along.",
     "For broad investigations, launch subagents with the agent tool, several at once when the parts are independent.",
     "Answer in the user's language. Be concise; use Markdown for structure and code.",
   ].join("\n");
 }
 
-/** Agent options for a config; secrets stay out of anything that gets displayed. */
-export function agentOptions(c: Config): Record<string, string> {
-  const options: Record<string, string> = { provider: c.provider, system: systemPrompt() };
+/**
+ * Agent options for a config; secrets stay out of anything that gets
+ * displayed. permissions: whether built-in tools that change things ask
+ * first (the TUI answers), run freely (--allow-all), or are refused.
+ */
+export function agentOptions(c: Config, permissions: "ask" | "allow" | "deny" = "ask"): Record<string, string> {
+  const options: Record<string, string> = { provider: c.provider, system: systemPrompt(), permissions };
   if (c.model) options.model = c.model;
   if (c.compactThreshold) options["compact.threshold"] = String(c.compactThreshold);
   if (c.provider === "openai") {

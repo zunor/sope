@@ -109,7 +109,11 @@ test("streams text and reasoning, assembles tool calls, loops until the model st
   expect(first!.model).toBe("glm-test");
   expect(first!.stream).toBe(true);
   expect(first!.messages[0]).toEqual({ role: "system", content: "Be brief." });
-  expect(first!.tools!.map((t) => t.function.name)).toEqual(["echo", "agent"]);
+  expect(first!.tools!.map((t) => t.function.name)).toEqual([
+    "echo",
+    ...["read", "write", "edit", "glob", "grep", "bash", "bash_output", "bash_kill", "web_fetch", "todo_write"],
+    "agent",
+  ]);
   // Round two replays the assistant tool call and answers it by id.
   expect(second!.messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool"]);
   expect(second!.messages[2]!.tool_calls).toEqual([

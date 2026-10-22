@@ -260,6 +260,7 @@ int sope_shutdown(void)
 
     for (i = 0; i < n; i++) pthread_join(threads[i], NULL);
     sope__http_shutdown(); /* no agent is alive, so no transfer is either */
+    sope__proc_shutdown(); /* nor a process, once the killed ones are reaped */
 
     pthread_mutex_lock(&P.mu);
     free(P.threads);

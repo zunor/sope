@@ -7,9 +7,11 @@
  *   START ─▶ CALL ─(model wants tools)─▶ TOOLS ─(all results in)─▶ CALL ─▶ ...
  *              └──(no tool use)──▶ end_turn
  *
- * CALL streams one model call through a provider; TOOLS waits for host tool
- * results (sope_tool_result) and subagents. Each step returns instead of
- * blocking, so waiting costs no thread.
+ * CALL streams one model call through a provider; TOOLS waits for the tool
+ * calls of that response: built-in tools (tools.c, each a task of its own,
+ * maybe after the host's sope_permit), host tools (sope_tool_result) and
+ * subagents. Each step returns instead of blocking, so waiting costs no
+ * thread.
  *
  * COMPACT runs before a CALL once the last call reported more input tokens
  * than compact.threshold, or as the whole turn for sope_compact: one model
@@ -25,12 +27,14 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
-#include "agent.h"
+#include "tools.h"
 
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define DEFAULT_MAX_ROUNDS 32
 #define AGENT_TOOL "agent"
@@ -165,7 +169,9 @@ static void free_specs(turn_state *t)
         free((char *)t->specs[i].input_schema);
     }
     free(t->specs);
+    free(t->spec_builtin);
     t->specs = NULL;
+    t->spec_builtin = NULL;
     t->n_specs = 0;
 }
 
@@ -217,6 +223,41 @@ static int add_agent_spec_locked(sope_agent_t *a)
     return ok;
 }
 
+/* Subagents see only the tools their type lists. */
+static int filter_allows(const sope_agent_t *a, const char *name)
+{
+    size_t i;
+    if (!a->tool_filter) return 1;
+    for (i = 0; i < a->n_tool_filter; i++)
+        if (!strcmp(a->tool_filter[i], name) || !strcmp(a->tool_filter[i], "*")) return 1;
+    return 0;
+}
+
+/* Offers the built-in tools that no host tool replaces; *mu held. */
+static int add_builtin_specs_locked(sope_agent_t *a)
+{
+    turn_state *t = &a->turn;
+    size_t i;
+    for (i = 0; i < sope__builtin_count(); i++) {
+        const sope_builtin *b = sope__builtin_at(i);
+        const tool_def *td;
+        int replaced = 0;
+        for (td = a->tools; td; td = td->next)
+            if (!strcmp(td->name, b->name)) replaced = 1;
+        if (replaced || !filter_allows(a, b->name)) continue;
+        t->spec_builtin[t->n_specs] = b;
+        if (!add_spec(t, b->name, b->description, b->schema)) return 0;
+    }
+    return 1;
+}
+
+static char *working_dir(const char *option)
+{
+    char buf[PATH_MAX];
+    if (option && *option) return sope__strdup(option);
+    return sope__strdup(getcwd(buf, sizeof buf) ? buf : "/");
+}
+
 static const sope_provider *find_provider(const char *name)
 {
     size_t i;
@@ -232,7 +273,7 @@ static int begin_turn(sope_agent_t *a)
 {
     turn_state *t = &a->turn;
     msg_node *m;
-    char *provider = NULL, *rounds = NULL, *subagents = NULL, *threshold = NULL;
+    char *provider = NULL, *rounds = NULL, *subagents = NULL, *threshold = NULL, *cwd = NULL, *permissions = NULL;
     size_t n_tools = 0;
     tool_def *td;
     int reset, ok = 1, offer_agent;
@@ -259,19 +300,30 @@ static int begin_turn(sope_agent_t *a)
     rounds = sope__option_dup_locked(a, "max_rounds");
     subagents = sope__option_dup_locked(a, "subagents");
     threshold = sope__option_dup_locked(a, "compact.threshold");
+    cwd = sope__option_dup_locked(a, "cwd");
+    permissions = sope__option_dup_locked(a, "permissions");
     t->system = sope__option_dup_locked(a, "system");
 
     offer_agent = a->parent == NULL && a->root->subagents && !(subagents && !strcmp(subagents, "off"));
     for (td = a->tools; td; td = td->next) n_tools++;
-    t->specs = calloc(n_tools + 1, sizeof *t->specs);
-    if (!t->specs) ok = 0;
+    n_tools += sope__builtin_count() + 1; /* + agent */
+    t->specs = calloc(n_tools, sizeof *t->specs);
+    t->spec_builtin = calloc(n_tools, sizeof *t->spec_builtin);
+    if (!t->specs || !t->spec_builtin) ok = 0;
     for (td = a->tools; ok && td; td = td->next) ok = add_spec(t, td->name, td->description, td->input_schema);
+    if (ok) ok = add_builtin_specs_locked(a);
     if (ok && offer_agent) ok = add_agent_spec_locked(a);
     pthread_mutex_unlock(a->mu);
+
+    t->permit = permissions && !strcmp(permissions, "allow")  ? PERMIT_ALLOW
+                : permissions && !strcmp(permissions, "deny") ? PERMIT_DENY
+                                                               : PERMIT_ASK;
+    if (ok) ok = (t->cwd = working_dir(cwd)) != NULL;
 
     sope__push_event(a, SOPE_EVENT_TURN_START, m->turn_id, 0, 0, NULL, 0, NULL, 0);
     if (reset) {
         sope__history_clear(&a->history);
+        sope__files_clear(a);
         a->context_tokens = 0;
     }
 
@@ -298,6 +350,8 @@ static int begin_turn(sope_agent_t *a)
     free(rounds);
     free(subagents);
     free(threshold);
+    free(cwd);
+    free(permissions);
     return 1;
 }
 
@@ -310,7 +364,16 @@ static void call_free(sope_call *c)
     free(c);
 }
 
-/* Removes the pending calls of agent `a`; *mu held. */
+static void pending_free(pending_call *p)
+{
+    sope__tool_run_discard(p->run); /* still waiting for sope_permit */
+    free(p->name);
+    free(p->content);
+    free(p);
+}
+
+/* Removes the pending calls of agent `a`, ending the tool calls the host
+ * still sees as open; *mu held. */
 static void drop_pending_locked(sope_agent_t *a)
 {
     pending_call **pp = &a->root->pending;
@@ -318,8 +381,10 @@ static void drop_pending_locked(sope_agent_t *a)
         pending_call *p = *pp;
         if (p->owner == a) {
             *pp = p->next;
-            free(p->content);
-            free(p);
+            if (!p->done && p->kind != PENDING_SUBAGENT)
+                sope__push_event_locked(a, SOPE_EVENT_TOOL_END, p->turn_id, p->call_id, 1, p->name, strlen(p->name),
+                                        "Cancelled.", 10);
+            pending_free(p);
         } else {
             pp = &p->next;
         }
@@ -346,6 +411,7 @@ static void finish_turn(sope_agent_t *a, int32_t stop)
 
     free_specs(t);
     free(t->system);
+    free(t->cwd);
     free(t->msg->text);
     free(t->msg);
     memset(t, 0, sizeof *t);
@@ -444,6 +510,14 @@ static const char *spawn_subagent(sope_agent_t *a, const sope_tool_use *u)
     if (d->max_rounds > 0) {
         snprintf(rounds, sizeof rounds, "%d", (int)d->max_rounds);
         if (!set_child_option(child, "max_rounds", rounds)) goto oom;
+    }
+    if (d->tools) {
+        size_t i;
+        if (!(child->tool_filter = calloc(d->n_tools ? d->n_tools : 1, sizeof *child->tool_filter))) goto oom;
+        for (i = 0; i < d->n_tools; i++) {
+            if (!(child->tool_filter[i] = sope__strdup(d->tools[i]))) goto oom;
+            child->n_tool_filter++;
+        }
     }
     tail = &child->tools;
     for (td = a->tools; td; td = td->next) {
@@ -622,24 +696,33 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
     for (i = 0; i < asst->n_tool_uses; i++) {
         sope_tool_use *u = &asst->tool_uses[i];
         pending_call *p = calloc(1, sizeof *p);
+        const sope_builtin *builtin = NULL;
         const char *err = NULL;
+        char denied[256];
         int offered = 0, is_agent;
         size_t k;
 
         /* Models sometimes call tools they were not offered; answer those
          * ourselves instead of bothering the host. */
         for (k = 0; k < t->n_specs; k++)
-            if (!strcmp(t->specs[k].name, u->name)) offered = 1;
+            if (!strcmp(t->specs[k].name, u->name)) {
+                offered = 1;
+                builtin = t->spec_builtin[k];
+            }
         is_agent = offered && !strcmp(u->name, AGENT_TOOL);
 
         pthread_mutex_lock(a->mu);
         u->call_id = ++a->root->next_call_id;
-        if (p) {
+        if (p && (p->name = sope__strdup(u->name))) {
             p->call_id = u->call_id;
+            p->turn_id = turn_id(a);
             p->owner = a;
-            p->kind = is_agent ? PENDING_SUBAGENT : PENDING_TOOL;
+            p->kind = is_agent ? PENDING_SUBAGENT : builtin ? PENDING_BUILTIN : PENDING_TOOL;
             p->next = a->root->pending;
             a->root->pending = p;
+        } else if (p) {
+            free(p);
+            p = NULL;
         }
         pthread_mutex_unlock(a->mu);
         if (!p) {
@@ -655,11 +738,39 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
             u->id = sope__strdup(id);
         }
 
-        if (!offered) err = "no such tool is available";
-        else if (is_agent) err = spawn_subagent(a, u);
-        else
+        if (!offered) {
+            err = "no such tool is available";
+        } else if (is_agent) {
+            err = spawn_subagent(a, u);
+        } else if (builtin) {
+            tool_run *r;
+            sope__push_event(a, SOPE_EVENT_TOOL_START, turn_id(a), u->call_id, 0, u->name, strlen(u->name), u->input,
+                             u->input_len);
+            if (!(r = sope__tool_run_new(a, builtin, u->call_id, u->input, u->input_len))) {
+                err = "out of memory";
+            } else if (!builtin->ask || t->permit == PERMIT_ALLOW) {
+                sope__tool_run_start(r);
+            } else if (t->permit == PERMIT_DENY) {
+                sope__tool_run_discard(r);
+                snprintf(denied, sizeof denied,
+                         "%s is not allowed here (the host runs this agent with permissions=deny). Tell the user "
+                         "what you would do instead.",
+                         u->name);
+                err = denied;
+            } else {
+                pthread_mutex_lock(a->mu);
+                p->run = r; /* sope_permit starts or discards it */
+                pthread_mutex_unlock(a->mu);
+                sope__push_event(a, SOPE_EVENT_PERMISSION, turn_id(a), u->call_id, 0, u->name, strlen(u->name),
+                                 u->input, u->input_len);
+            }
+            if (err) /* it was announced, so it ends like every built-in call */
+                sope__push_event(a, SOPE_EVENT_TOOL_END, turn_id(a), u->call_id, 1, u->name, strlen(u->name), err,
+                                 strlen(err));
+        } else {
             sope__push_event(a, SOPE_EVENT_TOOL_CALL, turn_id(a), u->call_id, 0, u->name, strlen(u->name), u->input,
                              u->input_len);
+        }
         if (err) { /* answer the model directly: it can fix its input and retry */
             pthread_mutex_lock(a->mu);
             p->content = sope__strdup(err);
@@ -699,10 +810,7 @@ static sope_next collect_tools(sope_agent_t *a)
         m = p ? tool_message(u, p->content ? p->content : "", p->len, p->is_error)
               : tool_message(u, "(no result)", 11, 1);
         if (m) history_append(&a->history, m);
-        if (p) {
-            free(p->content);
-            free(p);
-        }
+        if (p) pending_free(p);
     }
     pthread_mutex_unlock(a->mu);
 
@@ -841,11 +949,12 @@ static sope_next step_turn(sope_agent_t *a)
     return t->phase == PHASE_COMPACT ? end_compact(a, s.value) : end_call(a, s.value);
 }
 
-/* The turn was cancelled or the agent is closing: stop subagents first, so
- * that all of a turn's events precede its TURN_END. */
+/* The turn was cancelled or the agent is closing: stop subagents and
+ * running tools first, so that all of a turn's events precede its TURN_END. */
 static sope_next abort_turn(sope_agent_t *a)
 {
     sope_agent_t *c;
+    tool_run *r;
     int waiting;
 
     if (a->turn.call) {
@@ -859,9 +968,13 @@ static sope_next abort_turn(sope_agent_t *a)
         if (c->active_turn) c->cancel_requested = 1;
         sope__task_wake(&c->task);
     }
-    waiting = a->children != NULL;
+    for (r = a->runs; r; r = r->next) {
+        r->cancel = 1;
+        sope__task_wake(&r->task);
+    }
+    waiting = a->children != NULL || a->runs != NULL;
     pthread_mutex_unlock(a->mu);
-    if (waiting) return next(SOPE__NEXT_WAIT); /* child_closed wakes us */
+    if (waiting) return next(SOPE__NEXT_WAIT); /* child_closed and finished runs wake us */
 
     finish_turn(a, SOPE_STOP_CANCELLED);
     return next(SOPE__NEXT_CONTINUE);

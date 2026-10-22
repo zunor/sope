@@ -52,8 +52,12 @@ set(SOPE_SOURCES
   src/loop.c
   src/pool.c
   src/provider_mock.c
+  src/proc.c
   src/provider_openai.c
+  src/search.c
+  src/tools.c
   src/util.c
+  src/web.c
 )
 
 add_library(sope SHARED ${SOPE_SOURCES})
@@ -131,6 +135,9 @@ if(SOPE_BUILD_TESTS)
   add_executable(test_json tests/test_json.c)
   target_link_libraries(test_json PRIVATE sope_static)
   add_test(NAME json COMMAND test_json)
+  add_executable(test_tools tests/test_tools.c)
+  target_link_libraries(test_tools PRIVATE sope_static)
+  add_test(NAME tools COMMAND test_tools)
 endif()
 
 if(SOPE_BUILD_EXAMPLES)

@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { coreTools, clip } from "../src/agent/tools";
+import { expect, test } from "bun:test";
+import { describeCall, formatTodos, previewFor, todosOf } from "../src/agent/tools";
 import { CliError, parseArgs } from "../src/cli";
 import { agentOptions, loadConfig, parseEnvFile } from "../src/config";
 
@@ -35,50 +32,40 @@ test("layers config: file < env < flags", () => {
   expect(agentOptions(mock)["openai.api_key"]).toBeUndefined();
 });
 
-test("clips long output in the middle", () => {
-  expect(clip("short", 10)).toBe("short");
-  const out = clip("a".repeat(50) + "b".repeat(50), 20);
-  expect(out.startsWith("a".repeat(10)) && out.endsWith("b".repeat(10))).toBe(true);
-  expect(out).toContain("80 characters omitted");
+test("describes calls and previews the ones that ask", () => {
+  expect(describeCall("read", { file_path: "src/a.c" })).toBe("src/a.c");
+  expect(describeCall("grep", { pattern: "TODO", path: "src", glob: "*.c" })).toBe("TODO in src (*.c)");
+  expect(describeCall("bash", { command: "make", run_in_background: true })).toBe("[background] make");
+  expect(describeCall("echo", { input: "hi" })).toBe("hi");
+  expect(previewFor("edit", { file_path: "a.c", old_string: "x", new_string: "y" })).toEqual([
+    { text: "a.c", kind: "plain" },
+    { text: "x", kind: "remove" },
+    { text: "y", kind: "add" },
+  ]);
+  expect(previewFor("bash", { command: "rm -rf build", description: "Clean" })).toEqual([
+    { text: "Clean", kind: "plain" },
+    { text: "rm -rf build", kind: "command" },
+  ]);
+  expect(previewFor("write", { file_path: "f", content: "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n" }).at(-1)).toEqual({
+    text: "… 2 more lines",
+    kind: "plain",
+  });
 });
 
-let dir = "";
-let cwd = "";
-const tool = (name: string) => coreTools.find((t) => t.name === name)!;
-const ctx = { signal: new AbortController().signal };
-
-beforeAll(async () => {
-  cwd = process.cwd();
-  dir = await mkdtemp(join(tmpdir(), "sope-tools-"));
-  process.chdir(dir);
-});
-afterAll(async () => {
-  process.chdir(cwd);
-  await rm(dir, { recursive: true, force: true });
+test("shows todo lists", () => {
+  const todos = todosOf({
+    todos: [
+      { content: "Write tests", activeForm: "Writing tests", status: "completed" },
+      { content: "Fix bug", activeForm: "Fixing the bug", status: "in_progress" },
+      { content: "Release", status: "pending" },
+    ],
+  })!;
+  expect(formatTodos(todos)).toBe("☒ Write tests\n◐ Fixing the bug\n☐ Release");
+  expect(todosOf({})).toBeNull();
 });
 
-test("write_file and edit_file stay in the working directory", async () => {
-  expect(await tool("write_file").run({ path: "a/b.txt", content: "one\ntwo\ntwo\n" }, ctx)).toBe("created a/b.txt (3 lines)");
-  await expect(Promise.resolve(tool("edit_file").run({ path: "a/b.txt", old_string: "two", new_string: "2" }, ctx))).rejects.toThrow("occurs 2 times");
-  expect(await tool("edit_file").run({ path: "a/b.txt", old_string: "two", new_string: "$&", replace_all: true }, ctx)).toContain("2 replacements");
-  expect(await readFile(join(dir, "a/b.txt"), "utf8")).toBe("one\n$&\n$&\n");
-  await expect(Promise.resolve(tool("write_file").run({ path: "../escape.txt", content: "x" }, ctx))).rejects.toThrow("outside");
-  expect(tool("write_file").readOnly).toBeFalsy();
-  expect(tool("read_file").readOnly).toBe(true);
-});
-
-test("read_file numbers lines and search finds them", async () => {
-  await writeFile(join(dir, "c.txt"), "alpha\nbeta\ngamma\n");
-  expect(await tool("read_file").run({ path: "c.txt", offset: 2, limit: 1 }, ctx)).toBe("2  beta\n… 2 more lines (continue with offset 3)");
-  expect(await tool("search").run({ pattern: "^gam" }, ctx)).toBe("c.txt:3: gamma");
-});
-
-test("bash reports output and exit status, and can be cancelled", async () => {
-  expect(await tool("bash").run({ command: "echo out; echo err >&2; exit 3" }, ctx)).toBe("out\nerr\n[exit code 3]");
-  const abort = new AbortController();
-  const started = performance.now();
-  const run = tool("bash").run({ command: "sleep 30" }, { signal: abort.signal });
-  setTimeout(() => abort.abort(), 100);
-  expect(await run).toContain("[cancelled]");
-  expect(performance.now() - started).toBeLessThan(5000);
+test("permission mode reaches the agent", () => {
+  const mock = loadConfig({}, {}, {});
+  expect(agentOptions(mock).permissions).toBe("ask");
+  expect(agentOptions(mock, "deny").permissions).toBe("deny");
 });

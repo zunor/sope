@@ -2,9 +2,31 @@
 
 版本号以 `include/sope.h` 为准，库、绑定和 `sope` 可执行文件同步发布，规则见 [docs/release.md](docs/release.md)。
 
+## 0.2.0 — 2026-10-23
+
+工具从 TUI 搬进了库：任何语言嵌入 libsope 都直接拥有读写文件、搜索、执行命令和抓网页的能力。ABI 升到 0.2（新增函数和事件，0.1 的宿主需要重新编译）。
+
+### libsope（C ABI 0.2）
+
+- 内置工具：`read`、`write`、`edit`、`glob`、`grep`、`bash`（`run_in_background` + `bash_output` / `bash_kill`）、`web_fetch`、`todo_write`，参考 soren 的同名工具设计
+- 每次工具调用是线程池上的一个独立任务：并行的工具调用真正并行，等命令和下载不占线程；新增进程回收线程（`src/proc.c`）
+- 新事件 `SOPE_EVENT_TOOL_START`（12）、`SOPE_EVENT_TOOL_END`（13，所有工具调用都有，包括宿主工具）、`SOPE_EVENT_PERMISSION`（14）
+- 新函数 `sope_permit`：批准或拒绝需要许可的工具调用，拒绝时可以附一句话给模型
+- 新选项 `cwd`（工具的工作目录）、`permissions`（`ask` / `allow` / `deny`）
+- `write` / `edit` 要求先读过文件，且读过之后文件没被改过
+- 取消回合会杀掉正在运行的命令（整个进程组）、中止下载，每个打开的工具调用都以 `TOOL_END` 收尾
+- 宿主可以注册同名工具替换内置工具；子 agent 类型的 `tools` 列表同时适用于内置工具和宿主工具
+- mock provider：`!<tool> {json}` 直接传 JSON 输入，`;;` 一次调用多个工具
+
+### sope 可执行文件
+
+- 不再自己实现工具，只显示库发来的工具事件、回答许可请求
+- `todo_write` 的任务清单直接显示在对话里
+- `-p` 模式下（没有 `--allow-all`）需要许可的工具改为由库直接拒绝，模型会收到原因
+
 ## 0.1.1 — 2026-10-23
 
-- 许可证：MIT（`LICENSE`，源文件带 SPDX 标识）；bundled 发布包附带 curl 和 mbedTLS 的许可证
+- 许可证：MIT（`LICENSE`，版权人 Zonor，源文件带 SPDX 标识）；bundled 发布包附带 curl 和 mbedTLS 的许可证
 - TUI 默认接管鼠标：滚轮滚动对话（之前滚轮在备用屏幕里变成 ↑/↓，翻的是输入历史）；拖动选中文字、松开复制到剪贴板（OSC 52 + pbcopy/wl-copy/xclip）；`SOPE_MOUSE=0` 或 `/mouse` 还给终端
 - 往上翻看时，新输出不再把视图往下推
 

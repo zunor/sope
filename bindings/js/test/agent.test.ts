@@ -31,8 +31,9 @@ test("version matches the header and the package", async () => {
 
 test("checks ABI compatibility", () => {
   const v = (major: number, minor: number, patch = 0) => (major << 16) | (minor << 8) | patch;
-  expect(abiCompatible(v(0, 1, 7))).toBe(true);
-  expect(abiCompatible(v(0, 2))).toBe(false); // 0.x: minor versions may break the ABI
+  expect(abiCompatible(v(0, 2, 7))).toBe(true);
+  expect(abiCompatible(v(0, 1))).toBe(false); // 0.x: minor versions may break the ABI
+  expect(abiCompatible(v(0, 3))).toBe(false);
   expect(abiCompatible(v(1, 1))).toBe(false);
 });
 
