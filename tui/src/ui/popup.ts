@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Popups over the bottom of the screen: a thin box with a title in its top
 // edge, and a list of choices moved through with ↑/↓ (or picked by number
-// or with the mouse).
+// or with the mouse). The permission prompt, the permission modes and the
+// model picker are each a Popup; the app gives one the input's place, draws
+// its box, and routes keys, typing and the pointer to it.
 //
 //   ╭─ Permission required ─────────────────────────────╮
 //   │ sope wants to run bash                             │
@@ -12,8 +14,35 @@
 //   ╰───────────────────────── ↑↓ select · enter confirm ─╯
 
 import type { CellBuffer } from "../render/buffer";
-import { palette } from "../theme";
+import { palette, type Surfaces } from "../theme";
 import { stringWidth, truncate } from "../unicode/width";
+
+/** What a popup did with a key: "ignored" leaves it to the app. */
+export type Reply = "handled" | "close" | "ignored";
+
+/** One drawn frame: what a click can pick, and where the cursor goes (hidden if absent). */
+export interface PopupFrame {
+  hits: ChoiceHit[];
+  cursor?: { x: number; y: number };
+}
+
+export interface Popup {
+  readonly title: string;
+  readonly color: number;
+  /** Key hints for the bottom edge. */
+  readonly hints: Hints;
+  /** Rows wanted inside the box when at most `room` are free. */
+  height(room: number): number;
+  /** Draws inside the box: `h` rows from (x, y), `w` wide. */
+  render(buf: CellBuffer, x: number, y: number, w: number, h: number, colors: Surfaces): PopupFrame;
+  key(id: string): Reply;
+  /** Typed or pasted text. Without it, a typed character is a key. */
+  type?(text: string): void;
+  /** The pointer is on choice `index`; a click then presses enter. */
+  select(index: number): void;
+  /** The wheel turned over the popup (-1 up, 1 down). */
+  wheel?(by: number): void;
+}
 
 export interface Choice {
   label: string;

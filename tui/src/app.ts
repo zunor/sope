@@ -2,8 +2,8 @@
 // The sope TUI: wires the terminal, input decoding and the sessions together,
 // and lays out each frame. Each tab is a session (session.ts) with its own
 // agent; input and commands go to the one on screen. Sessions are saved
-// per directory (store.ts); the most recent few come back as tabs on start,
-// and ⋯ (or /sessions) lists them all.
+// per directory (store.ts); the most recent few come back as tabs on start
+// (workspace.ts), and ⋯ (or /sessions) lists them all.
 //
 //     explain thread pools     fix grep ×    +             ~/src/app  ⋯
 //
@@ -18,39 +18,45 @@
 //   ⠉⠉ Thinking… (1m 4s · 38 tok/s · tip: …)  (while a turn runs: a
 //                                                    meteor circles a one-row square)
 //   ──────────────────────────────────────────────────────────────────────
-//   › input                         (or a popup: a permission prompt for
-//   ───────────────────────────────  write / edit / bash / web_fetch, the
-//                                    permission modes, or the models)
+//   › input                         (or a popup in its place: the permission
+//   ───────────────────────────────  prompt, the permission modes, the models;
+//                                    see ui/popup.ts)
 //     ◈ Approve for me                 (and short notices after it)
+//
+// What a popup, the session list, a command or the editor does with a key
+// is theirs to decide; the app routes input, owns the layout and the state
+// shared by every tab (the permission mode, the panels shown).
 
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { version, type SopeEvent } from "sope";
+import type { SopeEvent } from "sope";
 import { clipboardImage, describeImage, imageRefs, pastedImagePath, readImageFile, type ImageFile } from "./agent/images";
 import { listModels, type ModelInfo } from "./agent/models";
-import { MODES, modeLabel, parseMode, type PermissionMode } from "./agent/permissions";
-import { ASKING_TOOLS, previewFor, READ_TOOLS, type HostTool, type PreviewLine } from "./agent/tools";
-import { configPath, type Config } from "./config";
+import { MODES, modeLabel, type PermissionMode } from "./agent/permissions";
+import { COMMANDS, runCommand, type CommandHost } from "./commands";
+import type { Config } from "./config";
 import type { CellBuffer } from "./render/buffer";
 import { parseOscColor } from "./render/color";
 import { Renderer } from "./render/renderer";
 import { InputParser, keyId, type InputEvent, type MouseEvent as MouseInput } from "./term/input";
 import { Terminal } from "./term/terminal";
-import { Session, type Approval, type Decision } from "./session";
-import { Store } from "./store";
+import { Session } from "./session";
+import { Store, type StoredSession } from "./store";
 import { palette, SPINNER, SPINNER_MS, surfaces, type Surfaces } from "./theme";
-import { SessionList } from "./ui/sessions";
-import { Highlighter, type TokenKind } from "./ui/highlight";
+import { ApprovalPrompt } from "./ui/approval";
 import { CommandSuggestions } from "./ui/commands";
-import { ModelPicker } from "./ui/models";
-import { drawBox, drawChoices, step, type Choice, type ChoiceHit, type Hints } from "./ui/popup";
 import type { Editor } from "./ui/editor";
-import { copyToClipboard, Selection } from "./ui/selection";
-import { pixelMeteor } from "./ui/pixel-meteor";
 import { METEOR_ROWS } from "./ui/meteor";
+import { ModePicker } from "./ui/modes";
+import { ModelPicker } from "./ui/models";
+import { pixelMeteor } from "./ui/pixel-meteor";
+import { drawBox, step, type ChoiceHit, type Popup } from "./ui/popup";
+import { copyToClipboard, Selection } from "./ui/selection";
+import { SessionList } from "./ui/sessions";
 import { drawStatus, tipAt } from "./ui/status";
 import { ALL_SESSIONS, drawTabs, NEW_TAB, TAB_ROWS, type TabHit, type TabInfo } from "./ui/tabs";
 import { stringWidth, truncate } from "./unicode/width";
+import { Workspace } from "./workspace";
 
 const PAD = 1;
 const PROMPT = "› ";
@@ -58,53 +64,9 @@ const MAX_INPUT_ROWS = 8;
 const ESC_TIMEOUT_MS = 25;
 const TICK_MS = 50; // animation frame rate while anything runs
 const MAX_TABS = 5; // sessions shown as tabs; the rest are a click on ⋯ away
-const HELP = (hostTools: HostTool[]) => [
-  `sope ${version()}. Commands:`,
-  "  /help              show this help",
-  "  /new               open a new session in a tab (alt+n, or click +)",
-  "  /close             close this session (alt+w, or × on its tab); it is no longer listed",
-  "  /sessions          list every saved session of this directory (or click ⋯)",
-  "  /clear             clear the transcript and the conversation history",
-  "  /compact [focus]   summarize the conversation to free context (also automatic)",
-  "  /model [name]      choose the model (alt+m), or switch to <name>; from the next turn",
-  "  /thinking          show or hide the model's full reasoning",
-  "  /trace             toggle the ABI trace panel (ctrl+t)",
-  "  /mouse             toggle mouse capture (wheel scroll, drag to copy); off gives selection back to the terminal",
-  "  /set <key> [val]   sope_agent_set_option; omit val to unset",
-  "  /permissions [m]   choose who approves edits and commands (shift+tab cycles): ask, auto, full",
-  "  /quit              exit",
-  "Images: ctrl+v pastes one from the clipboard, dragging an image file into the terminal attaches it, and sope --image <file> attaches one to the first message. They go to the image model (SOPE_IMAGE_MODEL).",
-  "Sessions: alt+1 … alt+9 or a click switches tabs; each keeps running in the background. They are saved per directory and come back on the next start.",
-  `Tools (built into libsope): ${[...READ_TOOLS, ...ASKING_TOOLS.map((t) => `${t}*`)].join(", ")}, plus \`agent\` for subagents (* may ask first).`,
-  "Permissions: Ask for approval asks before every * tool; Approve for me (the default) runs everything except risky steps: deleting or writing outside this directory, git push and other publishing, discarding uncommitted git work, sudo, global installs, ssh, curl uploads; Full access never asks.",
-  ...(hostTools.length ? [`Host tools (this TUI): ${hostTools.map((t) => t.name).join(", ")}.`] : []),
-  `Config: ${configPath()} or environment variables (SOPE_API_KEY, SOPE_MODEL, SOPE_BASE_URL, ...).`,
-  "Mock provider: plain text streams a reply; !echo <x>, !clock, !sleep <s> call host tools; !read {\"file_path\":\"README.md\"} (any tool, JSON input); !agent t1 | t2 runs subagents; !panic fails.",
-].join("\n");
-
-const MAX_PREVIEW_ROWS = 20;
-const MAX_MODEL_ROWS = 14;
-
-/** Key hints in the bottom edge of each popup. */
-const APPROVAL_HINTS: Hints = [["↑↓", "select"], ["enter", "confirm"], ["y/a/n", "answer"], ["esc", "stop"], ["shift+tab", "mode"]];
-const PICKER_HINTS: Hints = [["↑↓", "select"], ["enter", "choose"], ["esc", "close"]];
-const MODEL_HINTS: Hints = [["type", "search"], ["↑↓", "select"], ["enter", "use"], ["esc", "close"]];
-
-/** The answers of a permission prompt, in order (1-4). */
-const DECISIONS: Decision[] = ["once", "always", "deny", "stop"];
-const QUICK: Record<string, Decision> = { y: "once", a: "always", n: "deny" };
 
 const MODE_COLOR: Record<PermissionMode, number> = { ask: palette.muted, auto: palette.muted, full: palette.error };
 const MODE_ICON: Record<PermissionMode, string> = { ask: "◇", auto: "◈", full: "◆" };
-
-const SYNTAX: Record<TokenKind, number | undefined> = {
-  plain: undefined,
-  keyword: 0xc678dd,
-  string: 0x98c379,
-  number: 0xd19a66,
-  comment: 0x7f848e,
-  type: 0xe5c07b,
-};
 
 export interface AppOptions {
   config: Config;
@@ -113,9 +75,6 @@ export interface AppOptions {
   /** Attached to the first message (--image). */
   images?: ImageFile[];
 }
-
-const previewColor = (kind: PreviewLine["kind"]) =>
-  kind === "add" ? palette.ok : kind === "remove" ? palette.error : kind === "command" ? palette.tool : palette.muted;
 
 /** The background from $COLORFGBG ("fg;bg", set by some terminals) until the terminal answers the OSC 11 query. */
 function guessBackground(env = process.env): number | null {
@@ -133,29 +92,28 @@ export class App {
   #noticeTimer: ReturnType<typeof setTimeout> | null = null;
   #config: Config;
   #mode: PermissionMode; // shared by every session
-  #picker: number | null = null; // the selected mode while the mode popup is open
-  #choice = { callId: -1, index: 0 }; // the selected answer of the permission prompt on screen
-  #choiceHits: ChoiceHit[] = [];
-  #modeHit = { x0: 0, x1: 0 }; // the mode in the footer: a click opens the popup
-  #models: ModelPicker | null = null; // the model popup, while open
-  #modelList: Promise<ModelInfo[]> | null = null; // the endpoint's models, asked for once
-  #commands = new CommandSuggestions();
-  #commandHits: ChoiceHit[] = [];
-  #commandBounds: { x: number; y: number; w: number; h: number } | null = null;
-  #popupRows = 0; // rows the popup on screen takes, its edges included
   #initialPrompt?: string;
   #initialImages: ImageFile[];
   #dir = process.cwd().replace(homedir(), "~");
-  #directory = realpathSync(process.cwd()); // the key sessions are saved under
-  #store: Store | null;
-  #list: SessionList | null = null; // the session list, while open
+  #tabs: Workspace;
+  #colors: Surfaces = surfaces(guessBackground());
 
-  #sessions: Session[] = [];
-  #active = 0;
+  // Popups: the permission prompt of the session on screen takes the input's
+  // place while it waits; otherwise the one the user opened (modes, models).
+  #approval = new ApprovalPrompt(() => this.#session);
+  #popup: Popup | null = null;
+  #popupRows = 0; // rows the popup on screen takes, its edges included
+  #choiceHits: ChoiceHit[] = [];
+  #modelList: Promise<ModelInfo[]> | null = null; // the endpoint's models, asked for once
+  #list: SessionList | null = null; // the session list, while open
+  #commands = new CommandSuggestions(COMMANDS);
+  #commandHits: ChoiceHit[] = [];
+  #commandBounds: { x: number; y: number; w: number; h: number } | null = null;
+
   #tabHits: TabHit[] = [];
   #hoverStarted = 0;
   #hover: number | null = null; // tab bar item under the pointer
-  #colors: Surfaces = surfaces(guessBackground());
+  #modeHit = { x0: 0, x1: 0 }; // the mode in the footer: a click opens the popup
 
   #showThinking = false;
   #showTrace = false;
@@ -174,20 +132,19 @@ export class App {
     this.#term.setMouse(config.mouse);
 
     const { store, error } = Store.open();
-    this.#store = store;
-    // The most recent few, in the order they were started; the newest is on screen.
-    const recent = (store?.summaries(this.#directory) ?? []).slice(0, prompt ? MAX_TABS - 1 : MAX_TABS);
-    for (const summary of [...recent].reverse()) {
-      const stored = store!.get(summary.id);
-      if (stored) this.#sessions.push(this.#restore(stored));
-    }
-    if (!this.#sessions.length || prompt) this.#newSession();
-    else this.#switchTo(this.#sessions.length - 1);
+    this.#tabs = new Workspace(store, realpathSync(process.cwd()), MAX_TABS, (stored) => this.#makeSession(stored));
+    if (!this.#tabs.restore(prompt ? MAX_TABS - 1 : MAX_TABS) || prompt) this.#newSession();
+    this.#switched();
     if (error) this.#session.chat.add({ role: "error", text: `sessions will not be saved: ${error}` });
   }
 
   get #session(): Session {
-    return this.#sessions[this.#active]!;
+    return this.#tabs.current;
+  }
+
+  /** The popup on screen, if any. */
+  get #docked(): Popup | null {
+    return this.#session.approvals.length ? this.#approval : this.#popup;
   }
 
   start(): void {
@@ -213,136 +170,100 @@ export class App {
     if (this.#quitting) return;
     this.#quitting = true;
     this.#tick(false);
-    await Promise.all(this.#sessions.map((s) => s.shutdown()));
-    this.#store?.close();
+    await Promise.all(this.#tabs.sessions.map((s) => s.shutdown()));
+    this.#tabs.store?.close();
     this.#term.leave();
     process.exit(0);
   }
 
   // ---- sessions -------------------------------------------------------
 
-  #restore(stored: NonNullable<ReturnType<Store["get"]>>): Session {
-    const s = new Session(this.#config, () => this.#mode, (session, events) => this.#onSessionEvents(session, events), {
-      store: this.#store!,
-      directory: this.#directory,
-      stored,
-    });
+  #makeSession(stored?: StoredSession): Session {
+    const store = this.#tabs.store;
+    const persist = store ? { store, directory: this.#tabs.directory, stored } : undefined;
+    const s = new Session(this.#config, () => this.#mode, (session, events) => this.#onSessionEvents(session, events), persist);
     s.chat.showThinking = this.#showThinking;
     return s;
   }
 
   #newSession(): void {
-    this.#makeRoom();
-    const persist = this.#store ? { store: this.#store, directory: this.#directory } : undefined;
-    const s = new Session(this.#config, () => this.#mode, (session, events) => this.#onSessionEvents(session, events), persist);
-    s.chat.showThinking = this.#showThinking;
+    const s = this.#tabs.add();
     const c = this.#config;
     const hint = c.provider === "mock" && !c.apiKey ? " · set SOPE_API_KEY (or .env) to talk to a real model" : "";
     const full = this.#mode === "full" ? " · Full access: edits and commands run without asking" : "";
     s.chat.add({ role: "info", text: `/help for commands${hint}${full}` });
-    this.#sessions.push(s);
-    this.#switchTo(this.#sessions.length - 1);
+    this.#switched();
   }
 
   #switchTo(index: number): void {
-    if (index < 0 || index >= this.#sessions.length) return;
-    this.#active = index;
+    if (this.#tabs.switchTo(index)) this.#switched();
+  }
+
+  #openSession(id: string): void {
+    if (!this.#tabs.open(id)) return this.#flash("that session is gone");
+    this.#switched();
+  }
+
+  #closeSession(index?: number): void {
+    if (!this.#tabs.close(index)) return;
+    this.#setHover(null);
+    if (!this.#tabs.sessions.length) return this.#newSession();
+    this.#switched();
+  }
+
+  /** Another session is on screen: what pointed into the last one goes. */
+  #switched(): void {
     this.#session.chat.resetInteractions();
-    this.#commands = new CommandSuggestions();
+    this.#commands = new CommandSuggestions(COMMANDS);
     this.#commandHits = [];
     this.#commandBounds = null;
-    this.#session.unread = false;
-    this.#session.lastUsed = performance.now();
     this.#selection.clear();
   }
 
-  /**
-   * Keeps the tabs at MAX_TABS before one more opens: the least recently
-   * used idle tab is put away (saved and stopped, still in the list).
-   */
-  #makeRoom(): void {
-    if (this.#sessions.length < MAX_TABS) return;
-    const idle = this.#sessions.filter((s, i) => i !== this.#active && !s.busy && !s.approvals.length);
-    const victim = idle.sort((a, b) => a.lastUsed - b.lastUsed)[0];
-    if (!victim) return; // all busy: let the bar grow (it scrolls)
-    const index = this.#sessions.indexOf(victim);
-    void victim.shutdown();
-    this.#sessions.splice(index, 1);
-    if (index < this.#active) this.#active--;
-  }
-
-  /** Brings a saved session up in a tab: switches to it if it is open, else restores it. */
-  #openSession(id: string): void {
-    const open = this.#sessions.findIndex((s) => s.id === id);
-    if (open >= 0) return this.#switchTo(open);
-    const stored = this.#store?.get(id);
-    if (!stored) return this.#flash("that session is gone");
-    this.#makeRoom();
-    this.#sessions.push(this.#restore(stored));
-    this.#switchTo(this.#sessions.length - 1);
-  }
-
   #openList(): void {
-    const open = new Set(this.#sessions.map((s) => s.id));
-    const all = (this.#store?.summaries(this.#directory) ?? []).map((s) => ({ ...s, open: open.has(s.id) }));
-    this.#list = new SessionList(all, this.#dir);
-  }
-
-  /** Keys while the session list is open. */
-  #handleListKey(id: string): void {
-    const list = this.#list!;
-    switch (id) {
-      case "escape":
-      case "ctrl+c":
-        this.#list = null;
-        return;
-      case "enter": {
-        const picked = list.selected;
-        this.#list = null;
-        if (picked) this.#openSession(picked.id);
-        return;
-      }
-      case "up":
-      case "ctrl+p":
-        return list.move(-1);
-      case "down":
-      case "ctrl+n":
-        return list.move(1);
-      case "pageup":
-        return list.move(-10);
-      case "pagedown":
-        return list.move(10);
-      case "home":
-        return list.move(-Infinity);
-      case "end":
-        return list.move(Infinity);
-      case "backspace":
-        return list.backspace();
-    }
-  }
-
-  /** Closes a tab: the session stops and is no longer listed, but stays in the store. */
-  #closeSession(index = this.#active): void {
-    const s = this.#sessions[index];
-    if (!s) return;
-    void s.shutdown().then(() => s.delete());
-    this.#sessions.splice(index, 1);
-    this.#setHover(null);
-    if (!this.#sessions.length) return this.#newSession();
-    if (index < this.#active || this.#active >= this.#sessions.length) this.#active--;
-    this.#switchTo(Math.max(0, this.#active));
+    this.#list = new SessionList(this.#tabs.summaries(), this.#dir, (id) => this.#openSession(id));
   }
 
   #onSessionEvents(session: Session, events: SopeEvent[]): void {
     if (session !== this.#session) {
       if (events.some((ev) => ev.type === "turn_end" && !ev.agentId)) session.unread = true;
       if (events.some((ev) => ev.type === "permission") && session.approvals.length) {
-        this.#flash(`“${session.title}” is waiting for your approval (alt+${this.#sessions.indexOf(session) + 1})`, 4000);
+        this.#flash(`“${session.title}” is waiting for your approval (alt+${this.#tabs.sessions.indexOf(session) + 1})`, 4000);
       }
     }
-    this.#tick(this.#sessions.some((s) => s.busy));
+    this.#tick(this.#busy);
     this.#scheduleRender();
   }
+
+  get #busy(): boolean {
+    return this.#tabs.sessions.some((s) => s.busy);
+  }
+
+  // ---- what commands act on (commands.ts) -----------------------------
+
+  #host: CommandHost = ((app: App): CommandHost => ({
+    get session() {
+      return app.#session;
+    },
+    newSession: () => app.#newSession(),
+    closeSession: () => app.#closeSession(),
+    openSessions: () => app.#openList(),
+    openModels: () => app.#openModels(),
+    useModel: (id) => app.#useModel(id),
+    openModes: () => (app.#popup = app.#modePicker()),
+    setMode: (mode) => app.#setMode(mode),
+    toggleThinking: () => {
+      app.#showThinking = !app.#showThinking;
+      for (const s of app.#tabs.sessions) s.chat.showThinking = app.#showThinking;
+      return app.#showThinking;
+    },
+    toggleTrace: () => (app.#showTrace = !app.#showTrace),
+    toggleMouse: () => {
+      app.#term.setMouse(!app.#term.mouse);
+      return app.#term.mouse;
+    },
+    quit: () => void app.quit(),
+  }))(this);
 
   // ---- input ----------------------------------------------------------
 
@@ -366,13 +287,16 @@ export class App {
     if (ev.type === "mouse") return this.#handleMouse(ev);
     this.#selection.clear();
     if (this.#list) {
-      if (ev.type === "key") return this.#handleListKey(keyId(ev));
-      return this.#list.type(ev.text);
+      if (ev.type !== "key") return this.#list.type(ev.text);
+      if (this.#list.key(keyId(ev)) === "close") this.#list = null;
+      return;
     }
-    if (this.#models && !this.#session.approvals.length && (ev.type === "text" || ev.type === "paste")) return this.#models.type(ev.text);
-    if ((this.#session.approvals.length || this.#picker !== null) && (ev.type === "text" || ev.type === "paste")) {
-      if (ev.type === "text" && [...ev.text].length === 1) this.#handleKey(ev.text);
-      return; // the input box is hidden while a popup is up
+    const popup = this.#docked;
+    if (popup && ev.type !== "key") {
+      // The input box is hidden while a popup is up: typing is the popup's, or a key.
+      if (popup.type) popup.type(ev.text);
+      else if (ev.type === "text" && [...ev.text].length === 1) this.#handleKey(ev.text);
+      return;
     }
     switch (ev.type) {
       case "text":
@@ -403,139 +327,14 @@ export class App {
     if (bg !== null) this.#colors = surfaces(bg);
   }
 
-  #tabAt(x: number, y: number): TabHit | undefined {
-    return this.#tabHits.find((h) => x >= h.x0 && x < h.x1 && y >= h.y0 && y < h.y1);
-  }
-
-  #setHover(index: number | null): void {
-    if (index === this.#hover) return;
-    this.#hover = index;
-    this.#hoverStarted = performance.now();
-    this.#tick(this.#sessions.some((s) => s.busy));
-  }
-
-  #syncCommands(): boolean {
-    if (this.#list || this.#models || this.#picker !== null || this.#session.approvals.length) return false;
-    const editor = this.#session.editor;
-    return this.#commands.sync(editor.text, editor.cursor);
-  }
-
-  #completeCommand(fillOnly: boolean): void {
-    const completion = this.#commands.completion(fillOnly);
-    if (!completion) return;
-    const editor = this.#session.editor;
-    editor.set(completion.text);
-    this.#commands.sync(editor.text, editor.cursor);
-    this.#commands.dismiss();
-    this.#commandHits = [];
-    this.#commandBounds = null;
-    if (completion.execute) this.#submit();
-  }
-
-  #handleMouse(ev: MouseInput): void {
-    const p = { x: ev.x, y: ev.y };
-    this.#session.chat.hover(null);
-    if (ev.action === "move" || ev.action === "drag") this.#setHover(this.#tabAt(ev.x, ev.y)?.index ?? null);
-    if (this.#list) return this.#handleListMouse(ev);
-    if (this.#syncCommands() && this.#commandBounds) {
-      const b = this.#commandBounds;
-      const inside = ev.x >= b.x && ev.x < b.x + b.w && ev.y >= b.y && ev.y < b.y + b.h;
-      if (inside) {
-        if (ev.action === "wheel-up" || ev.action === "wheel-down") {
-          this.#commands.move(ev.action === "wheel-up" ? -1 : 1);
-          return;
-        }
-        const hit = this.#commandHits.find((h) => h.y === ev.y && ev.x >= h.x0 && ev.x < h.x1);
-        if (hit && (ev.action === "move" || (ev.action === "press" && ev.button === 0))) {
-          this.#commands.select(hit.index);
-          if (ev.action === "press") this.#completeCommand(false);
-        }
-        return;
-      }
-    }
-    // Popup choices follow the pointer and take a click.
-    const choice = this.#choiceHits.find((h) => h.y === ev.y && ev.x >= h.x0 && ev.x < h.x1);
-    if (choice && (ev.action === "move" || (ev.action === "press" && ev.button === 0))) {
-      if (this.#session.approvals.length) this.#choice.index = choice.index;
-      else if (this.#models) this.#models.select(choice.index);
-      else if (this.#picker !== null) this.#picker = choice.index;
-      if (ev.action === "press") this.#handleKey("enter");
-      return;
-    }
-    if (ev.action === "press" && ev.button === 0 && ev.y === this.#term.rows - 1 && ev.x >= this.#modeHit.x0 && ev.x < this.#modeHit.x1) {
-      this.#picker = this.#picker === null ? MODES.findIndex((m) => m.id === this.#mode) : null;
-      return;
-    }
-    if (ev.action !== "drag") this.#session.chat.hover(p);
-    switch (ev.action) {
-      case "move":
-        return;
-      case "wheel-up":
-      case "wheel-down":
-        if (this.#models && ev.y >= this.#term.rows - 1 - this.#popupRows) return this.#models.move(ev.action === "wheel-up" ? -1 : 1);
-        this.#selection.clear(); // it is in screen cells: the text under it is about to move
-        return this.#session.chat.scrollBy(ev.action === "wheel-up" ? 3 : -3);
-      case "press": {
-        if (ev.button !== 0) return;
-        const hit = this.#tabAt(ev.x, ev.y);
-        if (hit) {
-          if (hit.index === NEW_TAB) return this.#newSession();
-          if (hit.index === ALL_SESSIONS) return this.#openList();
-          return hit.close ? this.#closeSession(hit.index) : this.#switchTo(hit.index);
-        }
-        if (this.#session.chat.toggleAt(ev.x, ev.y)) {
-          this.#selection.clear();
-          return;
-        }
-        this.#selection.press(p);
-        return;
-      }
-      case "drag":
-        return this.#selection.drag(p);
-      case "release":
-        if (this.#selection.release(p)) this.#copySelection();
-    }
-  }
-
-  #handleListMouse(ev: MouseInput): void {
-    const list = this.#list!;
-    if (ev.action === "wheel-up" || ev.action === "wheel-down") return list.move(ev.action === "wheel-up" ? -3 : 3);
-    if (ev.action !== "press" || ev.button !== 0) return;
-    if (this.#tabAt(ev.x, ev.y)?.index === ALL_SESSIONS) {
-      this.#list = null; // ⋯ again closes it
-      return;
-    }
-    const hit = list.hit(ev.x, ev.y);
-    if (hit === "outside") this.#list = null;
-    else if (hit) {
-      this.#list = null;
-      this.#openSession(hit.id);
-    }
-  }
-
-  #copySelection(): void {
-    const screen = this.#renderer.screen;
-    const text = screen ? this.#selection.text(screen) : "";
-    if (!text.trim()) return;
-    copyToClipboard(text, (s) => this.#term.write(s));
-    this.#flash(`copied ${[...text].length} characters`);
-  }
-
-  /** Shows a short message after the permission mode in the footer. */
-  #flash(text: string, ms = 2000): void {
-    this.#notice = text;
-    if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
-    this.#noticeTimer = setTimeout(() => {
-      this.#notice = null;
-      this.#scheduleRender();
-    }, ms);
-  }
-
   #handleKey(id: string): void {
     if (id === "shift+tab") return this.#cycleMode();
-    if (this.#session.approvals.length && this.#handleApprovalKey(id)) return;
-    if (this.#models) return this.#handleModelKey(id);
-    if (this.#picker !== null) return this.#handlePickerKey(id);
+    const popup = this.#docked;
+    if (popup) {
+      const reply = popup.key(id);
+      if (reply === "close" && popup === this.#popup) this.#popup = null;
+      if (reply !== "ignored") return;
+    }
     const s = this.#session;
     const e = s.editor;
     if (this.#syncCommands()) {
@@ -559,10 +358,6 @@ export class App {
         return this.#closeSession();
       case "enter":
         return this.#submit();
-      case "ctrl+j":
-      case "alt+enter":
-      case "shift+enter":
-        return e.insert("\n");
       case "ctrl+v":
         this.#flash("reading the clipboard…");
         void clipboardImage()
@@ -592,183 +387,132 @@ export class App {
         return s.chat.scrollBy(s.chat.pageSize);
       case "pagedown":
         return s.chat.scrollBy(-s.chat.pageSize);
-      case "backspace":
-        return e.backspace();
-      case "delete":
-        return e.deleteForward();
-      case "left":
-      case "ctrl+b":
-        return e.left();
-      case "right":
-      case "ctrl+f":
-        return e.right();
-      case "home":
-      case "ctrl+a":
-        return e.lineStart();
-      case "end":
-      case "ctrl+e":
-        return e.lineEnd();
-      case "alt+left":
-      case "ctrl+left":
-      case "alt+b":
-        return e.wordLeft();
-      case "alt+right":
-      case "ctrl+right":
-      case "alt+f":
-        return e.wordRight();
-      case "ctrl+w":
-      case "alt+backspace":
-        return e.deleteWordLeft();
-      case "ctrl+u":
-        return e.killToLineStart();
-      case "ctrl+k":
-        return e.killToLineEnd();
-      case "up":
-      case "ctrl+p":
-        if (!e.moveVertical(-1, this.#inputWidth)) e.historyPrev();
-        return;
-      case "down":
-      case "ctrl+n":
-        if (!e.moveVertical(1, this.#inputWidth)) e.historyNext();
-        return;
     }
+    e.key(id, this.#inputWidth);
   }
 
-  /** The selected answer of the prompt on screen; a new prompt starts at "Yes". */
-  #selectedAnswer(): number {
-    const head = this.#session.approvals[0];
-    if (head && head.callId !== this.#choice.callId) this.#choice = { callId: head.callId, index: 0 };
-    return this.#choice.index;
+  #tabAt(x: number, y: number): TabHit | undefined {
+    return this.#tabHits.find((h) => x >= h.x0 && x < h.x1 && y >= h.y0 && y < h.y1);
   }
 
-  #handleApprovalKey(id: string): boolean {
-    const index = this.#selectedAnswer();
-    const move = (by: number) => {
-      this.#choice.index = step(index, by, DECISIONS.length);
-      return true;
-    };
-    switch (id) {
-      case "up":
-      case "ctrl+p":
-      case "k":
-        return move(-1);
-      case "down":
-      case "ctrl+n":
-      case "j":
-      case "tab":
-        return move(1);
-    }
-    const decision =
-      id === "enter" ? DECISIONS[index] : id === "escape" || id === "ctrl+c" ? "stop" : (DECISIONS[Number(id) - 1] ?? QUICK[id.toLowerCase()]);
-    if (!decision) {
-      // Switching tabs still works; everything else is swallowed.
-      return !["pageup", "pagedown", "ctrl+t", "f2", "ctrl+l", "alt+n", "alt+w"].includes(id) && !/^alt\+[1-9]$/.test(id);
-    }
-    this.#session.decide(decision);
-    return true;
+  #setHover(index: number | null): void {
+    if (index === this.#hover) return;
+    this.#hover = index;
+    this.#hoverStarted = performance.now();
+    this.#tick(this.#busy);
   }
 
-  // ---- permission modes -----------------------------------------------
-
-  #setMode(mode: PermissionMode): void {
-    this.#mode = mode;
-    for (const s of this.#sessions) s.recheck(); // waiting requests the new mode allows go ahead
-    this.#flash(MODES.find((x) => x.id === mode)!.description, 3000); // the footer names the mode already
-  }
-
-  /** shift+tab: ask → auto → full → ask. */
-  #cycleMode(): void {
-    const i = MODES.findIndex((m) => m.id === this.#mode);
-    this.#setMode(MODES[step(i, 1, MODES.length)]!.id);
-    if (this.#picker !== null) this.#picker = step(i, 1, MODES.length);
-  }
-
-  /** Keys while the mode popup is open. */
-  #handlePickerKey(id: string): void {
-    const n = MODES.length;
-    switch (id) {
-      case "up":
-      case "ctrl+p":
-      case "k":
-        this.#picker = step(this.#picker!, -1, n);
-        return;
-      case "down":
-      case "ctrl+n":
-      case "j":
-      case "tab":
-        this.#picker = step(this.#picker!, 1, n);
-        return;
-      case "escape":
-      case "ctrl+c":
-        this.#picker = null;
-        return;
-      case "enter":
-        this.#setMode(MODES[this.#picker!]!.id);
-        this.#picker = null;
-        return;
-    }
-    const picked = MODES[Number(id) - 1];
-    if (picked) {
-      this.#setMode(picked.id);
-      this.#picker = null;
-    }
-  }
-
-  // ---- models ---------------------------------------------------------
-
-  #openModels(): void {
-    this.#picker = null;
-    const picker = new ModelPicker(this.#session.model, this.#store?.recentModels() ?? []);
-    this.#models = picker;
-    this.#modelList ??= listModels(this.#config);
-    this.#modelList
-      .then((models) => picker.setModels(models))
-      .catch((err: Error) => {
-        this.#modelList = null; // ask again next time
-        picker.setError(err.message);
-      })
-      .finally(() => this.#scheduleRender());
-  }
-
-  /** Keys while the model popup is open; typing goes to its search. */
-  #handleModelKey(id: string): void {
-    const m = this.#models!;
-    switch (id) {
-      case "up":
-      case "ctrl+p":
-        return m.move(-1);
-      case "down":
-      case "ctrl+n":
-      case "tab":
-        return m.move(1);
-      case "pageup":
-        return m.move(-10);
-      case "pagedown":
-        return m.move(10);
-      case "backspace":
-        return m.backspace();
-      case "escape":
-      case "ctrl+c":
-        this.#models = null;
-        return;
-      case "enter": {
-        const picked = m.selected;
-        this.#models = null;
-        if (picked) this.#useModel(picked);
+  #handleMouse(ev: MouseInput): void {
+    const p = { x: ev.x, y: ev.y };
+    this.#session.chat.hover(null);
+    if (ev.action === "move" || ev.action === "drag") this.#setHover(this.#tabAt(ev.x, ev.y)?.index ?? null);
+    if (this.#list) return this.#handleListMouse(ev);
+    if (this.#syncCommands() && this.#commandBounds) {
+      const b = this.#commandBounds;
+      const inside = ev.x >= b.x && ev.x < b.x + b.w && ev.y >= b.y && ev.y < b.y + b.h;
+      if (inside) {
+        if (ev.action === "wheel-up" || ev.action === "wheel-down") {
+          this.#commands.move(ev.action === "wheel-up" ? -1 : 1);
+          return;
+        }
+        const hit = this.#commandHits.find((h) => h.y === ev.y && ev.x >= h.x0 && ev.x < h.x1);
+        if (hit && (ev.action === "move" || (ev.action === "press" && ev.button === 0))) {
+          this.#commands.select(hit.index);
+          if (ev.action === "press") this.#completeCommand(false);
+        }
         return;
       }
     }
+    // Popup choices follow the pointer and take a click.
+    const popup = this.#docked;
+    const choice = this.#choiceHits.find((h) => h.y === ev.y && ev.x >= h.x0 && ev.x < h.x1);
+    if (popup && choice && (ev.action === "move" || (ev.action === "press" && ev.button === 0))) {
+      popup.select(choice.index);
+      if (ev.action === "press") this.#handleKey("enter");
+      return;
+    }
+    if (ev.action === "press" && ev.button === 0 && ev.y === this.#term.rows - 1 && ev.x >= this.#modeHit.x0 && ev.x < this.#modeHit.x1) {
+      this.#popup = this.#popup instanceof ModePicker ? null : this.#modePicker();
+      return;
+    }
+    if (ev.action !== "drag") this.#session.chat.hover(p);
+    switch (ev.action) {
+      case "move":
+        return;
+      case "wheel-up":
+      case "wheel-down": {
+        const by = ev.action === "wheel-up" ? -1 : 1;
+        if (popup?.wheel && ev.y >= this.#term.rows - 1 - this.#popupRows) return popup.wheel(by);
+        this.#selection.clear(); // it is in screen cells: the text under it is about to move
+        return this.#session.chat.scrollBy(-3 * by);
+      }
+      case "press": {
+        if (ev.button !== 0) return;
+        const hit = this.#tabAt(ev.x, ev.y);
+        if (hit) {
+          if (hit.index === NEW_TAB) return this.#newSession();
+          if (hit.index === ALL_SESSIONS) return this.#openList();
+          return hit.close ? this.#closeSession(hit.index) : this.#switchTo(hit.index);
+        }
+        if (this.#session.chat.toggleAt(ev.x, ev.y)) {
+          this.#selection.clear();
+          return;
+        }
+        this.#selection.press(p);
+        return;
+      }
+      case "drag":
+        return this.#selection.drag(p);
+      case "release":
+        if (this.#selection.release(p)) this.#copySelection();
+    }
   }
 
-  /** Switches this session's model and makes it the one new sessions start with. */
-  #useModel(id: string): void {
-    const s = this.#session;
-    this.#config.model = id; // sessions already open keep theirs
-    if (s.model && s.model !== id) this.#store?.usedModel(s.model, Date.now() - 1); // so it is in Recent to go back to
-    this.#store?.usedModel(id);
-    if (id === s.model) return this.#flash(`already on ${id}`);
-    s.setOption("model", id);
-    s.chat.add({ role: "info", text: `model = ${id} (from the next turn)` });
+  #handleListMouse(ev: MouseInput): void {
+    const list = this.#list!;
+    if (ev.action === "wheel-up" || ev.action === "wheel-down") return list.move(ev.action === "wheel-up" ? -3 : 3);
+    if (ev.action !== "press" || ev.button !== 0) return;
+    // ⋯ again closes it.
+    if (this.#tabAt(ev.x, ev.y)?.index === ALL_SESSIONS || list.click(ev.x, ev.y) === "close") this.#list = null;
+  }
+
+  #copySelection(): void {
+    const screen = this.#renderer.screen;
+    const text = screen ? this.#selection.text(screen) : "";
+    if (!text.trim()) return;
+    copyToClipboard(text, (s) => this.#term.write(s));
+    this.#flash(`copied ${[...text].length} characters`);
+  }
+
+  /** Shows a short message after the permission mode in the footer. */
+  #flash(text: string, ms = 2000): void {
+    this.#notice = text;
+    if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
+    this.#noticeTimer = setTimeout(() => {
+      this.#notice = null;
+      this.#scheduleRender();
+    }, ms);
+  }
+
+  // ---- the composer ---------------------------------------------------
+
+  /** Whether the command menu is up (it follows the input). */
+  #syncCommands(): boolean {
+    if (this.#list || this.#docked) return false;
+    const editor = this.#session.editor;
+    return this.#commands.sync(editor.text, editor.cursor);
+  }
+
+  #completeCommand(fillOnly: boolean): void {
+    const completion = this.#commands.completion(fillOnly);
+    if (!completion) return;
+    const editor = this.#session.editor;
+    editor.set(completion.text);
+    this.#commands.sync(editor.text, editor.cursor);
+    this.#commands.dismiss();
+    this.#commandHits = [];
+    this.#commandBounds = null;
+    if (completion.execute) this.#submit();
   }
 
   #submit(): void {
@@ -777,8 +521,9 @@ export class App {
     if (!text) return;
     s.editor.submit();
     s.chat.scrollToBottom();
-    if (text.startsWith("/")) return this.#command(text);
-    this.#send(text);
+    if (!text.startsWith("/")) return this.#send(text);
+    runCommand(this.#host, text);
+    this.#tick(this.#busy); // /compact starts a turn
   }
 
   #send(text: string): void {
@@ -797,67 +542,51 @@ export class App {
     this.#flash(`attached [Image #${n}] ${describeImage(img)}`);
   }
 
-  #command(line: string): void {
-    const [cmd = "", ...args] = line.slice(1).split(/\s+/);
+  // ---- permission modes and models ------------------------------------
+
+  #modePicker(): ModePicker {
+    return new ModePicker(
+      () => this.#mode,
+      (mode) => this.#setMode(mode),
+    );
+  }
+
+  #setMode(mode: PermissionMode): void {
+    this.#mode = mode;
+    for (const s of this.#tabs.sessions) s.recheck(); // waiting requests the new mode allows go ahead
+    this.#flash(MODES.find((x) => x.id === mode)!.description, 3000); // the footer names the mode already
+  }
+
+  /** shift+tab: ask → auto → full → ask. */
+  #cycleMode(): void {
+    const i = MODES.findIndex((m) => m.id === this.#mode);
+    this.#setMode(MODES[step(i, 1, MODES.length)]!.id);
+    if (this.#popup instanceof ModePicker) this.#popup.follow();
+  }
+
+  #openModels(): void {
+    const picker = new ModelPicker(this.#session.model, this.#tabs.store?.recentModels() ?? [], (id) => this.#useModel(id));
+    this.#popup = picker;
+    this.#modelList ??= listModels(this.#config);
+    this.#modelList
+      .then((models) => picker.setModels(models))
+      .catch((err: Error) => {
+        this.#modelList = null; // ask again next time
+        picker.setError(err.message);
+      })
+      .finally(() => this.#scheduleRender());
+  }
+
+  /** Switches this session's model and makes it the one new sessions start with. */
+  #useModel(id: string): void {
     const s = this.#session;
-    const info = (text: string) => s.chat.add({ role: "info", text });
-    try {
-      switch (cmd) {
-        case "help":
-          return void info(HELP(s.hostTools));
-        case "new":
-          return this.#newSession();
-        case "close":
-          return this.#closeSession();
-        case "sessions":
-          return this.#openList();
-        case "compact":
-          s.compact(args.join(" "));
-          this.#tick(true);
-          return;
-        case "permissions": {
-          if (args[0]) {
-            const mode = parseMode(args.join(" "));
-            if (!mode) return void s.chat.add({ role: "error", text: "usage: /permissions [ask|auto|full]" });
-            return this.#setMode(mode);
-          }
-          const allowed = [...s.alwaysAllowed];
-          if (allowed.length) info(`Allowed for this session without asking: ${allowed.join(", ")}.`);
-          this.#picker = MODES.findIndex((m) => m.id === this.#mode);
-          return;
-        }
-        case "clear":
-          return s.reset();
-        case "model":
-          if (!args[0]) return this.#openModels();
-          return this.#useModel(args[0]);
-        case "thinking":
-          this.#showThinking = !this.#showThinking;
-          for (const other of this.#sessions) other.chat.showThinking = this.#showThinking;
-          return void info(`full reasoning ${this.#showThinking ? "shown" : "collapsed"}`);
-        case "trace":
-          this.#showTrace = !this.#showTrace;
-          return;
-        case "mouse":
-          this.#term.setMouse(!this.#term.mouse);
-          return void info(`mouse reporting ${this.#term.mouse ? "on" : "off"}`);
-        case "set": {
-          const [key, ...rest] = args;
-          if (!key) return void s.chat.add({ role: "error", text: "usage: /set <key> [value]" });
-          const value = rest.length ? rest.join(" ") : null;
-          s.setOption(key, value);
-          return void info(value === null ? `unset ${key}` : `${key} = ${key.includes("key") ? "***" : value}`);
-        }
-        case "quit":
-        case "exit":
-          void this.quit();
-          return;
-        default:
-          s.chat.add({ role: "error", text: `unknown command /${cmd} (try /help)` });
-      }
-    } catch (err) {
-      s.chat.add({ role: "error", text: (err as Error).message });
-    }
+    const store = this.#tabs.store;
+    this.#config.model = id; // sessions already open keep theirs
+    if (s.model && s.model !== id) store?.usedModel(s.model, Date.now() - 1); // so it is in Recent to go back to
+    store?.usedModel(id);
+    if (id === s.model) return this.#flash(`already on ${id}`);
+    s.setOption("model", id);
+    s.chat.add({ role: "info", text: `model = ${id} (from the next turn)` });
   }
 
   // ---- rendering ------------------------------------------------------
@@ -902,22 +631,11 @@ export class App {
     const promptWidth = stringWidth(PROMPT);
     this.#inputWidth = inner - promptWidth;
     const layout = s.editor.layout(this.#inputWidth);
-    const approval = s.approvals[0];
     // A popup takes the input's place, its box where the two rules were.
-    // Rows besides a prompt's preview: the question, why it asks, a gap, the answers.
-    const asking = approval ? 1 + (approval.reason ? 1 : 0) + 1 + DECISIONS.length : 0;
+    const popup = this.#docked;
     const room = H - (TAB_ROWS + 1) - 2 - (s.busy ? 1 : 0) - 1 - 2 - 1; // tab bar and gap, transcript, status gap, status, box edges, footer
-    const preview = approval ? this.#previewRows(approval, Math.max(0, Math.min(MAX_PREVIEW_ROWS, room - asking))) : [];
-    const models = approval ? null : this.#models;
-    const picking = !approval && !models && this.#picker !== null;
-    const inputRows = approval
-      ? asking + preview.length
-      : models
-        ? models.height(Math.max(3, Math.min(MAX_MODEL_ROWS, room)))
-        : picking
-          ? 2 + MODES.length
-          : Math.min(MAX_INPUT_ROWS, layout.rows.length);
-    this.#popupRows = approval || models || picking ? inputRows + 2 : 0;
+    const inputRows = popup ? popup.height(room) : Math.min(MAX_INPUT_ROWS, layout.rows.length);
+    this.#popupRows = popup ? inputRows + 2 : 0;
 
     const footerY = H - 1;
     const ruleBottomY = footerY - 1;
@@ -927,20 +645,15 @@ export class App {
     const bodyY = TAB_ROWS + 1; // below the tab bar and a blank row
     const bodyH = Math.max(1, statusY - bodyY - (s.busy ? 1 : 0)); // one blank row above the running status
 
-    this.#tabHits = drawTabs(buf, PAD, 0, inner, this.#tabs(), this.#active, this.#dir, this.#hover, t0 - this.#hoverStarted, this.#colors);
+    this.#tabHits = drawTabs(buf, PAD, 0, inner, this.#tabInfo(), this.#tabs.active, this.#dir, this.#hover, t0 - this.#hoverStarted, this.#colors);
     this.#drawBody(buf, { x: PAD, y: bodyY, w: inner, h: bodyH }, t0);
     if (s.busy) this.#drawStatus(buf, statusY, inner, t0);
     this.#choiceHits = [];
-    if (approval) {
-      const box = drawBox(buf, PAD, ruleTopY, inner, inputRows + 2, palette.tool, "Permission required", APPROVAL_HINTS);
-      this.#drawApproval(buf, inputY, box, approval, preview);
-    } else if (models) {
-      const box = drawBox(buf, PAD, ruleTopY, inner, inputRows + 2, palette.accent, "Select model", MODEL_HINTS);
-      this.#choiceHits = models.render(buf, box.x, inputY, box.w, inputRows);
-      this.#renderer.cursor = { x: box.x + 2 + stringWidth(models.query), y: inputY, visible: true };
-    } else if (picking) {
-      const box = drawBox(buf, PAD, ruleTopY, inner, inputRows + 2, palette.accent, "Permissions", PICKER_HINTS);
-      this.#drawPicker(buf, inputY, box);
+    if (popup) {
+      const box = drawBox(buf, PAD, ruleTopY, inner, inputRows + 2, popup.color, popup.title, popup.hints);
+      const frame = popup.render(buf, box.x, inputY, box.w, inputRows, this.#colors);
+      this.#choiceHits = frame.hits;
+      this.#renderer.cursor = frame.cursor ? { ...frame.cursor, visible: true } : { x: 0, y: 0, visible: false };
     } else {
       buf.text(PAD, ruleTopY, "─".repeat(inner), { fg: palette.faint });
       this.#drawInput(buf, inputY, inputRows, layout, promptWidth);
@@ -969,69 +682,11 @@ export class App {
     this.#frame = { ms: performance.now() - t0, bytes };
   }
 
-  #tabs(): TabInfo[] {
-    return this.#sessions.map((s) => ({
+  #tabInfo(): TabInfo[] {
+    return this.#tabs.sessions.map((s) => ({
       title: s.title,
       state: s.approvals.length ? "waiting" : s.busy ? "busy" : s.unread ? "unread" : "idle",
     }));
-  }
-
-  #previewRows(a: Approval, max: number): PreviewLine[] {
-    const rows = previewFor(a.name, a.input);
-    return rows.length > max ? [...rows.slice(0, max - 1), { text: `⋯ ${rows.length - max + 1} more lines`, kind: "gap" }] : rows;
-  }
-
-  #drawApproval(buf: CellBuffer, y: number, box: { x: number; w: number }, a: Approval, preview: PreviewLine[]): void {
-    const waiting = this.#session.approvals.length;
-    const who = a.subagent ? `subagent ${a.subagent} wants` : "sope wants";
-    const left = box.x;
-    const end = box.x + box.w;
-    let x = buf.text(left, y, `${who} to run `);
-    x = buf.text(x, y, a.name, { fg: palette.tool, bold: true });
-    if (waiting > 1) buf.text(x, y, `  (+${waiting - 1} more waiting)`, { fg: palette.faint });
-
-    // Diff lines: line number, +/- on a tinted row, highlighted code.
-    const numWidth = Math.max(0, ...preview.map((l) => (l.no ? String(l.no).length : 0)));
-    const code = preview.find((l) => l.lang)?.lang;
-    const hl = code ? new Highlighter(code) : null;
-    const marks = { add: "+", remove: "-", context: " ", command: "$", gap: " ", plain: " " } as const;
-    preview.forEach((line, i) => {
-      const ry = y + 1 + i;
-      const kind = line.kind ?? "plain";
-      const tint = kind === "add" ? this.#colors.added : kind === "remove" ? this.#colors.removed : undefined;
-      if (tint !== undefined) buf.fill(left + 2, ry, box.w - 2, 1, { bg: tint });
-      let x = left + 2;
-      if (numWidth) x = buf.text(x, ry, `${line.no ? String(line.no).padStart(numWidth) : " ".repeat(numWidth)} `, { fg: palette.faint, bg: tint });
-      x = buf.text(x, ry, `${marks[kind]} `, { fg: previewColor(line.kind), bg: tint, bold: kind === "add" || kind === "remove" });
-      const text = line.text.replace(/\t/g, "  ");
-      if (kind === "gap" || kind === "plain") return void buf.text(x, ry, truncate(text, end - x), { fg: palette.muted });
-      if (!hl || !line.lang) return void buf.text(x, ry, truncate(text, end - x), { bg: tint });
-      // Removed and added lines are both highlighted by the same pass; good enough for a preview.
-      for (const tok of hl.line(text)) {
-        if (x >= end) break;
-        x = buf.text(x, ry, tok.text, { fg: SYNTAX[tok.kind], bg: tint, italic: tok.kind === "comment", dim: kind === "remove" && tok.kind === "plain" }, end);
-      }
-    });
-
-    let ry = y + 1 + preview.length;
-    if (a.reason) buf.text(left, ry++, truncate(`Approve for me asks because ${a.reason}.`, box.w), { fg: palette.muted });
-    const what = ({ bash: "commands", web_fetch: "web fetches", edit: "file edits", write: "writing files" } as Record<string, string>)[a.name] ?? a.name;
-    const choices: Choice[] = [
-      { label: "Yes" },
-      { label: `Yes, and don't ask again for ${what} in this session` },
-      { label: "No", detail: "sope is told and tries another way" },
-      { label: "No, and stop", detail: "ends the turn" },
-    ];
-    this.#choiceHits = drawChoices(buf, left, ry + 1, box.w, choices, this.#selectedAnswer());
-    this.#renderer.cursor = { x: 0, y: 0, visible: false };
-  }
-
-  /** The permission modes to choose from. */
-  #drawPicker(buf: CellBuffer, y: number, box: { x: number; w: number }): void {
-    buf.text(box.x, y, truncate("Who approves edits, shell commands and web fetches?", box.w), { fg: palette.muted });
-    const choices: Choice[] = MODES.map((m) => ({ label: m.id === this.#mode ? `${m.label} ✓` : m.label, detail: m.description }));
-    this.#choiceHits = drawChoices(buf, box.x, y + 2, box.w, choices, this.#picker ?? 0, true);
-    this.#renderer.cursor = { x: 0, y: 0, visible: false };
   }
 
   #drawBody(buf: CellBuffer, r: { x: number; y: number; w: number; h: number }, now: number): void {

@@ -49,13 +49,18 @@ examples/            hello.c (minimal host), multiplex.c (fd multiplexing)
 bindings/js/         bun:ffi bindings (typed API and tests, including offline tests with a fake OpenAI server)
 tui/src/
   main.ts, cli.ts    sope executable entry point and argument parsing
-  app.ts, print.ts   Full-screen TUI and -p mode
+  app.ts, print.ts   Full-screen TUI (input routing, layout, shared state) and -p mode
+  commands.ts        Slash commands: one table for what runs, the suggestions menu and /help
+  workspace.ts       The sessions open as tabs: restore on start, LRU put-away, open and close
   session.ts store.ts  Session (tab) state; SQLite persistence and restoration
-  agent/permissions.ts  Permission modes; how “Approve for me” evaluates commands and files
+  agent/permissions.ts  Permission modes; how “Approve for me” judges commands and files
+  agent/shell.ts     Reads a shell command line into simple commands, for permissions.ts
   agent/models.ts    Endpoint model list for the model picker
   agent/             Worker polling thread, bridge, tool display and previews, host tools for the mock
   term/ render/      Raw mode, input decoding, cell buffer, diff renderer
-  unicode/ ui/       Graphemes and column widths, wrapping, Markdown, editor, chat view, tabs, status line, dialogs, model picker, trace panel
+  ui/popup.ts        Popups in the input's place; approval.ts, modes.ts, models.ts are the popups
+  unicode/ ui/       Graphemes and column widths, wrapping, Markdown, editor (and its keys), chat view,
+                     tabs, status line, session list, command menu, trace panel
 scripts/             demo.ts (offline demos), release.sh (build and package), install.sh
 ```
 

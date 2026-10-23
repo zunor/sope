@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Slash command suggestions above the composer, filtered as the user types.
+// The commands themselves are in ../commands.ts.
 import type { CellBuffer } from "../render/buffer";
 import { palette } from "../theme";
 import { truncate } from "../unicode/width";
@@ -9,25 +10,9 @@ export interface SlashCommand {
   name: string;
   description: string;
   args?: string;
+  /** Its arguments must be typed: completing it only fills it in. */
   required?: boolean;
 }
-
-export const SLASH_COMMANDS: SlashCommand[] = [
-  { name: "help", description: "Show commands and keyboard shortcuts" },
-  { name: "new", description: "Open a new session" },
-  { name: "sessions", description: "Browse saved sessions" },
-  { name: "model", args: "[name]", description: "Choose or switch the model" },
-  { name: "permissions", args: "[ask|auto|full]", description: "Choose who approves tools" },
-  { name: "compact", args: "[focus]", description: "Summarize the conversation to free context" },
-  { name: "thinking", description: "Show or hide full reasoning" },
-  { name: "trace", description: "Toggle the ABI trace panel" },
-  { name: "mouse", description: "Toggle mouse capture" },
-  { name: "set", args: "<key> [value]", required: true, description: "Set an agent option; omit value to unset" },
-  { name: "clear", description: "Clear this conversation and transcript" },
-  { name: "close", description: "Close this session tab" },
-  { name: "quit", description: "Exit sope" },
-  { name: "exit", description: "Exit sope (alias for /quit)" },
-];
 
 export class CommandSuggestions {
   #text = "";
@@ -37,6 +22,8 @@ export class CommandSuggestions {
   #selected = 0;
   #scroll = 0;
   matches: SlashCommand[] = [];
+
+  constructor(readonly commands: SlashCommand[]) {}
 
   sync(text: string, cursor: number): boolean {
     if (text !== this.#text || cursor !== this.#cursor) {
@@ -48,7 +35,7 @@ export class CommandSuggestions {
     }
     this.#active = /^\/[a-z]*$/i.test(text) && cursor === text.length && !this.#dismissed;
     const q = text.slice(1).toLowerCase();
-    this.matches = this.#active ? SLASH_COMMANDS.filter((c) => c.name.startsWith(q)) : [];
+    this.matches = this.#active ? this.commands.filter((c) => c.name.startsWith(q)) : [];
     return this.#active;
   }
 

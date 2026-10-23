@@ -131,6 +131,73 @@ export class Editor {
     return true;
   }
 
+  /**
+   * The editing keys (emacs-style, as in a shell). `width` is the input's,
+   * for moving between visual rows. Returns false for keys it does not use.
+   */
+  key(id: string, width: number): boolean {
+    switch (id) {
+      case "ctrl+j":
+      case "alt+enter":
+      case "shift+enter":
+        this.insert("\n");
+        break;
+      case "backspace":
+        this.backspace();
+        break;
+      case "delete":
+        this.deleteForward();
+        break;
+      case "left":
+      case "ctrl+b":
+        this.left();
+        break;
+      case "right":
+      case "ctrl+f":
+        this.right();
+        break;
+      case "home":
+      case "ctrl+a":
+        this.lineStart();
+        break;
+      case "end":
+      case "ctrl+e":
+        this.lineEnd();
+        break;
+      case "alt+left":
+      case "ctrl+left":
+      case "alt+b":
+        this.wordLeft();
+        break;
+      case "alt+right":
+      case "ctrl+right":
+      case "alt+f":
+        this.wordRight();
+        break;
+      case "ctrl+w":
+      case "alt+backspace":
+        this.deleteWordLeft();
+        break;
+      case "ctrl+u":
+        this.killToLineStart();
+        break;
+      case "ctrl+k":
+        this.killToLineEnd();
+        break;
+      case "up":
+      case "ctrl+p":
+        if (!this.moveVertical(-1, width)) this.historyPrev();
+        break;
+      case "down":
+      case "ctrl+n":
+        if (!this.moveVertical(1, width)) this.historyNext();
+        break;
+      default:
+        return false;
+    }
+    return true;
+  }
+
   /** Clears the buffer and records the submitted text in history. */
   submit(): string {
     const text = this.text;

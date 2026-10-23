@@ -16,6 +16,7 @@ Adds permission modes, a model picker, and slash-command suggestions, and improv
 - Tabs have a light background, are one row high and 24 columns wide, and are separated by one column. Long titles are truncated and slowly scroll back and forth on hover. The active session uses bold text and a brighter background.
 - The status bar uses a square pixel meteor, one row high and two columns wide, that completes a lap every 3 seconds with a thicker, brighter head. Enabled only after detecting Kitty graphics protocol support; other terminals and tmux/screen/Zellij fall back to Braille. `SOPE_GRAPHICS=0` disables the pixel effect. One blank row is kept above the status bar.
 - Typing `/` opens a command list with filtering, keyboard and mouse selection, Tab completion, and Esc dismissal.
+- `/help` is generated from the same table as the command list, so the two always agree: each command with its arguments, description, and shortcut.
 - Long tool and subagent outputs show six lines by default. Hovering over the connector or `… N more lines` highlights both; click to expand, then click the connector or `show fewer lines` to collapse. Long output also has a collapse control at the end.
 - The bottom bar now shows only the permission mode and temporary hints, with distinct diamond icons. Only Full access is red; other modes are light gray. Key hints, model, context, and token statistics have been removed. Dialog key hints have moved into the dialog's bottom border.
 

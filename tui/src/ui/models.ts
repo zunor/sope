@@ -17,7 +17,7 @@ import type { CellBuffer } from "../render/buffer";
 import { palette } from "../theme";
 import { stringWidth, truncate } from "../unicode/width";
 import { describeModel, type ModelInfo } from "../agent/models";
-import type { ChoiceHit } from "./popup";
+import type { ChoiceHit, Hints, Popup, PopupFrame, Reply } from "./popup";
 
 type Choice = { model: ModelInfo; typed?: boolean };
 type Row = { header: string } | Choice;
@@ -25,8 +25,12 @@ type Row = { header: string } | Choice;
 const choicesOf = (rows: Row[]) => rows.filter((r): r is Choice => "model" in r);
 
 const MAX_NAME = 32;
+const MAX_ROWS = 14;
 
-export class ModelPicker {
+export class ModelPicker implements Popup {
+  readonly title = "Select model";
+  readonly color = palette.accent;
+  readonly hints: Hints = [["type", "search"], ["↑↓", "select"], ["enter", "use"], ["esc", "close"]];
   #models: ModelInfo[] = [];
   #state: "loading" | "ready" | string = "loading"; // or why the list could not be read
   #query = "";
@@ -36,6 +40,8 @@ export class ModelPicker {
   constructor(
     readonly current: string,
     readonly recent: string[],
+    /** Called with the model picked. */
+    readonly use: (id: string) => void = () => {},
   ) {}
 
   /** The endpoint's list arrived; the selection starts on the current model. */
@@ -107,13 +113,53 @@ export class ModelPicker {
     if (n) this.#selected = Math.max(0, Math.min(n - 1, this.#selected + by));
   }
 
-  /** Rows the popup wants: the search line, a gap, the list (at least one line for a message). */
-  height(max: number): number {
-    return Math.max(3, Math.min(max, 2 + this.rows.length));
+  key(id: string): Reply {
+    switch (id) {
+      case "up":
+      case "ctrl+p":
+        this.move(-1);
+        break;
+      case "down":
+      case "ctrl+n":
+      case "tab":
+        this.move(1);
+        break;
+      case "pageup":
+        this.move(-10);
+        break;
+      case "pagedown":
+        this.move(10);
+        break;
+      case "backspace":
+        this.backspace();
+        break;
+      case "escape":
+      case "ctrl+c":
+        return "close";
+      case "enter": {
+        const picked = this.selected;
+        if (picked) this.use(picked);
+        return "close";
+      }
+    }
+    return "handled";
   }
 
-  /** Draws into `h` rows from (x, y), `w` wide; returns what a click can pick. */
-  render(buf: CellBuffer, x: number, y: number, w: number, h: number): ChoiceHit[] {
+  wheel(by: number): void {
+    this.move(by);
+  }
+
+  /** Rows the popup wants: the search line, a gap, the list (at least one line for a message). */
+  height(room: number): number {
+    return Math.max(3, Math.min(MAX_ROWS, room, 2 + this.rows.length));
+  }
+
+  /** Draws into `h` rows from (x, y), `w` wide. */
+  render(buf: CellBuffer, x: number, y: number, w: number, h: number): PopupFrame {
+    return { hits: this.#draw(buf, x, y, w, h), cursor: { x: x + 2 + stringWidth(this.#query), y } };
+  }
+
+  #draw(buf: CellBuffer, x: number, y: number, w: number, h: number): ChoiceHit[] {
     const rows = this.rows;
     const choices = choicesOf(rows);
     const end = x + w;

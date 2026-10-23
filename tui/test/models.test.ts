@@ -41,7 +41,7 @@ test("the picker shows recent models first, then the rest, starting on the curre
   expect(p.selected).toBe("plain-model");
 
   const buf = new CellBuffer(60, 8);
-  const hits = p.render(buf, 0, 0, 60, 8);
+  const { hits } = p.render(buf, 0, 0, 60, 8);
   expect(row(buf, 0)).toBe("› Search models, or type a name                        4 / 4");
   expect(row(buf, 3)).toBe("  kimi-k3 ✓          1M context · images");
   expect(row(buf, 7)).toBe("› plain-model");

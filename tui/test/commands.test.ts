@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: MIT
 import { expect, test } from "bun:test";
 import { CellBuffer } from "../src/render/buffer";
-import { CommandSuggestions, SLASH_COMMANDS } from "../src/ui/commands";
+import { COMMANDS } from "../src/commands";
+import { CommandSuggestions } from "../src/ui/commands";
 
 const row = (buf: CellBuffer, y: number) => buf.chars.slice(y * buf.width, (y + 1) * buf.width).join("");
 
 test("slash opens suggestions, typing filters them, arguments and ordinary text close them", () => {
-  const menu = new CommandSuggestions();
+  const menu = new CommandSuggestions(COMMANDS);
   expect(menu.sync("/", 1)).toBe(true);
-  expect(menu.matches).toEqual(SLASH_COMMANDS);
+  expect(menu.matches).toEqual(COMMANDS);
   menu.sync("/mo", 3);
   expect(menu.matches.map((c) => c.name)).toEqual(["model", "mouse"]);
   for (const text of ["hello /", "/model name", "/tmp/file", "/\n", ""]) {
@@ -18,7 +19,7 @@ test("slash opens suggestions, typing filters them, arguments and ordinary text 
 });
 
 test("selection wraps, filtering resets it, and Escape stays dismissed until editing resumes", () => {
-  const menu = new CommandSuggestions();
+  const menu = new CommandSuggestions(COMMANDS);
   menu.sync("/", 1);
   menu.move(-1);
   expect(menu.selected?.name).toBe("exit");
@@ -38,7 +39,7 @@ test("selection wraps, filtering resets it, and Escape stays dismissed until edi
 });
 
 test("Enter executes commands, Tab only fills, and required arguments remain editable", () => {
-  const menu = new CommandSuggestions();
+  const menu = new CommandSuggestions(COMMANDS);
   menu.sync("/mod", 4);
   expect(menu.completion(false)).toEqual({ text: "/model", execute: true });
   expect(menu.completion(true)).toEqual({ text: "/model ", execute: false });
@@ -49,7 +50,7 @@ test("Enter executes commands, Tab only fills, and required arguments remain edi
 });
 
 test("menu scrolls to the selection, maps mouse rows, and clips within the popup", () => {
-  const menu = new CommandSuggestions();
+  const menu = new CommandSuggestions(COMMANDS);
   menu.sync("/", 1);
   const buf = new CellBuffer(80, 12);
   buf.fill(0, 0, 80, 12, {}, ".");

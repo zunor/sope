@@ -12,6 +12,7 @@
 import type { CellBuffer } from "../render/buffer";
 import { palette, type Surfaces } from "../theme";
 import { stringWidth, truncate } from "../unicode/width";
+import type { Reply } from "./popup";
 
 export interface SessionSummary {
   id: string;
@@ -51,8 +52,55 @@ export class SessionList {
   constructor(
     sessions: SessionSummary[],
     readonly dir: string,
+    /** Called with the session picked. */
+    readonly open: (id: string) => void = () => {},
   ) {
     this.#all = [...sessions].sort((a, b) => b.updated - a.updated);
+  }
+
+  key(id: string): Reply {
+    switch (id) {
+      case "escape":
+      case "ctrl+c":
+        return "close";
+      case "enter": {
+        const picked = this.selected;
+        if (picked) this.open(picked.id);
+        return "close";
+      }
+      case "up":
+      case "ctrl+p":
+        this.move(-1);
+        break;
+      case "down":
+      case "ctrl+n":
+        this.move(1);
+        break;
+      case "pageup":
+        this.move(-10);
+        break;
+      case "pagedown":
+        this.move(10);
+        break;
+      case "home":
+        this.move(-Infinity);
+        break;
+      case "end":
+        this.move(Infinity);
+        break;
+      case "backspace":
+        this.backspace();
+    }
+    return "handled";
+  }
+
+  /** A click: on a session opens it, outside the panel closes it. */
+  click(x: number, y: number): Reply {
+    const hit = this.hit(x, y);
+    if (hit === "outside") return "close";
+    if (!hit) return "handled";
+    this.open(hit.id);
+    return "close";
   }
 
   get filter(): string {

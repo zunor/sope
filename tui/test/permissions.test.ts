@@ -3,7 +3,8 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { assess, assessCommand, parseMode, splitCommand, within } from "../src/agent/permissions";
+import { assess, assessCommand, parseMode, within } from "../src/agent/permissions";
+import { splitCommand } from "../src/agent/shell";
 
 // A project directory that is not under a temporary directory, so writes
 // outside it are not let through as temporary files.
