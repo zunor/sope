@@ -42,6 +42,10 @@ struct tool_run {
     char *cwd;        /* working directory of the turn */
     char *ca_file;    /* option tls.ca_file, for web_fetch */
     int cancel;       /* guarded by *mu */
+    char *file_path; /* canonical target, fixed at admission */
+    file_state expected_file; /* revision seen when this call was admitted */
+    int expected_read;
+    struct file_gate *file_gate;
 
     sope_buf out; /* the result the model sees */
     int is_error;
@@ -76,6 +80,7 @@ extern const sope_builtin sope__builtin_glob, sope__builtin_grep;
 extern const sope_builtin sope__builtin_bash, sope__builtin_bash_output, sope__builtin_bash_kill;
 extern const sope_builtin sope__builtin_web_fetch;
 extern const sope_builtin sope__builtin_todo_write;
+extern const sope_builtin sope__builtin_artifact_read;
 
 /* tools.c: the registry */
 size_t sope__builtin_count(void);
@@ -109,6 +114,9 @@ const char *sope__display_path(tool_run *r, const char *path);
 
 /* tool_file.c: forgets which files the agent has read (history reset, teardown). */
 void sope__files_clear(sope_agent_t *a);
+int sope__file_prepare(tool_run *r);
+sope_next sope__file_step(tool_run *r);
+void sope__file_release(tool_run *r);
 /* tool_bash.c: kills the root's background shells (agent teardown). */
 void sope__shells_free(sope_agent_t *root);
 /* tool_web.c: HTML to readable text with Markdown-style headings, lists and links. */

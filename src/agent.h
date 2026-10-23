@@ -35,6 +35,8 @@ typedef struct msg_node { /* queued input, one per turn */
     struct msg_node *next;
     uint64_t turn_id;
     int compact; /* sope_compact: text holds optional instructions */
+    int resume;
+    uint64_t resume_round;
     char *text;
     size_t len;
     sope_image *images; /* sope_attach_image calls before the sope_send */
@@ -78,6 +80,7 @@ typedef struct pending_call {
     uint64_t turn_id;
     tool_run *run;  /* built-in waiting for sope_permit; NULL once answered */
     int done;
+    int reported; /* TOOL_END already published, independently of commit success */
     int is_error;
     char *content;
     size_t len;
@@ -94,6 +97,7 @@ typedef struct file_state { /* a file the model has read or written */
     char *path;
     int64_t mtime_sec, mtime_nsec;
     int64_t size;
+    uint64_t digest;
 } file_state;
 
 typedef struct bg_shell { /* bash run_in_background */
@@ -106,6 +110,7 @@ typedef struct bg_shell { /* bash run_in_background */
 
 typedef struct turn_state {
     int active;
+    int failed; /* teardown must wait for dispatched work before reporting error */
     msg_node *msg;
     turn_phase phase;
     uint64_t round;
@@ -120,6 +125,11 @@ typedef struct turn_state {
     uint64_t compact_threshold; /* option compact.threshold; 0: never compact automatically */
     int compact_tried;          /* compaction already ran (or failed) before this round */
     sope_message *held;         /* the turn's user message, kept out of a compaction at turn start */
+    sope_message *compact_keep; /* borrowed suffix, untouched until summary commit */
+    uint64_t context_window, output_reserve, output_limit, summary_tokens, retain_tokens, compact_input_tokens;
+    uint64_t compact_before;    /* local request estimate before compaction */
+    uint64_t compact_request_budget;
+    int compact_retries, overflow_retried;
     char *cwd;                  /* option cwd: where built-in tools work */
     permit_mode permit;         /* option permissions */
 } turn_state;
@@ -134,6 +144,10 @@ struct sope_call { /* a model call, as the loop holds it (call.c) */
     sope_tool_use *uses;
     size_t n_uses, cap_uses;
     int failed; /* an error was reported */
+    int complete; /* provider confirmed a complete, normally stopped response */
+    int has_usage;
+    int context_exceeded;
+    uint64_t usage_tokens;
 };
 
 struct sope_agent {
@@ -156,6 +170,10 @@ struct sope_agent {
     subagent_def *subagents;
     bg_shell *shells;
     uint32_t next_shell_id;
+    struct sope_journal *journal;
+    int journal_failed;
+    int recovering; /* scheduler stopped until explicit resume/reconciliation */
+    char *artifact_dir;
 
     /* ---- every agent, guarded by *mu ---- */
     tool_def *tools;
@@ -181,6 +199,7 @@ struct sope_agent {
     turn_state turn;
     sope_history history;
     uint64_t context_tokens; /* size of the history as of the last model call */
+    uint64_t context_estimate; /* local estimate at that usage checkpoint */
     int turns_finished;
     int32_t last_stop;
 };
@@ -201,6 +220,18 @@ void sope__signal_closed_locked(sope_agent_t *root);
 char *sope__option_dup_locked(sope_agent_t *a, const char *key);
 /* A tool or subagent name: 1-64 characters of [A-Za-z0-9_-]. */
 int sope__valid_name(const char *s, size_t n);
+/* journal.c; callers hold *mu unless noted. Commit before publication/effects. */
+int sope__journal_input(sope_agent_t *a, const msg_node *m);
+int sope__journal_checkpoint(sope_agent_t *a, const char *kind, int terminal);
+int sope__journal_result(sope_agent_t *a, pending_call *p);
+int sope__journal_artifact(sope_agent_t *a, uint64_t call, const char *path);
+int sope__storage_fail_locked(sope_agent_t *a, const char *message);
+void sope__journal_close(sope_agent_t *a);
+/* artifact.c: creation takes the agent lock internally. Files outlive agents. */
+int sope__artifact_create(sope_agent_t *a, const char *kind, char **path);
+int sope__artifact_save(sope_agent_t *a, uint64_t call, const void *data, size_t n, char **path);
+int sope__artifact_preview(sope_agent_t *a, uint64_t call, sope_buf *out, size_t limit);
+int sope__write_fd(int fd, const void *data, size_t n);
 void sope__agent_free_memory(sope_agent_t *a);
 void sope__msg_node_free(msg_node *m);
 /* The tree's pending call with this id and kind; *mu held. */
@@ -214,6 +245,12 @@ sope_next sope__agent_run(sope_task *task);
 /* call.c */
 sope_call *sope__call_new(sope_agent_t *a, uint64_t round, int compaction);
 void sope__call_free(sope_call *c);
+
+/* context.c: request accounting and per-turn budget configuration. */
+int sope__context_configure(sope_agent_t *a);
+uint64_t sope__request_tokens(const sope_agent_t *a);
+uint64_t sope__context_tokens(const sope_agent_t *a);
+uint64_t sope__context_limit(const sope_agent_t *a);
 
 /* subagent.c */
 #define SOPE__AGENT_TOOL "agent" /* the built-in tool that spawns subagents */

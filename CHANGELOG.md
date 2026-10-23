@@ -4,7 +4,28 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
-Adds permission modes, a model picker, and slash-command suggestions, and improves the tab bar, status animation, and tool output interactions. TUI changes only; the library ABI is unchanged.
+Adds permission modes, a model picker, and slash-command suggestions, and improves the tab bar, status animation, and tool output interactions. Also strengthens context compaction and adds durable execution, isolated file mutations, and complete output archives. New C recovery functions are exported; the event layout is unchanged.
+
+### Durable execution and tools
+
+- Add `sope_agent_open`, `sope_agent_recovery`, `sope_agent_resolve`, and `sope_agent_resume` (and JS equivalents). Persist accepted inputs, stable tool intents, individual results, round accounting, and checkpoints with SQLite WAL/FULL transactions; retain an ordered execution log independently of compressed model history.
+- Hold exclusive session ownership across processes. Reopened unfinished tasks stay paused; committed results are reused and unknown outcomes require explicit reconciliation. Journal/archival failures stop execution. Options, credentials and host tool definitions are supplied again by the host.
+- Use native journals for TUI execution state and add `/recover`. Old transcript-only sessions are not automatically migrated or treated as resumable tasks.
+- Serialize built-in file operations by canonical path across agents and cooperating sope processes. Freeze expected content revisions when admitting edits, detect changes even when size/mtime are restored, and replace files atomically after syncing the new contents.
+- Archive full shell stdout/stderr, large built-in/host results and truncated file reads. Add `artifact_read` byte pagination; background readers no longer advance over omitted bytes. The host owns archive retention.
+- Add real SIGKILL, repeated recovery, queued-input, failed-commit, atomic-write interruption, concurrent-process mutation, long-output and TUI journal-authority regressions. SQLite is compiled into both shared and static libsope artifacts, including offline builds; no system SQLite installation or host SQLite driver is required. Its private symbol namespace avoids collisions with a host's SQLite.
+
+### Context compaction
+
+- Validate complete streamed summaries before replacing history; truncated, malformed, empty or cancelled summaries preserve the original conversation.
+- Estimate full requests before sending, including restored history, system/tool definitions, new user input, images and tool results. Add explicit model windows and output reservations, and bounded recovery for server-reported context overflow.
+- Keep a budgeted recent suffix with intact tool-call/result groups and images; mark persisted checkpoints separately from user intent. Bound summarization input and preserve both ends of large tool output with UTF-8-safe omission markers.
+- Add independent summary input/output and retention options, and `SOPE_CONTEXT_WINDOW` for the CLI. Normal responses now use an explicit output limit (4096 by default); raise `context.reserve` or set `openai.max_tokens` for larger responses.
+- Add offline provider integration tests and native budget/retention tests.
+- Preserve full prior checkpoints on repeated compression, carry usage calibration through missing/invalid reports, and reserve actual request headroom before retaining recent messages.
+- Serialize cancellation with checkpoint installation; reset retries per compaction, stop before unnecessary compaction at the model-round limit, and do not resend requests after failed overflow recovery.
+- Reject refusals, incomplete tool calls and out-of-order streamed summaries; add continuous tool-loop, repeated-compaction and queued-turn recovery regressions.
+- Preserve complete tool results and arguments whenever the full summary request fits its budget; fixed per-tool clipping could silently discard critical middle evidence. Add an opt-in live-model compaction/restore/failure evaluation.
 
 ### TUI
 

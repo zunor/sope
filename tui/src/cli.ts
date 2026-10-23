@@ -39,7 +39,7 @@ Options:
 Configuration: ~/.config/sope/config (KEY=VALUE lines) or environment
 variables: SOPE_API_KEY, SOPE_MODEL, SOPE_IMAGE_MODEL (default kimi-k3 on the
 default endpoint; "off" sends images to SOPE_MODEL), SOPE_BASE_URL,
-SOPE_PROVIDER, SOPE_PERMISSIONS, SOPE_COMPACT_THRESHOLD, SOPE_DB. SOPE_LIB loads a different libsope.`;
+SOPE_PROVIDER, SOPE_PERMISSIONS, SOPE_COMPACT_THRESHOLD, SOPE_CONTEXT_WINDOW, SOPE_DB. SOPE_LIB loads a different libsope.`;
 
 export class CliError extends Error {}
 

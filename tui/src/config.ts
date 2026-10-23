@@ -12,6 +12,7 @@
 //   SOPE_MODEL              default glm-5.3
 //   SOPE_BASE_URL           any OpenAI-compatible endpoint
 //   SOPE_COMPACT_THRESHOLD  compact the history past this many tokens (0: never)
+//   SOPE_CONTEXT_WINDOW     model's full token window (0: unknown)
 //   SOPE_MOUSE              0 leaves the mouse to the terminal (default: the TUI
 //                           takes it for wheel scrolling and drag-to-copy)
 //   SOPE_PERMISSIONS        ask | auto | full: who approves edits, commands and
@@ -36,6 +37,7 @@ export interface Config {
   baseUrl: string;
   apiKey?: string;
   compactThreshold: number;
+  contextWindow: number;
   mouse: boolean;
   /** Who approves built-in tools that change things (agent/permissions.ts). */
   permissions: PermissionMode;
@@ -80,6 +82,7 @@ export function loadConfig(
   const apiKey = get("SOPE_API_KEY");
   const provider = overrides.provider || get("SOPE_PROVIDER") || (apiKey ? "openai" : "mock");
   const threshold = Number(get("SOPE_COMPACT_THRESHOLD") ?? DEFAULT_COMPACT_THRESHOLD);
+  const window = Number(get("SOPE_CONTEXT_WINDOW") ?? 0);
   const baseUrl = overrides.baseUrl || get("SOPE_BASE_URL") || DEFAULT_BASE_URL;
   const imageModel = get("SOPE_IMAGE_MODEL") ?? (provider === "openai" && baseUrl === DEFAULT_BASE_URL ? DEFAULT_IMAGE_MODEL : "");
   return {
@@ -88,7 +91,8 @@ export function loadConfig(
     imageModel: /^(off|none|0)$/i.test(imageModel) ? "" : imageModel,
     baseUrl,
     apiKey,
-    compactThreshold: Number.isFinite(threshold) && threshold >= 0 ? threshold : DEFAULT_COMPACT_THRESHOLD,
+    compactThreshold: Number.isInteger(threshold) && threshold >= 0 && threshold <= 0xffffffff ? threshold : DEFAULT_COMPACT_THRESHOLD,
+    contextWindow: Number.isInteger(window) && window >= 0 && window <= 0xffffffff ? window : 0,
     mouse: !/^(0|false|off|no)$/i.test(get("SOPE_MOUSE") ?? ""),
     permissions: overrides.permissions ?? parseMode(get("SOPE_PERMISSIONS") ?? "") ?? DEFAULT_MODE,
   };
@@ -120,6 +124,7 @@ export function agentOptions(c: Config): Record<string, string> {
   if (c.model) options.model = c.model;
   if (c.imageModel && c.imageModel !== c.model) options.image_model = c.imageModel;
   if (c.compactThreshold) options["compact.threshold"] = String(c.compactThreshold);
+  if (c.contextWindow) options["context.window"] = String(c.contextWindow);
   if (c.provider === "openai") {
     options["openai.base_url"] = c.baseUrl;
     if (c.apiKey) options["openai.api_key"] = c.apiKey;

@@ -105,3 +105,12 @@ test("the permission mode defaults to Approve for me; the agent always asks the 
   expect(loadConfig({}, { SOPE_PERMISSIONS: "bogus" }, {}).permissions).toBe("auto");
   expect(agentOptions(mock).permissions).toBe("ask");
 });
+
+test("passes the configured model window to the native request budget", () => {
+  const config = loadConfig({}, { SOPE_CONTEXT_WINDOW: "32000", SOPE_COMPACT_THRESHOLD: "0" }, { SOPE_CONTEXT_WINDOW: "64000" });
+  expect(config.contextWindow).toBe(32000);
+  expect(agentOptions(config)["context.window"]).toBe("32000");
+  expect(agentOptions(config)["compact.threshold"]).toBeUndefined();
+  expect(loadConfig({}, { SOPE_CONTEXT_WINDOW: "invalid" }, {}).contextWindow).toBe(0);
+  expect(loadConfig({}, { SOPE_COMPACT_THRESHOLD: "1.5" }, {}).compactThreshold).toBe(100000);
+});

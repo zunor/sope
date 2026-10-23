@@ -110,6 +110,22 @@ typedef struct sope_agent sope_agent_t;
 /* Creates an agent. Cheap: it holds no thread, only memory. */
 SOPE_API int sope_agent_new(sope_agent_t **out);
 
+/* Opens an exclusively owned durable session directory (parent must exist).
+ * Inputs, tool intents/results and checkpoints are committed with SQLite FULL
+ * durability. Options/credentials/tools must be configured again by the host.
+ * Reopened unfinished work is paused; inspect recovery(), reconcile unknown
+ * calls with resolve(), then resume(). No interrupted tool is blindly replayed.
+ * Artifacts and execution.sqlite remain after free; the host owns retention. */
+SOPE_API int sope_agent_open(sope_agent_t **out, const char *directory);
+/* JSON {pending:bool, calls:[{call_id:string,name,input,artifacts:string[]}]};
+ * shares returned-string storage with history(). */
+SOPE_API int sope_agent_recovery(sope_agent_t *agent, const char **json, size_t *len);
+/* Supply an observed outcome for an interrupted call, including built-ins.
+ * This records evidence, never executes the tool. Unknown calls block resume. */
+SOPE_API int sope_agent_resolve(sope_agent_t *agent, uint64_t call_id, int is_error,
+                                const char *content, size_t len);
+SOPE_API int sope_agent_resume(sope_agent_t *agent);
+
 /* Sets (value != NULL) or removes (value == NULL) a string option. Options
  * are read when a turn starts, so changes apply from the next turn on.
  *   provider          "mock" (default, offline) or "openai" (any
@@ -126,12 +142,17 @@ SOPE_API int sope_agent_new(sope_agent_t **out);
  *                     run commands or use the network wait for sope_permit;
  *                     "allow": run them without asking; "deny": refuse them
  *   subagents         "off" hides the built-in `agent` tool
- *   compact.threshold compact the history automatically once a model call
- *                     reports this many tokens (input + output); unset or
- *                     0 never compacts on its own (see sope_compact)
+ *   compact.threshold estimated full-request trigger; 0 disables automatic
+ *                     compaction, including overflow recovery (default 0)
+ *   context.window    full model token capacity; 0 means unknown (default 0)
+ *   context.reserve   minimum output reserve/default output limit (4096)
+ *   compact.max_tokens summary output limit/reserve (2048)
+ *   compact.input_tokens estimated summary request input budget (64000)
+ *   compact.retain_tokens recent original-message budget (8000; 0: none)
  *   openai.base_url   default https://api.openai.com/v1
  *   openai.api_key    sent as a Bearer token
- *   openai.max_tokens optional output limit
+ *   openai.max_tokens normal output limit (default context.reserve); also
+ *                     raises the output reservation if larger
  *   tls.ca_file       PEM file of trusted CAs, for builds with bundled curl
  *                     (default: $SSL_CERT_FILE, else the system bundle)
  *   mock.delay_ms     delay between streamed chunks of the mock provider */
@@ -204,7 +225,7 @@ SOPE_API int sope_permit(sope_agent_t *agent, uint64_t call_id, int allow, const
 SOPE_API int sope_cancel(sope_agent_t *agent);
 
 /* Queues a compaction turn: the model summarizes the conversation and the
- * summary replaces the history, freeing context for what comes next. The
+ * summary replaces the older prefix, retaining recent messages within budget. The
  * turn emits SOPE_EVENT_COMPACT (and USAGE), never TEXT_DELTA. instructions
  * (optional, may be NULL with len 0) steer the summary, e.g. "keep the
  * test failures". Runs in order with sends, like a turn. */
@@ -227,7 +248,8 @@ SOPE_API int sope_agent_reset(sope_agent_t *agent);
  *
  * "input" is the tool's JSON input as a string. User and tool messages with
  * images also have "images":[{"media_type":"image/png","data":"<base64>"}].
- * After a compaction the history starts with the summary as a user message.
+ * After compaction, history starts with a user message marked "summary":true,
+ * followed by the retained recent originals and any incoming user message.
  * Reasoning is not kept. */
 SOPE_API int sope_agent_history(sope_agent_t *agent, const char **json, size_t *len);
 

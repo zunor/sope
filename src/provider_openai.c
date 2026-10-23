@@ -34,6 +34,7 @@ typedef struct {
     sope_buf in; /* received bytes not yet parsed */
     long status;
     int saw_done; /* data: [DONE] */
+    int finish; /* 1: stop, 2: tool_calls; other reasons fail the call */
     tool_call_acc calls[MAX_TOOL_CALLS];
 } oa_state;
 
@@ -104,7 +105,7 @@ static int history_has_images(const sope_history *h)
     return 0;
 }
 
-static void build_body(sope_call *c, sope_buf *b, const char *model, const char *max_tokens)
+static void build_body(sope_call *c, sope_buf *b, const char *model)
 {
     const sope_history *h = sope__call_history(c);
     const char *system = sope__call_system(c);
@@ -116,7 +117,7 @@ static void build_body(sope_call *c, sope_buf *b, const char *model, const char 
     sope__buf_appends(b, "{");
     put_string(b, "model", model, strlen(model));
     sope__buf_appends(b, ",\"stream\":true,\"stream_options\":{\"include_usage\":true}");
-    if (max_tokens) sope__buf_appendf(b, ",\"max_tokens\":%ld", strtol(max_tokens, NULL, 10));
+    sope__buf_appendf(b, ",\"max_tokens\":%llu", (unsigned long long)sope__call_max_tokens(c));
 
     sope__buf_appends(b, ",\"messages\":[");
     if (system && *system) {
@@ -224,7 +225,6 @@ static void *oa_start(sope_call *c)
     char *key = sope__call_option(c, "openai.api_key");
     char *model = sope__call_option(c, "model");
     char *image_model = sope__call_option(c, "image_model");
-    char *max_tokens = sope__call_option(c, "openai.max_tokens");
     oa_state *s = NULL;
     size_t base_len;
 
@@ -246,8 +246,7 @@ static void *oa_start(sope_call *c)
     s->url.len = base_len;
     sope__buf_appends(&s->url, "/chat/completions");
     /* A model that reads images takes over once the conversation has any. */
-    build_body(c, &s->body, image_model && *image_model && history_has_images(sope__call_history(c)) ? image_model : model,
-               max_tokens);
+    build_body(c, &s->body, image_model && *image_model && history_has_images(sope__call_history(c)) ? image_model : model);
     if (key && *key) sope__buf_appendf(&s->auth, "Authorization: Bearer %s", key);
     s->ca_file = sope__call_option(c, "tls.ca_file");
     if (s->url.oom || s->body.oom || s->auth.oom) {
@@ -271,7 +270,6 @@ done:
     free(key);
     free(model);
     free(image_model);
-    free(max_tokens);
     return s;
 }
 
@@ -292,25 +290,68 @@ static void accumulate_tool_call(oa_state *s, const sope_json *tc, size_t positi
 }
 
 /* Handles one `data:` payload. Returns 0 if the server reported an error. */
+static void classify_error(sope_call *c, const sope_json *error)
+{
+    const char *code = sope__json_string(sope__json_get(error, "code"), NULL);
+    if (code && (!strcmp(code, "context_length_exceeded") || !strcmp(code, "context_window_exceeded")))
+        sope__call_context_exceeded(c);
+}
+
+static int usage_count(const sope_json *usage, const char *key, uint64_t *out)
+{
+    const sope_json *v = sope__json_get(usage, key);
+    double n = sope__json_number(v, -1);
+    /* Also rejects NaN, infinity, negatives and values outside uint64_t before
+     * conversion. Empty/partial usage objects must not reset calibration. */
+    if (!v || v->type != SOPE_JSON_NUMBER || !(n >= 0 && n < 0x1p64)) return 0;
+    *out = (uint64_t)n;
+    return (double)*out == n;
+}
+
 static int handle_chunk(sope_call *c, oa_state *s, const char *data, size_t n)
 {
     sope_json *root = sope__json_parse(data, n);
-    const sope_json *err, *delta, *calls, *usage;
+    const sope_json *err, *delta, *calls, *usage, *choice;
     const char *str;
     size_t len, i;
 
     if (!root) {
-        sope__call_log(c, SOPE_LOG_WARN, "openai: skipping malformed chunk: %.*s", (int)(n > 200 ? 200 : n), data);
-        return 1;
+        sope__call_error(c, SOPE_ERROR, "openai: malformed stream chunk");
+        return 0;
     }
     if ((err = sope__json_get(root, "error"))) {
+        classify_error(c, err);
         str = sope__json_string(sope__json_get(err, "message"), &len);
         sope__call_error(c, SOPE_ERROR, "openai: %.*s", str ? (int)len : (int)n, str ? str : data);
         sope__json_free(root);
         return 0;
     }
 
-    delta = sope__json_get(sope__json_at(sope__json_get(root, "choices"), 0), "delta");
+    choice = sope__json_at(sope__json_get(root, "choices"), 0);
+    if (choice && s->finish) {
+        sope__call_error(c, SOPE_ERROR, "openai: response content after finish_reason");
+        sope__json_free(root);
+        return 0;
+    }
+    delta = sope__json_get(choice, "delta");
+    calls = sope__json_get(delta, "tool_calls");
+    str = sope__json_string(sope__json_get(delta, "refusal"), &len);
+    if (sope__call_is_compaction(c) && ((str && len) ||
+        (calls && calls->type != SOPE_JSON_NULL && (calls->type != SOPE_JSON_ARRAY || calls->count)))) {
+        sope__call_error(c, SOPE_ERROR, "openai: compaction returned a refusal or tool call");
+        sope__json_free(root);
+        return 0;
+    }
+    str = sope__json_string(sope__json_get(choice, "finish_reason"), NULL);
+    if (str) {
+        if (!strcmp(str, "stop")) s->finish = 1;
+        else if (!strcmp(str, "tool_calls") && !sope__call_is_compaction(c)) s->finish = 2;
+        else {
+            sope__call_error(c, SOPE_ERROR, "openai: incomplete response (finish_reason=%s)", str);
+            sope__json_free(root);
+            return 0;
+        }
+    }
     if ((str = sope__json_string(sope__json_get(delta, "reasoning_content"), &len)) ||
         (str = sope__json_string(sope__json_get(delta, "reasoning"), &len))) {
         sope__call_thinking(c, str, len);
@@ -324,9 +365,11 @@ static int handle_chunk(sope_call *c, oa_state *s, const char *data, size_t n)
         const sope_json *tc;
         for (tc = calls->child, i = 0; tc; tc = tc->next, i++) accumulate_tool_call(s, tc, i);
     }
-    if ((usage = sope__json_get(root, "usage")) && usage->type == SOPE_JSON_OBJECT)
-        sope__call_usage(c, (uint64_t)sope__json_number(sope__json_get(usage, "prompt_tokens"), 0),
-                         (uint64_t)sope__json_number(sope__json_get(usage, "completion_tokens"), 0));
+    if ((usage = sope__json_get(root, "usage")) && usage->type == SOPE_JSON_OBJECT) {
+        uint64_t input, output;
+        if (usage_count(usage, "prompt_tokens", &input) && usage_count(usage, "completion_tokens", &output))
+            sope__call_usage(c, input, output);
+    }
     sope__json_free(root);
     return 1;
 }
@@ -349,6 +392,10 @@ static int parse_lines(sope_call *c, oa_state *s, int final)
             const char *data = line + 5;
             size_t n = len - 5;
             while (n && *data == ' ') data++, n--;
+            if (s->saw_done || (n == 6 && !memcmp(data, "[DONE]", 6) && !s->finish)) {
+                sope__call_error(c, SOPE_ERROR, "openai: out-of-order stream terminator");
+                return 0;
+            }
             if (n == 6 && !memcmp(data, "[DONE]", 6)) s->saw_done = 1;
             else if (n && !handle_chunk(c, s, data, n)) return 0;
         }
@@ -373,6 +420,7 @@ static sope_step retry(sope_call *c, oa_state *s, const char *why)
     s->in.len = 0;
     s->status = 0;
     s->saw_done = 0;
+    s->finish = 0;
     return (sope_step){ SOPE__STEP_SLEEP, delay };
 }
 
@@ -403,6 +451,9 @@ static sope_step oa_step(sope_call *c, void *state)
             snprintf(why, sizeof why, "HTTP %ld", s->status);
             return retry(c, s, why);
         }
+        sope_json *body = sope__json_parse(s->in.ptr, s->in.len);
+        classify_error(c, sope__json_get(body, "error"));
+        sope__json_free(body);
         sope__call_error(c, SOPE_ERROR, "openai: HTTP %ld: %.*s", s->status,
                          (int)(s->in.len > MAX_ERROR_BODY ? MAX_ERROR_BODY : s->in.len), s->in.ptr ? s->in.ptr : "");
         return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
@@ -415,15 +466,24 @@ static sope_step oa_step(sope_call *c, void *state)
         return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
     }
 
+    if (!s->saw_done || !s->finish) {
+        sope__call_error(c, SOPE_ERROR, "openai: incomplete stream (missing finish_reason or [DONE])");
+        return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
+    }
     for (i = 0; i < MAX_TOOL_CALLS; i++) {
         tool_call_acc *acc = &s->calls[i];
         if (!acc->used || !acc->name.len) continue;
+        if (sope__call_is_compaction(c)) {
+            sope__call_error(c, SOPE_ERROR, "openai: compaction returned a tool call");
+            return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
+        }
         if (acc->id.oom || acc->name.oom || acc->args.oom ||
             sope__call_tool_use(c, acc->id.ptr, acc->name.ptr, acc->args.ptr, acc->args.len) != SOPE_OK) {
             sope__call_error(c, SOPE_ENOMEM, "openai: out of memory");
             return (sope_step){ SOPE__STEP_DONE, SOPE_ENOMEM };
         }
     }
+    sope__call_complete(c);
     return (sope_step){ SOPE__STEP_DONE, SOPE_OK };
 }
 

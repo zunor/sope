@@ -49,7 +49,7 @@ export type SopeEvent =
   | ({ type: "usage"; inputTokens: number; outputTokens: number } & Origin)
   | ({ type: "subagent_start"; callId: number; subagentType: string; input: string } & Origin)
   | ({ type: "subagent_end"; callId: number; stopReason: StopReason; result: string } & Origin)
-  /** The history was replaced by `summary`: automatically (compact.threshold) or by compact(). */
+  /** Older history was replaced by `summary`, preserving a budgeted recent suffix. */
   | ({ type: "compact"; trigger: "auto" | "manual"; summary: string } & Origin)
   /** Synthesized when sope_poll returns SOPE_ECLOSED: no further events will arrive. */
   | { type: "closed" };
@@ -70,6 +70,11 @@ export interface ToolSpec {
   description?: string;
   /** JSON Schema object, or its serialized form. */
   inputSchema?: object | string;
+}
+
+export interface RecoveryState {
+  pending: boolean;
+  calls: Array<{ call_id: string; name: string; input: string; artifacts: string[] }>;
 }
 
 const STOP_REASONS: StopReason[] = ["end_turn", "cancelled", "error"];
@@ -135,6 +140,36 @@ export class Agent {
     const agent = new Agent(Number(out[0]) as Pointer, true);
     for (const [key, value] of Object.entries(options)) agent.setOption(key, value);
     return agent;
+  }
+
+  /** Open an exclusively owned durable session. Unfinished work stays paused. */
+  static open(directory: string, options: Record<string, string> = {}): Agent {
+    const out = new BigUint64Array(1);
+    check(C().sope_agent_open(out, cstr(directory)), "sope_agent_open");
+    const agent = new Agent(Number(out[0]) as Pointer, true);
+    try {
+      for (const [key, value] of Object.entries(options)) agent.setOption(key, value);
+      return agent;
+    } catch (error) {
+      agent.free();
+      throw error;
+    }
+  }
+
+  recovery(): RecoveryState {
+    const ptr = new BigUint64Array(1), len = new BigUint64Array(1);
+    check(C().sope_agent_recovery(this.#ptr(), ptr, len), "sope_agent_recovery");
+    return JSON.parse(readString(Number(ptr[0]), Number(len[0]))) as RecoveryState;
+  }
+
+  /** Records a verified outcome. This never reruns the interrupted operation. */
+  resolve(callId: number | bigint, content: string, isError = false): void {
+    const bytes = encoder.encode(content);
+    check(C().sope_agent_resolve(this.#ptr(), callId, isError ? 1 : 0, bytes.length ? bytes : EMPTY, bytes.length), "sope_agent_resolve");
+  }
+
+  resume(): void {
+    check(C().sope_agent_resume(this.#ptr()), "sope_agent_resume");
   }
 
   /** Non-owning view of an agent created elsewhere, e.g. in another Worker. */

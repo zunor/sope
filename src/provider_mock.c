@@ -251,6 +251,7 @@ static sope_step mock_step(sope_call *c, void *state)
         p = input + strlen(input) + 1;
     }
     sope__call_usage(c, sope__call_history(c)->count * 10, s->text.len / 4);
+    sope__call_complete(c);
     return (sope_step){ SOPE__STEP_DONE, SOPE_OK };
 }
 

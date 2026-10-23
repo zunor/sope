@@ -407,7 +407,7 @@ static void test_bash(void)
     CHECK(strstr(log.result[0], "out\nerr\n") && strstr(log.result[0], dir) && strstr(log.result[0], "[exit code 0]"));
 
     run(a, "!bash {\"command\":\"printf 'no newline'; exit 3\"}", &log, NO_ANSWER, NULL);
-    CHECK(log.is_error[0] && !strcmp(log.result[0], "no newline\n[exit code 3]"));
+    CHECK(log.is_error[0] && !strncmp(log.result[0], "no newline\n", 11) && strstr(log.result[0], "Full output:") && strstr(log.result[0], "[exit code 3]"));
 
     run(a, "!bash {\"command\":\"read x; echo got:$x\"}", &log, NO_ANSWER, NULL); /* stdin is closed */
     CHECK(strstr(log.result[0], "got:") != NULL);
@@ -450,7 +450,7 @@ static void test_bash(void)
     /* Long output keeps its start and end. */
     run(a, "!bash {\"command\":\"seq 1 100000\"}", &log, NO_ANSWER, NULL);
     CHECK(!strncmp(log.result[0], "1\n2\n3\n", 6) && strstr(log.result[0], "bytes omitted") &&
-          strstr(log.result[0], "100000\n[exit code 0]"));
+          strstr(log.result[0], "100000\n") && strstr(log.result[0], "Full output:") && strstr(log.result[0], "[exit code 0]"));
     sope_agent_free(a);
 }
 

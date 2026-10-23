@@ -26,7 +26,6 @@
 #define GLOB_LIMIT 100
 #define GREP_DEFAULT_LIMIT 250
 #define GREP_MAX_FILE (20 * 1024 * 1024)
-#define GREP_MAX_LINE 500
 
 static const char GLOB_DESC[] =
     "Finds files by path pattern, such as \"**/*.ts\" or \"src/**/test_*.c\".\n\n"
@@ -319,6 +318,10 @@ typedef struct {
     found_list files;
     size_t lines; /* content lines written */
     int truncated;
+    int archive_fd;
+    int archive_failed;
+    char *archive_path;
+    uint64_t archive_bytes;
 } grep_ctx;
 
 static int glob_allows(grep_ctx *g, const char *path)
@@ -339,18 +342,37 @@ static void emit_line(grep_ctx *g, const char *shown, size_t no, char sep, const
         g->truncated = 1;
         return;
     }
-    if (n > GREP_MAX_LINE) {
-        while (n > GREP_MAX_LINE || (n > 0 && ((unsigned char)s[n] & 0xc0) == 0x80)) n--;
-        sope__buf_appendf(&g->r->out, "%s%c%zu%c%.*s…\n", shown, sep, no, sep, (int)n, s);
-    } else {
-        sope__buf_appendf(&g->r->out, "%s%c%zu%c%.*s\n", shown, sep, no, sep, (int)n, s);
+    if (g->archive_failed) return;
+    sope_buf prefix = {0};
+    sope__buf_appendf(&prefix, "%s%c%zu%c", shown, sep, no, sep);
+    if (prefix.oom) { g->archive_failed = 1; sope__buf_free(&prefix); return; }
+    sope_buf *out = &g->r->out;
+    /* Stream large matching output instead of accumulating long lines in RAM.
+     * Explicit query limits still determine which matches belong to the result. */
+    if (g->archive_fd < 0 && out->len + prefix.len + n + 1 > 30000) {
+        g->archive_fd = sope__artifact_create(g->r->agent, "grep", &g->archive_path);
+        if (g->archive_fd < 0 || !sope__write_fd(g->archive_fd, out->ptr, out->len)) g->archive_failed = 1;
+        g->archive_bytes = out->len;
     }
+    if (g->archive_fd >= 0 && !g->archive_failed) {
+        if (!sope__write_fd(g->archive_fd, prefix.ptr, prefix.len) ||
+            !sope__write_fd(g->archive_fd, s, n) || !sope__write_fd(g->archive_fd, "\n", 1)) g->archive_failed = 1;
+        g->archive_bytes += prefix.len + n + 1;
+    }
+    if (out->len + prefix.len < 30000) {
+        sope__buf_append(out, prefix.ptr, prefix.len);
+        size_t room = 30000 - out->len;
+        sope__buf_append(out, s, n < room ? n : room);
+        if (n < room) sope__buf_appends(out, "\n");
+    }
+    sope__buf_free(&prefix);
     g->lines++;
 }
 
 static void grep_file(sope_walk *w, const char *path, const struct stat *st)
 {
     grep_ctx *g = w->ctx;
+    if (g->archive_failed) { w->stop = 1; return; }
     sope_buf data = { 0 };
     char buf[65536];
     ssize_t got;
@@ -430,7 +452,7 @@ static sope_next tool_grep(tool_run *r)
     int64_t limit = sope__arg_int(r, "head_limit", GREP_DEFAULT_LIMIT);
     char *re_src, *base, *globs[SOPE__MAX_PATTERNS];
     size_t n_globs;
-    grep_ctx g = { 0 };
+    grep_ctx g = { .archive_fd = -1 };
     sope_walk w = { 0 };
     struct stat st;
     size_t i;
@@ -504,6 +526,21 @@ static sope_next tool_grep(tool_run *r)
         if (w.stop && !g.truncated) sope__buf_appends(&r->out, "\n(the search stopped early: the tree is very large)");
     }
 
+    if (g.archive_fd >= 0) {
+        if (fsync(g.archive_fd) != 0) g.archive_failed = 1;
+        if (close(g.archive_fd) != 0) g.archive_failed = 1;
+        pthread_mutex_lock(r->agent->mu);
+        if (!g.archive_failed && !sope__journal_artifact(r->agent, r->call_id, g.archive_path)) g.archive_failed = 1;
+        pthread_mutex_unlock(r->agent->mu);
+        if (!g.archive_failed) sope__buf_appendf(&r->out, "\n[Full output: %s (%llu bytes). Use artifact_read for omitted matches.]", g.archive_path, (unsigned long long)g.archive_bytes);
+    }
+    if (g.archive_failed) {
+        pthread_mutex_lock(r->agent->mu);
+        sope__storage_fail_locked(r->agent, "Search output archive failed; execution stopped.");
+        pthread_mutex_unlock(r->agent->mu);
+        sope__run_fail(r, "Cannot archive complete search output.");
+    }
+    free(g.archive_path);
     for (i = 0; i < n_globs; i++) free(globs[i]);
     found_free(&g.files);
     sope__walk_free(&w);

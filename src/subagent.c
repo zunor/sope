@@ -326,9 +326,6 @@ static void child_closed(sope_task *task)
     }
     if (!result.len) sope__buf_appends(&result, "(no output)");
 
-    sope__push_event(parent, SOPE_EVENT_SUBAGENT_END, child->parent_turn_id, child->agent_id, stop, NULL, 0,
-                     result.oom ? "" : result.ptr, result.oom ? 0 : result.len);
-
     pthread_mutex_lock(child->mu);
     p = sope__pending_find_locked(child, child->agent_id, PENDING_SUBAGENT);
     if (p && !result.oom) {
@@ -338,8 +335,10 @@ static void child_closed(sope_task *task)
     }
     if (p) {
         p->is_error = stop != SOPE_STOP_END_TURN || result.oom;
-        p->done = 1;
+        p->done = sope__journal_result(parent, p);
     }
+    sope__push_event_locked(parent, SOPE_EVENT_SUBAGENT_END, child->parent_turn_id, child->agent_id, stop, NULL, 0,
+                     p && p->done && p->content ? p->content : "Result not committed", p && p->done && p->content ? p->len : 20);
     for (pp = &parent->children; *pp; pp = &(*pp)->sibling)
         if (*pp == child) {
             *pp = child->sibling;

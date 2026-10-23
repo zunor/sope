@@ -23,6 +23,7 @@ static const sope_builtin *const BUILTINS[] = {
     &sope__builtin_read,  &sope__builtin_write,       &sope__builtin_edit,      &sope__builtin_glob,
     &sope__builtin_grep,  &sope__builtin_bash,        &sope__builtin_bash_output, &sope__builtin_bash_kill,
     &sope__builtin_web_fetch, &sope__builtin_todo_write,
+    &sope__builtin_artifact_read,
 };
 
 size_t sope__builtin_count(void)
@@ -166,6 +167,8 @@ int sope__run_add_image(tool_run *r, const char *media_type, const void *data, s
 
 static void run_free(tool_run *r)
 {
+    sope__file_release(r);
+    free(r->file_path);
     sope__images_free(r->images, r->n_images);
     sope__json_free(r->input);
     free(r->cwd);
@@ -183,7 +186,7 @@ static sope_next run_step(sope_task *task)
     int cancel;
 
     pthread_mutex_lock(r->agent->mu);
-    cancel = r->cancel;
+    cancel = r->cancel || r->agent->cancel_requested || r->agent->closing || r->agent->root->journal_failed;
     pthread_mutex_unlock(r->agent->mu);
     if (cancel) {
         if (r->tool->cancel) r->tool->cancel(r);
@@ -191,7 +194,7 @@ static sope_next run_step(sope_task *task)
     }
     if (!r->input || r->input->type != SOPE_JSON_OBJECT)
         return sope__run_fail(r, "invalid input: expected a JSON object with the tool's arguments");
-    return r->tool->run(r);
+    return r->file_path ? sope__file_step(r) : r->tool->run(r);
 }
 
 /* On a pool thread once the run's task closed: report the result and hand
@@ -203,8 +206,13 @@ static void run_closed(sope_task *task)
     pending_call *p;
     tool_run **pp;
 
+    if (!sope__artifact_preview(a, r->call_id, &r->out, RESULT_MAX)) {
+        sope__run_fail(r, "Cannot archive complete tool output; execution stopped.");
+        pthread_mutex_lock(a->mu);
+        sope__storage_fail_locked(a, "Cannot archive tool output; execution stopped.");
+        pthread_mutex_unlock(a->mu);
+    }
     sope__buf_sanitize(&r->out, 0);
-    sope__buf_clip_middle(&r->out, RESULT_MAX);
     if (r->out.oom) {
         sope__buf_free(&r->out);
         sope__buf_appends(&r->out, "out of memory");
@@ -212,9 +220,6 @@ static void run_closed(sope_task *task)
     } else if (!r->out.len) {
         sope__buf_appends(&r->out, "(no output)");
     }
-    sope__push_event(a, SOPE_EVENT_TOOL_END, r->turn_id, r->call_id, r->is_error, r->tool->name,
-                     strlen(r->tool->name), r->out.ptr, r->out.len);
-
     pthread_mutex_lock(a->mu);
     if ((p = sope__pending_find_locked(a, r->call_id, PENDING_BUILTIN))) {
         p->content = r->out.ptr; /* ownership moves to the pending call */
@@ -224,10 +229,13 @@ static void run_closed(sope_task *task)
         p->n_images = r->n_images;
         r->images = NULL;
         r->n_images = 0;
-        p->done = 1;
+        p->done = sope__journal_result(a, p);
+        p->reported = 1;
         r->out.ptr = NULL;
         r->out.len = r->out.cap = 0;
     }
+    sope__push_event_locked(a, SOPE_EVENT_TOOL_END, r->turn_id, r->call_id, p && p->done ? r->is_error : 1, r->tool->name,
+                     strlen(r->tool->name), p && p->done && p->content ? p->content : "Result not committed", p && p->done && p->content ? p->len : 20);
     for (pp = &a->runs; *pp; pp = &(*pp)->next)
         if (*pp == r) {
             *pp = r->next;
@@ -254,7 +262,7 @@ tool_run *sope__tool_run_new(sope_agent_t *a, const sope_builtin *b, uint64_t ca
     pthread_mutex_lock(a->mu);
     r->ca_file = sope__option_dup_locked(a, "tls.ca_file");
     pthread_mutex_unlock(a->mu);
-    if (!r->cwd) {
+    if (!r->cwd || !sope__file_prepare(r)) {
         run_free(r);
         return NULL;
     }

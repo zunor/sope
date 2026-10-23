@@ -56,7 +56,7 @@ test("menu scrolls to the selection, maps mouse rows, and clips within the popup
   buf.fill(0, 0, 80, 12, {}, ".");
   menu.move(-1);
   const hits = menu.render(buf, 2, 1, 70, menu.height(9));
-  expect(row(buf, 1)).toContain("Commands (14)");
+  expect(row(buf, 1)).toContain(`Commands (${COMMANDS.length})`);
   const last = hits.at(-1)!;
   expect(row(buf, last.y)).toContain("/exit");
   menu.select(last.index);

@@ -34,6 +34,8 @@ if(SOPE_SANITIZE)
   add_link_options(-fsanitize=${SOPE_SANITIZE})
 endif()
 
+include(cmake/BundledSQLite.cmake)
+
 if(SOPE_CURL STREQUAL "system")
   find_package(CURL REQUIRED)
   add_library(sope_curl INTERFACE)
@@ -46,8 +48,11 @@ endif()
 
 set(SOPE_SOURCES
   src/agent.c
+  src/artifact.c
+  src/journal.c
   src/call.c
   src/compact.c
+  src/context.c
   src/history.c
   src/http.c
   src/json.c
@@ -77,7 +82,8 @@ foreach(target sope sope_static)
   target_include_directories(${target}
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-  target_link_libraries(${target} PUBLIC Threads::Threads)
+  target_sources(${target} PRIVATE $<TARGET_OBJECTS:sope_sqlite>)
+  target_link_libraries(${target} PUBLIC Threads::Threads PRIVATE sope_sqlite_headers)
   if(NOT SOPE_CURL STREQUAL "off")
     target_compile_definitions(${target} PRIVATE SOPE_WITH_CURL)
     if(SOPE_CURL STREQUAL "bundled")
@@ -102,7 +108,7 @@ elseif(UNIX)
 endif()
 
 # With bundled curl, libsope-bundled.a is a single relocatable object holding
-# sope, curl and mbedTLS, with every symbol but sope_* made local: a static
+# sope (including SQLite), curl and mbedTLS, with every symbol but sope_* made local: a static
 # drop-in that cannot clash with a host's own curl or TLS library.
 if(SOPE_CURL STREQUAL "bundled" AND UNIX)
   set(_amalgam_o ${CMAKE_BINARY_DIR}/sope-bundled.o)
@@ -142,9 +148,30 @@ if(SOPE_BUILD_TESTS)
   add_executable(test_json tests/test_json.c)
   target_link_libraries(test_json PRIVATE sope_static)
   add_test(NAME json COMMAND test_json)
+  add_executable(test_compact tests/test_compact.c)
+  target_link_libraries(test_compact PRIVATE sope_static)
+  add_test(NAME compact COMMAND test_compact)
   add_executable(test_tools tests/test_tools.c)
   target_link_libraries(test_tools PRIVATE sope_static)
   add_test(NAME tools COMMAND test_tools)
+  add_executable(test_durable tests/test_durable.c)
+  target_link_libraries(test_durable PRIVATE sope_static sope_sqlite_headers)
+  add_test(NAME durable COMMAND test_durable)
+  foreach(_linkage shared static)
+    add_executable(test_embed_${_linkage} tests/test_embed.c)
+    if(_linkage STREQUAL "shared")
+      target_link_libraries(test_embed_${_linkage} PRIVATE sope)
+    else()
+      target_link_libraries(test_embed_${_linkage} PRIVATE sope_static)
+    endif()
+    add_test(NAME embed_${_linkage} COMMAND test_embed_${_linkage})
+  endforeach()
+  find_program(SOPE_GO_EXECUTABLE go)
+  if(SOPE_GO_EXECUTABLE AND NOT SOPE_SANITIZE)
+    add_test(NAME embed_go COMMAND ${CMAKE_COMMAND} -E env "GO=${SOPE_GO_EXECUTABLE}"
+      bash "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test-go-embed.sh" "${CMAKE_BINARY_DIR}")
+    set_tests_properties(embed_go PROPERTIES TIMEOUT 120)
+  endif()
 endif()
 
 if(SOPE_BUILD_EXAMPLES)
@@ -157,3 +184,4 @@ endif()
 include(GNUInstallDirs)
 install(TARGETS sope sope_static)
 install(FILES include/sope.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES cmake/SQLite-NOTICE.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/sope RENAME sqlite.txt)

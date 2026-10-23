@@ -10,6 +10,7 @@
 #include "sope_internal.h"
 
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -139,6 +140,7 @@ static void append_message_json(sope_buf *b, const sope_message *m)
     size_t i;
     sope__buf_appendf(b, "{\"role\":\"%s\",\"content\":", ROLE_NAMES[m->role]);
     sope__buf_append_json_string(b, m->content, m->content_len);
+    if (m->is_summary) sope__buf_appends(b, ",\"summary\":true");
     if (m->role == SOPE__MSG_ASSISTANT && m->n_tool_uses) {
         sope__buf_appends(b, ",\"tool_uses\":[");
         for (i = 0; i < m->n_tool_uses; i++) {
@@ -149,6 +151,7 @@ static void append_message_json(sope_buf *b, const sope_message *m)
             sope__buf_append_json_string(b, u->name, strlen(u->name));
             sope__buf_appends(b, ",\"input\":");
             sope__buf_append_json_string(b, u->input, u->input_len);
+            if (u->call_id) sope__buf_appendf(b, ",\"call_id\":\"%" PRIu64 "\"", u->call_id);
             sope__buf_appends(b, "}");
         }
         sope__buf_appends(b, "]");
@@ -229,6 +232,9 @@ static int message_from_json(const sope_json *v, size_t index, sope_message **ou
     }
     if (!m) return SOPE_ENOMEM;
 
+    flag = sope__json_get(v, "summary");
+    m->is_summary = m->role == SOPE__MSG_USER && flag && flag->type == SOPE_JSON_BOOL && flag->boolean;
+
     if (m->role == SOPE__MSG_ASSISTANT && (uses = sope__json_get(v, "tool_uses")) && uses->count) {
         if (uses->type != SOPE_JSON_ARRAY || !(m->tool_uses = calloc(uses->count, sizeof *m->tool_uses))) {
             sope__message_free(m);
@@ -242,6 +248,8 @@ static int message_from_json(const sope_json *v, size_t index, sope_message **ou
             t->id = dup_member(u, "id", NULL);
             t->name = dup_member(u, "name", NULL);
             t->input = dup_member(u, "input", &t->input_len);
+            const char *call_id = sope__json_string(sope__json_get(u, "call_id"), NULL);
+            if (call_id) t->call_id = strtoull(call_id, NULL, 10);
             if (!t->id || !t->name || !t->input) {
                 sope__message_free(m);
                 snprintf(err, cap, "message %zu: tool use %zu needs string \"id\", \"name\" and \"input\"", index, i);
@@ -283,7 +291,7 @@ static int message_from_json(const sope_json *v, size_t index, sope_message **ou
     return SOPE_OK;
 }
 
-int sope__history_parse(sope_history *out, const char *json, size_t len, char *err, size_t cap)
+int sope__history_parse_raw(sope_history *out, const char *json, size_t len, char *err, size_t cap)
 {
     sope_json *root = sope__json_parse(json, len);
     const sope_json *v;
@@ -306,6 +314,12 @@ int sope__history_parse(sope_history *out, const char *json, size_t len, char *e
         sope__history_clear(out);
         return rc;
     }
-    sope__history_repair(out); /* a history saved mid-turn may end in unanswered tool uses */
     return SOPE_OK;
+}
+
+int sope__history_parse(sope_history *out, const char *json, size_t len, char *err, size_t cap)
+{
+    int rc = sope__history_parse_raw(out, json, len, err, cap);
+    if (rc == SOPE_OK) sope__history_repair(out);
+    return rc;
 }

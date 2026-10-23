@@ -9,8 +9,8 @@ export class AgentBridge {
   #worker: Worker;
   #closed: Promise<void>;
 
-  constructor(options: Record<string, string>, onEvents: (events: SopeEvent[]) => void) {
-    this.agent = Agent.create(options);
+  constructor(options: Record<string, string>, onEvents: (events: SopeEvent[]) => void, directory?: string) {
+    this.agent = directory ? Agent.open(directory, options) : Agent.create(options);
     let resolveClosed!: () => void;
     this.#closed = new Promise((resolve) => (resolveClosed = resolve));
     // From source the worker resolves relative to this file. A compiled

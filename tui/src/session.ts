@@ -3,12 +3,13 @@
 // in flight. The TUI shows sessions as tabs; each keeps running whether or
 // not its tab is the one on screen.
 //
-// Sessions are saved (store.ts) once they have a first message, and again
-// after every turn: the transcript as shown, and the history the model
-// remembers (sope_agent_history). A restored session creates its agent only
-// when it is first used, then loads that history into it.
+// store.ts saves the UI transcript and a history cache. Native execution
+// journals own admitted inputs, checkpoints and outcomes, including mid-turn.
+// A restored session opens its journal on first use and waits for /recover.
 
 import type { SopeEvent } from "sope";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { AgentBridge } from "./agent/bridge";
 import { HostToolRunner } from "./agent/runner";
 import { describeImage, type ImageFile } from "./agent/images";
@@ -147,10 +148,17 @@ export class Session {
   /** The native agent, created (and given the saved history) on first use. */
   get #agent() {
     if (!this.#bridge) {
+      if (this.#persist && !this.#id) {
+        this.#id = crypto.randomUUID();
+        this.#persist.store.create(this.#id, this.#persist.directory, this.title);
+      }
+      const directory = this.#persist && this.#id ? this.#persist.store.executionDirectory(this.#id) : undefined;
+      if (directory && this.#history && this.#history !== "[]" && !existsSync(join(directory, "execution.sqlite")))
+        throw new Error("This saved conversation has no execution journal. Start a new session; transcript snapshots are not resumable execution state.");
       const bridge = new AgentBridge(agentOptions(this.#config), (events) => {
         this.#onAgentEvents(events);
         this.#onEvents(this, events);
-      });
+      }, directory);
       for (const tool of this.hostTools) bridge.agent.registerTool(tool);
       if (this.model !== this.#config.model) bridge.agent.setOption("model", this.model || null);
       if (this.provider !== this.#config.provider) bridge.agent.setOption("provider", this.provider);
@@ -158,7 +166,7 @@ export class Session {
         fn === "note" ? this.trace.note(detail) : this.trace.call(fn, detail),
       );
       this.#bridge = bridge;
-      if (this.#history) {
+      if (this.#history && !directory) {
         try {
           bridge.agent.loadHistory(this.#history);
           this.trace.call("sope_agent_load_history", `${this.#history.length} bytes`);
@@ -166,6 +174,9 @@ export class Session {
           this.chat.add({ role: "error", text: `could not restore what the model remembers: ${(err as Error).message}` });
         }
         this.#history = null;
+      }
+      if (directory && bridge.agent.recovery().pending) {
+        this.chat.add({ role: "info", text: "An unfinished task was recovered and is paused. Use /recover to inspect it, reconcile unknown tool outcomes, then /recover resume." });
       }
     }
     return this.#bridge.agent;
@@ -252,12 +263,27 @@ export class Session {
     this.trace.call("sope_compact", `t${turnId}${focus ? ` ${JSON.stringify(focus)}` : ""}`);
   }
 
+  recover(args: string[]): void {
+    const agent = this.#agent;
+    if (args[0] === "resume") { agent.resume(); return; }
+    if (args[0] === "resolve") {
+      const [, id, status, ...evidence] = args;
+      if (!id || !/^\d+$/.test(id) || !["ok", "error"].includes(status ?? "") || !evidence.length)
+        throw new Error("usage: /recover resolve <call-id> <ok|error> <observed outcome>");
+      agent.resolve(BigInt(id), evidence.join(" "), status === "error");
+    }
+    const state = agent.recovery();
+    this.chat.add({ role: "info", text: !state.pending ? "No interrupted task." : state.calls.length
+      ? `Interrupted tools need outcome verification before resuming:\n${state.calls.map((c) => `${c.call_id}: ${c.name} ${c.input}${c.artifacts.length ? `\nSaved output: ${c.artifacts.join(", ")}` : ""}`).join("\n")}\nRecord verified outcomes with /recover resolve <call-id> <ok|error> <observed outcome>.`
+      : "All recorded tool outcomes are available. Use /recover resume to continue." });
+  }
+
   reset(): void {
+    this.#agent.reset();
     this.chat.clear();
     this.context = 0;
     this.title = UNTITLED;
-    if (this.#bridge) this.#bridge.agent.reset();
-    else this.#history = "[]";
+    this.#history = "[]";
     this.trace.call("sope_agent_reset", "");
     this.save();
   }
@@ -375,6 +401,7 @@ export class Session {
   #onRootEvent(ev: Exclude<SopeEvent, { type: "closed" }>): void {
     switch (ev.type) {
       case "turn_start":
+        this.#openTurns.add(ev.turnId);
         this.turnStarted = performance.now();
         this.turnCount++;
         return;
@@ -458,7 +485,7 @@ export class Session {
         this.context = Math.round(ev.summary.length / 4);
         const words = ev.summary.split(/\s+/).filter(Boolean).length;
         const why = ev.trigger === "auto" ? "the context grew past the compaction threshold, so " : "";
-        this.chat.add({ role: "info", text: `✻ Conversation compacted: ${why}the model now works from a ${words}-word summary instead of the full history.` });
+        this.chat.add({ role: "info", text: `✻ Conversation compacted: ${why}older history is now a ${words}-word summary, with recent messages retained within budget.` });
         return;
       }
       case "turn_end":

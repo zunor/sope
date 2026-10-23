@@ -64,6 +64,7 @@ export const COMMANDS: Command[] = [
     },
   },
   { name: "compact", args: "[focus]", description: "Summarize the conversation to free context (also automatic)", run: (h, args) => h.session.compact(args.join(" ")) },
+  { name: "recover", args: "[resume|resolve <id> <ok|error> <outcome>]", description: "Inspect and resume an interrupted task after verifying tool outcomes", run: (h, args) => h.session.recover(args) },
   { name: "thinking", description: "Show or hide the model's full reasoning", run: (h) => info(h, `full reasoning ${h.toggleThinking() ? "shown" : "collapsed"}`) },
   { name: "trace", description: "Toggle the ABI trace panel", keys: "ctrl+t", run: (h) => void h.toggleTrace() },
   { name: "mouse", description: "Toggle mouse capture (wheel scroll, drag to copy)", run: (h) => info(h, `mouse reporting ${h.toggleMouse() ? "on" : "off"}`) },

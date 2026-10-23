@@ -92,6 +92,21 @@ int sope__call_is_compaction(sope_call *c)
     return c->compaction;
 }
 
+uint64_t sope__call_max_tokens(sope_call *c)
+{
+    return c->compaction ? c->agent->turn.summary_tokens : c->agent->turn.output_limit;
+}
+
+void sope__call_complete(sope_call *c)
+{
+    c->complete = 1;
+}
+
+void sope__call_context_exceeded(sope_call *c)
+{
+    c->context_exceeded = 1;
+}
+
 /* ------------------------------------------------------------------------ */
 /* outputs                                                                   */
 /* ------------------------------------------------------------------------ */
@@ -100,6 +115,10 @@ void sope__call_text(sope_call *c, const char *s, size_t n)
 {
     if (!n) return;
     sope__buf_append(&c->text, s, n);
+    if (c->text.oom) {
+        if (!c->failed) sope__call_error(c, SOPE_ENOMEM, "out of memory while collecting model output");
+        return;
+    }
     if (c->compaction) return; /* the summary is delivered with SOPE_EVENT_COMPACT */
     sope__push_event(c->agent, SOPE_EVENT_TEXT_DELTA, sope__turn_id(c->agent), 0, 0, NULL, 0, s, n);
 }
@@ -141,7 +160,8 @@ void sope__call_usage(sope_call *c, uint64_t input_tokens, uint64_t output_token
     char buf[96];
     int n = snprintf(buf, sizeof buf, "{\"input_tokens\":%" PRIu64 ",\"output_tokens\":%" PRIu64 "}", input_tokens,
                      output_tokens);
-    if (!c->compaction) c->agent->context_tokens = input_tokens + output_tokens;
+    c->has_usage = 1;
+    c->usage_tokens = input_tokens > UINT64_MAX - output_tokens ? UINT64_MAX : input_tokens + output_tokens;
     sope__push_event(c->agent, SOPE_EVENT_USAGE, sope__turn_id(c->agent), 0, 0, NULL, 0, buf, (size_t)n);
 }
 

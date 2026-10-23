@@ -43,7 +43,7 @@ sope-0.1.0-darwin-arm64/
   lib/libsope.*       Shared library (exports only sope_*) and static library
   include/sope.h
   docs/  README.md  CHANGELOG.md  LICENSE
-  licenses/           curl and mbedTLS licenses in bundled mode
+  licenses/           SQLite notice; curl and mbedTLS licenses in bundled mode
   install.sh          Install sope into ~/.local/bin; --lib also installs the library and header
 ```
 
@@ -56,11 +56,11 @@ The script runs a Release build, C tests, binding and TUI tests, and type checki
 | macOS | `system` | libcurl is part of the OS, so it adds no extra dependency. TLS trusts the system keychain, including corporate certificates and HTTPS proxies |
 | Linux | `bundled` | libcurl versions and paths vary across distributions; bundling it makes the binary self-contained. mbedTLS reads the system certificate file, which is the standard approach on Linux |
 
-Override with `SOPE_CURL=bundled bash scripts/release.sh`.
+Override with `SOPE_CURL=bundled bash scripts/release.sh`. SQLite is built into the shared and static libraries in every mode, with private symbols and no system SQLite dependency. Go and other FFI hosts need only libsope and the public header for agent persistence.
 
 ### About the size of `sope`
 
-`bin/sope` is about 58 MB, almost all of which is the Bun runtime. libsope itself is under 100 KB (about 1.1 MB in bundled mode). A future C or Zig rewrite of the TUI could link libsope statically for a smaller executable without any ABI changes.
+`bin/sope` is about 58 MB, almost all of which is the Bun runtime. libsope includes SQLite, plus curl and mbedTLS in bundled HTTP mode; its size depends on the build mode and platform. A future C or Zig rewrite of the TUI could link libsope statically for a smaller executable without any ABI changes.
 
 ## License
 
@@ -72,7 +72,7 @@ sope uses the MIT license; the full text is in `LICENSE`. Every source file star
 
 This is a common convention in projects such as the Linux kernel and curl, and tools such as `reuse` and GitHub recognize it. `include/sope.h` also includes a copyright notice because embedding applications often copy only this header.
 
-Bundled mode compiles curl (curl license, MIT-style) and mbedTLS (Apache-2.0) into libsope. Release archives include their full license texts in `licenses/`, as required by those licenses.
+SQLite is embedded in every build; its upstream public-domain notice is included in `licenses/sqlite.txt`. Bundled mode also compiles curl (curl license, MIT-style) and mbedTLS (Apache-2.0) into libsope. Release archives include their full license texts in `licenses/`, as required by those licenses.
 
 ## Release steps
 

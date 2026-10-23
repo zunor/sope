@@ -29,7 +29,7 @@ The included `sope` executable puts that library to work in a full-screen termin
 | **Useful tools, built in** | Read, edit, search, run commands, and fetch pages. Register your own tools when you need more. |
 | **Concurrency without dedicated threads** | A shared pool runs agents and parallel tool calls; waiting for a model or child agent releases the worker. |
 | **Context that carries forward** | Save and restore history, attach images, and compact long conversations. |
-| **Your model, your host** | Connect an OpenAI-compatible endpoint. The host decides permissions, storage, and how events reach its UI. |
+| **Your model, your host** | Connect an OpenAI-compatible endpoint. The host decides permissions, session locations, and how events reach its UI. Durable storage is built into libsope. |
 
 ## Get started
 

@@ -188,7 +188,8 @@ typedef struct sope_proc sope_proc;
  * /dev/null, stdout and stderr together. `wake` (may be NULL) is woken on
  * output and once the process is done. On failure returns NULL with a
  * message in err. */
-sope_proc *sope__proc_start(const char *command, const char *cwd, sope_task *wake, char *err, size_t errlen);
+sope_proc *sope__proc_start(const char *command, const char *cwd, sope_task *wake, int archive_fd,
+                           const char *archive_path, char *err, size_t errlen);
 /* 1 once the shell exited and its output is collected; *status is the exit
  * code (128+N after signal N, -1 if unknown). */
 int sope__proc_done(sope_proc *p, int *status);
@@ -196,6 +197,8 @@ int sope__proc_killed(sope_proc *p);
 /* Appends output from absolute offset `from` (a gap where output was
  * dropped is marked) and returns the offset of the end. */
 uint64_t sope__proc_output(sope_proc *p, uint64_t from, sope_buf *out);
+uint64_t sope__proc_read(sope_proc *p, uint64_t from, size_t limit, sope_buf *out);
+int sope__proc_archive(sope_proc *p, sope_buf *out);
 void sope__proc_set_wake(sope_proc *p, sope_task *wake);
 /* Kills the process group. */
 void sope__proc_kill(sope_proc *p);
@@ -241,6 +244,7 @@ typedef struct sope_message {
     char *tool_use_id; /* tool only: sope_tool_use.id this answers */
     char *tool_name;   /* tool only */
     int is_error;      /* tool only */
+    int is_summary;    /* generated checkpoint, persisted separately from ordinary user intent */
     sope_image *images; /* user and tool messages */
     size_t n_images;
 } sope_message;
@@ -269,6 +273,10 @@ void sope__history_repair(sope_history *h);
 char *sope__history_json(const sope_history *h, size_t *len);
 /* Parses such an array into *out, repaired; SOPE_EINVAL (err says why) or SOPE_ENOMEM. */
 int sope__history_parse(sope_history *out, const char *json, size_t len, char *err, size_t cap);
+int sope__history_parse_raw(sope_history *out, const char *json, size_t len, char *err, size_t cap);
+uint64_t sope__text_tokens(const char *s, size_t n);
+uint64_t sope__message_tokens(const sope_message *m);
+uint64_t sope__history_tokens(const sope_history *h);
 
 /* ======================================================================== */
 /* providers: one streaming model call                                       */
@@ -321,6 +329,9 @@ sope_task *sope__call_task(sope_call *c);
 uint64_t sope__call_round(sope_call *c);
 /* The call summarizes the history for compaction (no tools, output hidden). */
 int sope__call_is_compaction(sope_call *c);
+uint64_t sope__call_max_tokens(sope_call *c);
+void sope__call_complete(sope_call *c);
+void sope__call_context_exceeded(sope_call *c);
 
 /* Outputs. Text and thinking stream to the host immediately; tool uses are
  * collected and dispatched by the loop when the call is done. */
@@ -337,8 +348,12 @@ void sope__call_error(sope_call *c, int code, const char *fmt, ...) SOPE_PRINTF(
 
 extern const char sope__compact_system[];
 /* The request asking the model to summarize `h`, as one user message:
- * instructions, optional extra instructions, then a transcript. NULL on OOM. */
-char *sope__compact_request(const sope_history *h, const char *extra, size_t extra_len, size_t *len);
+ * instructions, optional extra instructions, then a bounded prefix transcript.
+ * Returns SOPE_ENOMEM or SOPE_ERROR (input cannot fit); history is untouched. */
+int sope__compact_request(const sope_history *h, const sope_message *end, const char *extra, size_t extra_len,
+                          uint64_t budget, char **out, size_t *len);
+/* A contiguous recent suffix; assistant calls and their results remain atomic. */
+sope_message *sope__compact_suffix(const sope_history *h, uint64_t budget);
 /* The user message that replaces the history. NULL on OOM. */
 char *sope__compact_summary(const char *summary, size_t n, int mid_turn, size_t *len);
 

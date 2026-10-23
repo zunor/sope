@@ -14,7 +14,7 @@ The approval dialog for `write` / `edit` shows a diff against the current file, 
 
 ## Sessions
 
-The top bar shows recently used sessions (up to 5). Each tab has a light background, is one row high and 24 columns wide (narrower in very small windows), and is separated from the next by one column. Long titles are truncated and slowly scroll back and forth on hover; the active session has a bold title and a slightly brighter background. The `⋯` button on the right (or `/sessions`) lists all saved sessions for the current directory: type to filter and press Enter to open one. Each tab is an independent agent that continues running in the background when you switch away. Sessions are stored in SQLite (`~/.local/share/sope/sope.db`, configurable with `SOPE_DB`). The next time you open sope in the same directory, both the displayed conversation and the model's history are restored using the library's `sope_agent_history` / `sope_agent_load_history` functions.
+The top bar shows recently used sessions (up to 5). Each tab has a light background, is one row high and 24 columns wide (narrower in very small windows), and is separated from the next by one column. Long titles are truncated and slowly scroll back and forth on hover; the active session has a bold title and a slightly brighter background. The `⋯` button on the right (or `/sessions`) lists all saved sessions for the current directory: type to filter and press Enter to open one. Each tab is an independent agent that continues running in the background when you switch away. Sessions are stored in SQLite (`~/.local/share/sope/sope.db`, configurable with `SOPE_DB`). Execution state is stored by the native library under `<database path>.executions/<session id>/`; the UI database keeps the displayed conversation and a history cache. On reopening, the execution journal is authoritative, including results committed during a turn. Old transcript-only sessions are not automatically migrated.
 
 Click `+`, press `alt+n`, or use `/new` to create a session. Click a tab or press `alt+1…9` to switch sessions. Hover over a tab to reveal `×`, then click it (or use `alt+w` or `/close`) to close the session. Closing only hides it from the bar; its data remains in the database. A `?` on a tab means the session is waiting for approval; `•` means it has finished running in the background.
 
@@ -67,10 +67,15 @@ In the approval dialog, select with `↑`/`↓` and confirm with Enter. You can 
 | `ctrl+a/e`, `alt+b/f`, `ctrl+w/u/k` | Emacs-style editing (word movement supports Chinese word segmentation) |
 | `ctrl+c` | Cancel a running turn, clear nonempty input, or otherwise exit |
 
-Commands: `/help`, `/new`, `/close`, `/clear` (also clears conversation history), `/compact [focus]`, `/model [name]` (opens the model picker without an argument), `/thinking` (expand/collapse reasoning), `/permissions [ask|auto|full]`, `/trace`, `/mouse`, `/set <key> [value]`, and `/quit`.
+Commands: `/recover [resume|resolve <id> <ok|error> <outcome>]`, `/help`, `/new`, `/close`, `/clear` (also clears conversation history), `/compact [focus]`, `/model [name]` (opens the model picker without an argument), `/thinking` (expand/collapse reasoning), `/permissions [ask|auto|full]`, `/trace`, `/mouse`, `/set <key> [value]`, and `/quit`.
 
 `/model` or `alt+m` opens the model picker. It lists chat models and context sizes from the endpoint (`GET /models`), with recently used models first. Type to search, select with `↑`/`↓`, and press Enter to use a model; you can also enter a name that the endpoint does not list. The selected model takes effect on the next turn in the current session and becomes the default for new sessions.
 
-When context exceeds `SOPE_COMPACT_THRESHOLD` (default: 100000 tokens), history is automatically compacted into a summary. Use `/compact` to compact it manually at any time. The displayed conversation stays intact; only the history sent to the model is replaced by the summary.
+When context exceeds `SOPE_COMPACT_THRESHOLD` (default: 100000 tokens), history is automatically compacted into a summary. Use `/compact` to compact it manually at any time. The displayed conversation stays intact; the model receives a summary of older history plus recent original messages retained within budget. Restored history, new input and tool results are counted before each request.
 
 See [configuration](configuration.md) for environment variables and [demos](demos.md) for reproducible English examples.
+
+
+After a process crash, use `/recover` to inspect unfinished work. Completed tool results are reused. Calls with unknown outcomes stay paused: inspect the files, command state or external service, then record the verified outcome with `/recover resolve <call-id> <ok|error> <observed outcome>`. This command does not run the tool. Once every unknown call is reconciled, `/recover resume` continues the original task. If an outcome cannot be verified, leave it paused. Closing an inspected, unresumed session preserves its recovery state.
+
+Long tool outputs include a path to the complete archive. The agent can retrieve omitted content with `artifact_read`, or search the file with shell tools. These files remain after the agent closes; retention is controlled by the host. `/clear` commits immediately for an idle durable session and refuses to erase running or unresolved work.

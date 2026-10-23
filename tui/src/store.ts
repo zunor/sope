@@ -74,8 +74,10 @@ export type SavedMessage = Omit<Message, "id" | "version">;
 
 export class Store {
   readonly #db: Database;
+  readonly #executionRoot: string | null;
 
   constructor(path = defaultDbPath()) {
+    this.#executionRoot = path === ":memory:" ? null : `${path}.executions`;
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.#db = new Database(path, { create: true });
     this.#db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 3000; PRAGMA foreign_keys = ON;");
@@ -83,6 +85,14 @@ export class Store {
     if (user_version > SCHEMA_VERSION) throw new Error(`${path} was written by a newer sope (schema ${user_version})`);
     this.#db.exec(SCHEMA);
     this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+  }
+
+  /** Native execution state is authoritative; this database stores UI state. */
+  executionDirectory(id: string): string | undefined {
+    if (!this.#executionRoot) return undefined;
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("invalid session id");
+    mkdirSync(this.#executionRoot, { recursive: true, mode: 0o700 });
+    return join(this.#executionRoot, id);
   }
 
   /** Opens the database, or returns null (with the reason) when it cannot: sessions then live for this run only. */

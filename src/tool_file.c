@@ -3,7 +3,8 @@
  * tool_file.c - read, write and edit.
  *
  * The tools keep a per-agent record of what the model has seen (path,
- * mtime, size). write and edit refuse to touch an existing file the model
+ * mtime, size, content fingerprint). Canonical-path gates cover reads and
+ * mutations; each write/edit uses the revision captured at admission. They refuse to touch an existing file the model
  * has not read, or one that changed since: the model would otherwise edit
  * from a stale picture and silently undo someone else's change.
  */
@@ -21,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 #define READ_MAX_LINES 2000
@@ -127,21 +129,148 @@ static int read_all(const char *path, sope_buf *out)
     return !out->oom;
 }
 
+/* Readers see either the old or the complete new inode. Preserve executable
+ * bits, flush contents before rename and the directory after rename. A failure
+ * after rename is reported as such: callers must inspect before retrying. */
 static int write_all(const char *path, const char *s, size_t n)
 {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+    struct stat st;
+    int existed = stat(path, &st) == 0;
+    sope_buf tmp = {0};
+    sope__buf_appendf(&tmp, "%s.sope-XXXXXX", path);
+    int fd = tmp.oom ? -1 : mkstemp(tmp.ptr);
+    if (fd < 0) { sope__buf_free(&tmp); return 0; }
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    int ok = (!existed || fchmod(fd, st.st_mode & 0777) == 0) &&
+             sope__write_fd(fd, s, n) && fsync(fd) == 0;
+    if (close(fd) != 0) ok = 0;
+    if (ok) ok = rename(tmp.ptr, path) == 0;
+    if (ok) {
+        char *slash = strrchr(tmp.ptr, '/');
+        *slash = '\0';
+        int dir = open(tmp.ptr, O_RDONLY | O_CLOEXEC);
+        ok = dir >= 0 && fsync(dir) == 0;
+        if (dir >= 0) close(dir);
+    } else unlink(tmp.ptr);
+    sope__buf_free(&tmp);
+    return ok;
+}
+
+static uint64_t digest_bytes(const char *p, size_t n)
+{
+    uint64_t h = UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < n; i++) h = (h ^ (unsigned char)p[i]) * UINT64_C(1099511628211);
+    return h;
+}
+
+static int digest_file(const char *path, uint64_t *hash)
+{
+    char buf[65536];
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return 0;
-    while (n) {
-        ssize_t w = write(fd, s, n);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            close(fd);
-            return 0;
-        }
-        s += w;
-        n -= (size_t)w;
+    uint64_t h = UINT64_C(14695981039346656037);
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof buf)) != 0) {
+        if (n < 0) { if (errno == EINTR) continue; close(fd); return 0; }
+        for (ssize_t i = 0; i < n; i++) h = (h ^ (unsigned char)buf[i]) * UINT64_C(1099511628211);
     }
-    return close(fd) == 0;
+    close(fd); *hash = h;
+    return 1;
+}
+
+/* Resolve existing ancestors too, so aliases of not-yet-created files share a
+ * gate. Canonicalize before atomic replacement to preserve symlink semantics. */
+static char *canonical(const char *path)
+{
+    char *resolved = realpath(path, NULL);
+    if (resolved) return resolved;
+    if (errno != ENOENT) return sope__strdup(path);
+    char *parent = sope__strdup(path);
+    if (!parent) return NULL;
+    char *slash = strrchr(parent, '/');
+    if (!slash || slash == parent) { free(parent); return sope__strdup(path); }
+    *slash = '\0';
+    resolved = canonical(parent);
+    sope_buf b = {0};
+    if (resolved) sope__buf_appendf(&b, "%s/%s", resolved, slash + 1);
+    free(resolved); free(parent);
+    if (b.oom) { sope__buf_free(&b); return NULL; }
+    return b.ptr;
+}
+
+struct file_gate { struct file_gate *next; char *path; size_t refs; int held; int fd; };
+static pthread_mutex_t gates_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct file_gate *gates;
+
+int sope__file_prepare(tool_run *r)
+{
+    if (r->tool != &sope__builtin_read && r->tool != &sope__builtin_write && r->tool != &sope__builtin_edit) return 1;
+    const char *arg = sope__arg_string(r, "file_path");
+    if (!arg || !*arg) return 1;
+    char *path = sope__run_path(r, arg);
+    r->file_path = path ? canonical(path) : NULL;
+    free(path);
+    if (!r->file_path) return 0;
+    pthread_mutex_lock(r->agent->mu);
+    for (file_state *f = r->agent->files; f; f = f->next) if (!strcmp(f->path, r->file_path)) {
+        r->expected_file = *f; r->expected_read = 1; break;
+    }
+    pthread_mutex_unlock(r->agent->mu);
+    pthread_mutex_lock(&gates_mu);
+    struct file_gate *g;
+    for (g = gates; g; g = g->next) if (!strcmp(g->path, r->file_path)) break;
+    if (!g) {
+        g = calloc(1, sizeof *g);
+        if (g) g->fd = -1;
+        char directory[128], lock[192];
+        snprintf(directory, sizeof directory, "/tmp/sope-file-locks-%lu", (unsigned long)getuid());
+        struct stat st;
+        int private_dir = (mkdir(directory, 0700) == 0 || errno == EEXIST) &&
+                          lstat(directory, &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == getuid() && !(st.st_mode & 0077);
+        snprintf(lock, sizeof lock, "%s/%016llx", directory, (unsigned long long)digest_bytes(r->file_path, strlen(r->file_path)));
+        if (g && private_dir) g->fd = open(lock, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (g && g->fd >= 0 && (g->path = sope__strdup(r->file_path))) { g->next = gates; gates = g; }
+        else { if (g && g->fd >= 0) close(g->fd); free(g); g = NULL; }
+    }
+    if (g) { g->refs++; r->file_gate = g; }
+    pthread_mutex_unlock(&gates_mu);
+    return g != NULL;
+}
+
+sope_next sope__file_step(tool_run *r)
+{
+    pthread_mutex_lock(&gates_mu);
+    if (r->file_gate->held) {
+        pthread_mutex_unlock(&gates_mu);
+        return (sope_next){ SOPE__NEXT_SLEEP, 5 };
+    }
+    r->file_gate->held = 1;
+    pthread_mutex_unlock(&gates_mu);
+    sope_next result;
+    if (flock(r->file_gate->fd, LOCK_EX | LOCK_NB) == 0) {
+        result = r->tool->run(r);
+        flock(r->file_gate->fd, LOCK_UN);
+    } else if (errno == EWOULDBLOCK || errno == EAGAIN) {
+        result = (sope_next){ SOPE__NEXT_SLEEP, 5 };
+    } else result = sope__run_fail(r, "Cannot lock file for a consistent operation: %s", strerror(errno));
+    pthread_mutex_lock(&gates_mu);
+    r->file_gate->held = 0;
+    pthread_mutex_unlock(&gates_mu);
+    return result;
+}
+
+void sope__file_release(tool_run *r)
+{
+    if (!r->file_gate) return;
+    pthread_mutex_lock(&gates_mu);
+    struct file_gate *g = r->file_gate;
+    if (--g->refs == 0) {
+        struct file_gate **pp = &gates;
+        while (*pp != g) pp = &(*pp)->next;
+        *pp = g->next; close(g->fd); free(g->path); free(g);
+    }
+    pthread_mutex_unlock(&gates_mu);
+    r->file_gate = NULL;
 }
 
 static size_t count_lines(const char *s, size_t n)
@@ -173,22 +302,14 @@ void sope__files_clear(sope_agent_t *a)
 /* 1: read and unchanged since, 0: never read, -1: changed since. */
 static int files_check(tool_run *r, const char *path, const struct stat *st)
 {
-    sope_agent_t *a = r->agent;
-    file_state *f;
-    int rc = 0;
-    pthread_mutex_lock(a->mu);
-    for (f = a->files; f; f = f->next)
-        if (!strcmp(f->path, path)) {
-            rc = f->mtime_sec == MTIME_SEC(*st) && f->mtime_nsec == MTIME_NSEC(*st) && f->size == (int64_t)st->st_size
-                     ? 1
-                     : -1;
-            break;
-        }
-    pthread_mutex_unlock(a->mu);
-    return rc;
+    if (!r->expected_read) return 0;
+    const file_state *f = &r->expected_file;
+    uint64_t digest;
+    return f->mtime_sec == MTIME_SEC(*st) && f->mtime_nsec == MTIME_NSEC(*st) &&
+           f->size == (int64_t)st->st_size && digest_file(path, &digest) && digest == f->digest ? 1 : -1;
 }
 
-static void files_record(tool_run *r, const char *path)
+static void files_record(tool_run *r, const char *path, const char *data, size_t len)
 {
     sope_agent_t *a = r->agent;
     struct stat st;
@@ -210,6 +331,7 @@ static void files_record(tool_run *r, const char *path)
         f->mtime_sec = MTIME_SEC(st);
         f->mtime_nsec = MTIME_NSEC(st);
         f->size = (int64_t)st.st_size;
+        f->digest = digest_bytes(data, len);
     }
     pthread_mutex_unlock(a->mu);
 }
@@ -237,10 +359,10 @@ static sope_next tool_read(tool_run *r)
     char *path;
     const char *image;
     size_t pos = 0, line_no = 0, shown_from = 0, shown_to = 0, total;
-    int stopped = 0;
+    int stopped = 0, clipped_line = 0;
 
     if (!arg || !*arg) return sope__run_fail(r, "file_path is required");
-    if (!(path = sope__run_path(r, arg))) return sope__run_fail(r, "out of memory");
+    if (!(path = sope__strdup(r->file_path))) return sope__run_fail(r, "out of memory");
     shown = sope__display_path(r, path);
     if (stat(path, &st) != 0) {
         int err = errno;
@@ -298,6 +420,7 @@ static sope_next tool_read(tool_run *r)
         shown_to = line_no;
         sope__buf_appendf(&r->out, "%6zu\t", line_no);
         if (len > READ_MAX_LINE) {
+            clipped_line = 1;
             size_t cut = READ_MAX_LINE;
             while (cut > 0 && ((unsigned char)line[cut] & 0xc0) == 0x80) cut--;
             sope__buf_append(&r->out, line, cut);
@@ -317,7 +440,14 @@ static sope_next tool_read(tool_run *r)
         sope__buf_appendf(&r->out, "\n(showing lines %zu-%zu of %zu%s)", shown_from, shown_to, total,
                           stopped ? "; pass offset to read more" : "");
     }
-    files_record(r, path);
+    if (stopped || clipped_line || shown_from > 1) {
+        char *archive = NULL;
+        if (!sope__artifact_save(r->agent, r->call_id, data.ptr, data.len, &archive))
+            sope__run_fail(r, "Cannot archive the complete file contents; read failed.");
+        else sope__buf_appendf(&r->out, "\n[Full output: %s (%zu bytes). Use artifact_read for exact byte ranges.]", archive, data.len);
+        free(archive);
+    }
+    if (!r->is_error) files_record(r, path, data.ptr, data.len);
     free(path);
     sope__buf_free(&data);
     return sope__run_done(r);
@@ -337,7 +467,7 @@ static sope_next tool_write(tool_run *r)
 
     if (!arg || !*arg) return sope__run_fail(r, "file_path is required");
     if (!content || content->type != SOPE_JSON_STRING) return sope__run_fail(r, "content (a string) is required");
-    if (!(path = sope__run_path(r, arg))) return sope__run_fail(r, "out of memory");
+    if (!(path = sope__strdup(r->file_path))) return sope__run_fail(r, "out of memory");
     shown = sope__display_path(r, path);
     exists = stat(path, &st) == 0;
     if (exists && S_ISDIR(st.st_mode)) {
@@ -347,7 +477,7 @@ static sope_next tool_write(tool_run *r)
     } else if (!make_parents(path) || !write_all(path, content->str, content->len)) {
         sope__run_fail(r, "Cannot write %s: %s", shown, strerror(errno));
     } else {
-        files_record(r, path);
+        files_record(r, path, content->str, content->len);
         sope__buf_appendf(&r->out, "%s %s (%zu lines)", exists ? "Wrote" : "Created", shown,
                           count_lines(content->str, content->len));
     }
@@ -415,17 +545,19 @@ static sope_next tool_edit(tool_run *r)
     old_s = old_j->str, old_n = old_j->len, new_s = new_j->str, new_n = new_j->len;
     if (old_n == new_n && !memcmp(old_s, new_s, old_n))
         return sope__run_fail(r, "old_string and new_string are the same: there is nothing to change.");
-    if (!(path = sope__run_path(r, arg))) return sope__run_fail(r, "out of memory");
+    if (!(path = sope__strdup(r->file_path))) return sope__run_fail(r, "out of memory");
     shown = sope__display_path(r, path);
     exists = stat(path, &st) == 0;
 
     if (!old_n) { /* create */
-        if (exists && st.st_size > 0) {
+        if (exists && (state = files_check(r, path, &st)) != 1) {
+            stale_file(r, shown, state);
+        } else if (exists && st.st_size > 0) {
             sope__run_fail(r, "%s already exists. To change it, pass the text to replace as old_string.", shown);
         } else if (!make_parents(path) || !write_all(path, new_s, new_n)) {
             sope__run_fail(r, "Cannot write %s: %s", shown, strerror(errno));
         } else {
-            files_record(r, path);
+            files_record(r, path, new_s, new_n);
             sope__buf_appendf(&r->out, "Created %s (%zu lines)", shown, count_lines(new_s, new_n));
         }
         free(path);
@@ -484,7 +616,7 @@ static sope_next tool_edit(tool_run *r)
         sope__run_fail(r, "Cannot write %s: %s", shown, strerror(errno));
         goto out;
     }
-    files_record(r, path);
+    files_record(r, path, result.ptr, result.len);
     if (count > 1)
         sope__buf_appendf(&r->out, "Edited %s: replaced %zu occurrences. The first one now reads:\n", shown, count);
     else

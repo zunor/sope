@@ -14,7 +14,12 @@ Precedence, from lowest to highest: `~/.config/sope/config` (`KEY=VALUE` format)
 | `SOPE_PROVIDER` | `--provider` | `openai` when a key is set, otherwise `mock` |
 | `SOPE_PERMISSIONS` | `--permissions`, `--allow-all` | `auto` (Approve for me); also supports `ask` and `full` |
 | `SOPE_COMPACT_THRESHOLD` | | `100000` (`0` disables automatic compaction) |
+| `SOPE_CONTEXT_WINDOW` | | `0` (unknown); set to the full token window of the model used |
 | `SOPE_LIB` | | Load a different libsope instead of the embedded copy |
 | `SOPE_MOUSE` | | `1`; `0` leaves mouse input to the terminal (the wheel becomes ↑/↓) |
 | `SOPE_GRAPHICS` | | Automatically probes for the Kitty graphics protocol; `0` disables the pixel meteor |
 | `SOPE_TRUECOLOR` | | Automatically detected; `0`/`1` forces 256 colors / true color |
+
+Context is checked before each model request, including restored sessions and newly added tool results. Set `SOPE_CONTEXT_WINDOW` for the model actually used (use the smaller capacity if switching between text and image models). The default output reservation is 4096 tokens. In the TUI, `/set context.window 128000` changes the window from the next turn; `/set context.reserve 8192` increases the normal output allowance. A window value of zero leaves the model capacity unknown.
+
+`/compact [focus]` summarizes older messages while retaining recent originals within budget. `/set compact.retain_tokens 8000`, `/set compact.max_tokens 2048` and `/set compact.input_tokens 64000` control retention, summary output and summary input respectively. See the [ABI compaction contract](../abi.md#51-history-compaction) for failure behavior and estimation limits.

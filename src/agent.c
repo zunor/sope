@@ -208,6 +208,9 @@ void sope__agent_free_memory(sope_agent_t *a)
     }
 
     sope__shells_free(a);
+    while (a->pending) { pending_call *p = a->pending; a->pending = p->next; sope__pending_free(p); }
+    sope__journal_close(a);
+    free(a->artifact_dir);
     ev_free(a->delivered);
     while (a->ev_head) {
         ev_node *n = a->ev_head;
@@ -379,6 +382,11 @@ static int enqueue(sope_agent_t *a, const char *fn, int compact, const char *tex
     m->compact = compact;
 
     pthread_mutex_lock(a->mu);
+    if (a->recovering || a->root->journal_failed) {
+        pthread_mutex_unlock(a->mu);
+        sope__msg_node_free(m);
+        return sope__set_error(SOPE_EBUSY, "session needs recovery before accepting input");
+    }
     if (a->closing) {
         pthread_mutex_unlock(a->mu);
         free(m->text);
@@ -389,6 +397,14 @@ static int enqueue(sope_agent_t *a, const char *fn, int compact, const char *tex
     if (!compact) { /* the message carries the images attached since the last one */
         m->images = a->attached;
         m->n_images = a->n_attached;
+    }
+    if (!sope__journal_input(a, m)) {
+        m->images = NULL; m->n_images = 0;
+        pthread_mutex_unlock(a->mu);
+        sope__msg_node_free(m);
+        return sope__set_error(SOPE_ERROR, "input was not committed to execution journal");
+    }
+    if (!compact) {
         a->attached = NULL;
         a->n_attached = 0;
     }
@@ -458,12 +474,19 @@ int sope_tool_result(sope_agent_t *a, uint64_t call_id, int is_error, const char
     char *copy;
 
     if (!a || (!content && len)) return sope__set_error(SOPE_EINVAL, "sope_tool_result: invalid argument");
-    if (!(copy = sope__strndup(content ? content : "", len)))
+    sope_buf output = {0};
+    sope__buf_append(&output, content ? content : "", len);
+    if (!sope__artifact_preview(a, call_id, &output, 512 * 1024)) {
+        sope__buf_free(&output);
+        return sope__set_error(SOPE_ERROR, "cannot archive tool output");
+    }
+    len = output.len;
+    if (!(copy = output.ptr))
         return sope__set_error(SOPE_ENOMEM, "sope_tool_result: out of memory");
 
     pthread_mutex_lock(a->mu);
     p = sope__pending_find_locked(a, call_id, PENDING_TOOL);
-    if (!p || p->done) {
+    if (!p || p->done || a->root->recovering || a->root->journal_failed) {
         pthread_mutex_unlock(a->mu);
         free(copy);
         return sope__set_error(SOPE_ENOTFOUND, "sope_tool_result: no pending tool call %" PRIu64, call_id);
@@ -471,7 +494,14 @@ int sope_tool_result(sope_agent_t *a, uint64_t call_id, int is_error, const char
     p->content = copy;
     p->len = len;
     p->is_error = is_error != 0;
+    if (!sope__journal_result(p->owner, p)) {
+        p->content = NULL; p->len = 0;
+        pthread_mutex_unlock(a->mu);
+        free(copy);
+        return sope__set_error(SOPE_ERROR, "tool result was not committed");
+    }
     p->done = 1;
+    p->reported = 1;
     owner = p->owner;
     sope__push_event_locked(owner, SOPE_EVENT_TOOL_END, p->turn_id, call_id, p->is_error, p->name, strlen(p->name),
                             copy, len);
@@ -504,7 +534,7 @@ int sope_permit(sope_agent_t *a, uint64_t call_id, int allow, const char *messag
 
     pthread_mutex_lock(a->mu);
     p = sope__pending_find_locked(a, call_id, PENDING_BUILTIN);
-    if (!p || !p->run || p->done) {
+    if (!p || !p->run || p->done || a->root->journal_failed) {
         pthread_mutex_unlock(a->mu);
         sope__buf_free(&why);
         return sope__set_error(SOPE_ENOTFOUND, "sope_permit: no tool call %" PRIu64 " is waiting for permission",
@@ -517,12 +547,13 @@ int sope_permit(sope_agent_t *a, uint64_t call_id, int allow, const char *messag
         sope__tool_run_start_locked(r);
         r = NULL;
     } else {
-        sope__push_event_locked(p->owner, SOPE_EVENT_TOOL_END, p->turn_id, call_id, 1, p->name, strlen(p->name),
-                                why.ptr, why.len);
         p->content = why.ptr;
         p->len = why.len;
         p->is_error = 1;
-        p->done = 1;
+        p->done = sope__journal_result(p->owner, p);
+        p->reported = 1;
+        sope__push_event_locked(p->owner, SOPE_EVENT_TOOL_END, p->turn_id, call_id, 1, p->name, strlen(p->name),
+                                why.ptr, why.len);
         why.ptr = NULL;
         sope__task_wake(&p->owner->task);
     }
@@ -547,6 +578,18 @@ int sope_agent_reset(sope_agent_t *a)
 {
     if (!a) return sope__set_error(SOPE_EINVAL, "sope_agent_reset: agent is NULL");
     pthread_mutex_lock(a->mu);
+    if (a->journal) {
+        if (a->active_turn || a->in_head || a->recovering || a->journal_failed) {
+            pthread_mutex_unlock(a->mu);
+            return sope__set_error(SOPE_EBUSY, "finish or recover the durable task before resetting history");
+        }
+        sope__history_clear(&a->history);
+        sope__files_clear(a);
+        a->context_tokens = a->context_estimate = 0;
+        int ok = sope__journal_checkpoint(a, "import", 1);
+        pthread_mutex_unlock(a->mu);
+        return ok ? SOPE_OK : SOPE_ERROR;
+    }
     a->reset_requested = 1;
     pthread_mutex_unlock(a->mu);
     return SOPE_OK;
@@ -602,9 +645,11 @@ int sope_agent_load_history(sope_agent_t *a, const char *json, size_t len)
     a->history = h;
     a->reset_requested = 0;
     a->context_tokens = 0;
+    a->context_estimate = 0; /* restored histories are measured before their first request */
     sope__files_clear(a); /* edits need fresh reads in this process */
+    int committed = sope__journal_checkpoint(a, "import", 1);
     pthread_mutex_unlock(a->mu);
-    return SOPE_OK;
+    return committed ? SOPE_OK : SOPE_ERROR;
 }
 
 int sope_agent_close(sope_agent_t *a)

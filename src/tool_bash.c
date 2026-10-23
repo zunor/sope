@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <time.h>
 
@@ -31,7 +32,7 @@ static const char BASH_DESC[] =
     "- Prefer the dedicated tools: read instead of cat, head or tail; edit or write instead of sed or echo "
     "redirection; glob instead of find; grep instead of grep or rg.\n"
     "- timeout is in milliseconds (default 120000, at most 600000). When the output is long, its beginning "
-    "and end are kept.\n"
+    "and end are shown, with complete output archived to a file.\n"
     "- Use run_in_background for long-running processes such as dev servers and watchers: you get a shell id "
     "right away, read its output with bash_output and stop it with bash_kill. Do not append & yourself.\n"
     "- Run independent commands as parallel tool calls; chain dependent ones with &&.\n"
@@ -73,13 +74,19 @@ static void bash_result(tool_run *r, int status)
     sope__buf_sanitize(&r->out, start);
     while (r->out.len > start && r->out.ptr[r->out.len - 1] == '\n') r->out.ptr[--r->out.len] = '\0';
     sope__buf_clip_middle(&r->out, BASH_MAX_OUTPUT);
+    int archived = sope__proc_archive(r->proc, &r->out);
+    if (!archived) {
+        pthread_mutex_lock(r->agent->mu);
+        sope__storage_fail_locked(r->agent, "Shell output archive failed; verify the command outcome before recovery.");
+        pthread_mutex_unlock(r->agent->mu);
+    }
     if (r->out.len) sope__buf_appends(&r->out, "\n");
     if (r->timed_out) {
         sope__buf_appendf(&r->out, "[timed out after %lld ms; the command was killed]", (long long)r->timeout_ms);
         r->is_error = 1;
     } else {
         sope__buf_appendf(&r->out, "[exit code %d]", status);
-        r->is_error = status != 0;
+        r->is_error = status != 0 || !archived;
     }
 }
 
@@ -96,8 +103,16 @@ static sope_next tool_bash(tool_run *r)
         r->timeout_ms = sope__arg_int(r, "timeout", BASH_DEFAULT_MS);
         if (r->timeout_ms <= 0) r->timeout_ms = BASH_DEFAULT_MS;
         if (r->timeout_ms > BASH_MAX_MS) r->timeout_ms = BASH_MAX_MS;
-        if (!(r->proc = sope__proc_start(cmd, r->cwd, background ? NULL : &r->task, err, sizeof err)))
-            return sope__run_fail(r, "%s", err);
+        char *archive_path;
+        int archive_fd = sope__artifact_create(r->agent, "shell", &archive_path);
+        if (archive_fd < 0) return sope__run_fail(r, "Cannot create shell output archive; command did not run.");
+        pthread_mutex_lock(r->agent->mu);
+        int committed = sope__journal_artifact(r->agent, r->call_id, archive_path);
+        pthread_mutex_unlock(r->agent->mu);
+        if (!committed) { close(archive_fd); free(archive_path); return sope__run_fail(r, "Cannot commit shell archive; command did not run."); }
+        r->proc = sope__proc_start(cmd, r->cwd, background ? NULL : &r->task, archive_fd, archive_path, err, sizeof err);
+        free(archive_path);
+        if (!r->proc) return sope__run_fail(r, "%s", err);
         if (background) {
             sope_agent_t *root = r->agent->root;
             bg_shell *sh = calloc(1, sizeof *sh);
@@ -116,6 +131,7 @@ static sope_next tool_bash(tool_run *r)
                               "Started in the background as shell %u. Read its output with bash_output "
                               "(shell_id \"%u\") and stop it with bash_kill.",
                               (unsigned)sh->id, (unsigned)sh->id);
+            sope__proc_archive(sh->proc, &r->out);
             return sope__run_done(r);
         }
         r->deadline_ms = now_ms() + r->timeout_ms;
@@ -169,11 +185,14 @@ static sope_next tool_bash_output(tool_run *r)
         return sope__run_fail(r, "There is no background shell %u.", (unsigned)id);
     }
     done = sope__proc_done(sh->proc, &status);
-    sh->read_pos = sope__proc_output(sh->proc, sh->read_pos, &fresh);
+    sh->read_pos = sope__proc_read(sh->proc, sh->read_pos, BASH_MAX_OUTPUT, &fresh);
+    int archived = sope__proc_archive(sh->proc, &r->out);
+    if (!archived) sope__storage_fail_locked(r->agent, "Background output archive failed; verify the command outcome before recovery.");
+    r->is_error = !archived;
     pthread_mutex_unlock(r->agent->mu);
 
     sope__buf_sanitize(&fresh, 0);
-    sope__buf_clip_middle(&fresh, BASH_MAX_OUTPUT);
+
     if (done)
         sope__buf_appendf(&r->out, "Shell %u exited with code %d.\n", (unsigned)id, status);
     else

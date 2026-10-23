@@ -8,7 +8,7 @@
 #     lib/libsope.a         static library
 #     include/sope.h        the ABI
 #     docs/, README.md, CHANGELOG.md, LICENSE, install.sh
-#     licenses/             curl's and mbedTLS's, when they are bundled
+#     licenses/             SQLite notice; curl's and mbedTLS's when bundled
 #
 # HTTP: macOS links the system libcurl (part of the OS; TLS trusts the
 # Keychain); Linux bundles curl + mbedTLS into libsope. Override with
@@ -76,15 +76,17 @@ else
   ln -s libsope.so.0 "$stage/lib/libsope.so"
 fi
 if [[ "$curl_mode" == bundled ]]; then
-  cp "$build/libsope-bundled.a" "$stage/lib/libsope.a" # curl + mbedTLS inside, only sope_* global
+  cp "$build/libsope-bundled.a" "$stage/lib/libsope.a" # SQLite + curl + mbedTLS inside
 else
-  cp "$build/libsope.a" "$stage/lib/libsope.a" # link with -lcurl
+  cp "$build/libsope.a" "$stage/lib/libsope.a" # SQLite inside; link with -lcurl
 fi
 cp include/sope.h "$stage/include/"
 cp -R docs/. "$stage/docs/"
 cp README.md CHANGELOG.md "$stage/"
 cp scripts/install.sh "$stage/install.sh"
 cp LICENSE "$stage/"
+mkdir -p "$stage/licenses"
+cp cmake/SQLite-NOTICE.txt "$stage/licenses/sqlite.txt"
 if [[ "$curl_mode" == bundled ]]; then # their code is inside libsope: ship their licenses
   mkdir -p "$stage/licenses"
   cp "$build/curl_ep-prefix/src/curl_ep/COPYING" "$stage/licenses/curl.txt"

@@ -9,8 +9,8 @@
  * done, the same way http.c wakes tasks for network transfers.
  *
  * Output keeps the first HEAD_MAX bytes and a rolling window of the last
- * TAIL_MAX bytes, so a chatty process costs bounded memory while both the
- * start (errors, usage) and the end (results) survive.
+ * TAIL_MAX bytes for previews, while all bytes stream to a retained archive.
+ * Background pagination reads that archive, not the bounded memory window.
  *
  * A process is shared by its owner and the reaper (refcount 2). Lock order:
  * R.mu, then the pool lock (via sope__task_wake).
@@ -21,7 +21,7 @@
 #  define _GNU_SOURCE /* POSIX_SPAWN_SETSID (glibc 2.26+) */
 #endif
 
-#include "sope_internal.h"
+#include "agent.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -54,6 +54,9 @@ struct sope_proc {
     sope_buf tail;   /* bytes after head; only the last TAIL_MAX are kept */
     uint64_t tail_base; /* absolute offset of tail.ptr[0] */
     uint64_t total;  /* bytes received */
+    int archive_fd;
+    char *archive_path;
+    int archive_error;
 };
 
 static struct {
@@ -76,6 +79,8 @@ static void poke_locked(void)
 static void proc_free(sope_proc *p)
 {
     if (p->fd >= 0) close(p->fd);
+    if (p->archive_fd >= 0) close(p->archive_fd);
+    free(p->archive_path);
     sope__buf_free(&p->head);
     sope__buf_free(&p->tail);
     free(p);
@@ -95,6 +100,10 @@ static void unref_locked(sope_proc *p)
 
 static void append_output_locked(sope_proc *p, const char *s, size_t n)
 {
+    if (!p->archive_error && !sope__write_fd(p->archive_fd, s, n)) {
+        p->archive_error = 1;
+        kill(-p->pid, SIGKILL); /* disk failure must not become silent evidence loss */
+    }
     size_t room = p->head.len < HEAD_MAX ? HEAD_MAX - p->head.len : 0;
     size_t h = n < room ? n : room;
     if (h) sope__buf_append(&p->head, s, h);
@@ -206,6 +215,7 @@ static void *reaper_main(void *arg)
                     while ((r = read(p->fd, buf, sizeof buf)) > 0) append_output_locked(p, buf, (size_t)r);
                     close_pipe_locked(p);
                 }
+                if (fsync(p->archive_fd) != 0) p->archive_error = 1;
                 p->done = 1;
                 if (p->wake) sope__task_wake(p->wake);
                 unref_locked(p); /* the reaper's reference: it is finished with p */
@@ -260,7 +270,8 @@ static char **child_env(void)
     return env;
 }
 
-sope_proc *sope__proc_start(const char *command, const char *cwd, sope_task *wake, char *err, size_t errlen)
+sope_proc *sope__proc_start(const char *command, const char *cwd, sope_task *wake, int archive_fd,
+                           const char *archive_path, char *err, size_t errlen)
 {
     static const char prologue[] = "cd -- \"$1\" || exit 1\nshift\n";
     const char *shell = access("/bin/bash", X_OK) == 0 ? "/bin/bash" : "/bin/sh";
@@ -277,8 +288,9 @@ sope_proc *sope__proc_start(const char *command, const char *cwd, sope_task *wak
     sope__buf_appends(&script, prologue);
     sope__buf_appends(&script, command);
     p = calloc(1, sizeof *p);
+    if (p) { p->archive_fd = archive_fd; p->archive_path = sope__strdup(archive_path); }
     env = child_env();
-    if (!p || !env || script.oom) {
+    if (!p || !p->archive_path || !env || script.oom) {
         snprintf(err, errlen, "out of memory");
         goto fail;
     }
@@ -356,6 +368,8 @@ sope_proc *sope__proc_start(const char *command, const char *cwd, sope_task *wak
     return p;
 
 fail:
+    close(archive_fd);
+    if (p) free(p->archive_path);
     if (fds[0] >= 0) close(fds[0]);
     if (fds[1] >= 0) close(fds[1]);
     free(p);
@@ -402,6 +416,33 @@ uint64_t sope__proc_output(sope_proc *p, uint64_t from, sope_buf *out)
     }
     pthread_mutex_unlock(&R.mu);
     return end;
+}
+
+/* Background readers advance only over bytes actually returned. The archive
+ * remains seekable after a preview or reader falls behind the in-memory tail. */
+uint64_t sope__proc_read(sope_proc *p, uint64_t from, size_t limit, sope_buf *out)
+{
+    char buf[32768];
+    pthread_mutex_lock(&R.mu);
+    size_t n = from < p->total ? (size_t)(p->total - from) : 0;
+    if (n > limit) n = limit;
+    if (n > sizeof buf) n = sizeof buf;
+    ssize_t got = 0;
+    if (n) do got = pread(p->archive_fd, buf, n, (off_t)from); while (got < 0 && errno == EINTR);
+    if (got < 0) p->archive_error = 1;
+    else if (got > 0) { sope__buf_append(out, buf, (size_t)got); if (!out->oom) from += (uint64_t)got; }
+    pthread_mutex_unlock(&R.mu);
+    return from;
+}
+
+int sope__proc_archive(sope_proc *p, sope_buf *out)
+{
+    pthread_mutex_lock(&R.mu);
+    int ok = !p->archive_error;
+    sope__buf_appendf(out, "\n[%s: %s; %llu bytes received. Use artifact_read with byte offset/limit.]",
+        ok ? "Full output" : "OUTPUT ARCHIVE FAILED; partial output", p->archive_path, (unsigned long long)p->total);
+    pthread_mutex_unlock(&R.mu);
+    return ok;
 }
 
 void sope__proc_set_wake(sope_proc *p, sope_task *wake)

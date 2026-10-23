@@ -47,7 +47,7 @@
 
 - **Agents do not occupy dedicated threads.** All agents, including subagents, run on one process-wide shared thread pool. Creating an agent only allocates memory.
 - **Turns within an agent execute strictly in sequence.** Different agents and multiple subagents within a turn run concurrently.
-- **Thread pool threads never block.** A turn is a state machine: while waiting for tool results, subagents, or the next model output chunk, it suspends and releases its thread. A single HTTP I/O thread (libcurl multi) drives all network activity and wakes the relevant turn when data arrives. A single reaper thread reads output and collects exit statuses from `bash` child processes, likewise waking tasks only when there is activity.
+- **Waiting turns release their worker.** Local file I/O and durable commits are synchronous, but a turn is otherwise a state machine: while waiting for tool results, subagents, or the next model output chunk, it suspends and releases its thread. A single HTTP I/O thread (libcurl multi) drives all network activity and wakes the relevant turn when data arrives. A single reaper thread reads output and collects exit statuses from `bash` child processes, likewise waking tasks only when there is activity.
 - **Each built-in tool call is a separate task**, so multiple tools requested in one model response actually execute in parallel. File reads and searches run directly on the thread pool; waiting for commands or downloads does not occupy a thread.
 - `sope_set_threads(n)` sets the thread count. Call it before the first `sope_agent_new` (or after `sope_shutdown`); otherwise it returns `SOPE_EBUSY`. `0` selects the default: the CPU count, clamped to 2–8.
 - `sope_shutdown()` stops and joins the thread pool, HTTP thread, and process reaper thread. All agents must have been freed first. This optional call is useful before unloading the dynamic library or when collecting a clean leak report. The next `sope_agent_new` restarts everything automatically.
@@ -85,7 +85,7 @@ sope_agent_close ─▶ Drain events until SOPE_ECLOSED ─▶ sope_agent_free
 - `sope_agent_close` is idempotent: it cancels the running turn and its subagents, ends queued turns as `cancelled`, and makes subsequent `sope_send` calls return `SOPE_ECLOSED`. Once remaining events have been drained, `sope_poll` returns `SOPE_ECLOSED`.
 - `sope_agent_free` closes the agent if needed, waits for the thread pool to finish processing the agent **and all its subagents**, then frees memory.
 - `sope_agent_reset` clears conversation history, taking effect at the start of the next turn.
-- **Saving and restoring sessions**: `sope_agent_history(agent, &json, &len)` exports conversation history as a JSON array, and `sope_agent_load_history(agent, json, len)` restores it (possibly into a new agent in another process). Both are only available between turns and return `SOPE_EBUSY` if a turn is running or queued, so `SOPE_EVENT_TURN_END` is a good time to export. The exported pointer remains valid until the next `sope_agent_history` or `sope_agent_free`; the host must not free it. The library does not manage storage; the host decides where to save it (the sope TUI uses SQLite).
+- **Saving and restoring sessions**: `sope_agent_history(agent, &json, &len)` exports conversation history as a JSON array, and `sope_agent_load_history(agent, json, len)` restores it (possibly into a new agent in another process). Both are only available between turns and return `SOPE_EBUSY` if a turn is running or queued, so `SOPE_EVENT_TURN_END` is a good time to export. The exported pointer remains valid until the next `sope_agent_history` or `sope_agent_free`; the host must not free it. For ephemeral agents, the host decides where to save these snapshots. For crash-safe execution, use `sope_agent_open` with a host-selected session directory; libsope manages its durable journal (section 13).
 
   ```json
   [{"role":"user","content":"Fix this bug"},
@@ -129,16 +129,19 @@ Library invariants:
 
 ### 5.1 History compaction
 
-Long conversations can fill the model's context window. Compaction asks the model to summarize the history, then replaces the entire history with that summary as a single user message.
+Long conversations are compacted into a checkpoint plus a budgeted suffix of recent original messages. The current system prompt and tool schemas remain part of subsequent requests.
 
-- **Automatic**: set `compact.threshold` to a token count. When a model call reports `input_tokens + output_tokens` at or above the threshold, compaction runs before the next model call.
-  - At the start of a turn, it compacts previous history and preserves the new user message after the summary.
-  - Mid-turn (for example, during a long tool loop), it compacts the entire history and appends a reminder to continue the current task.
-  - If unset or 0, the library never compacts automatically. An embedded library should not make extra model calls without the host's knowledge, so this is disabled by default. The `sope` CLI defaults to 100000.
-- **Manual**: `sope_compact(agent, instructions, len, &turn_id)` queues a compaction turn, executed in order like `sope_send`. Optional `instructions` guide the summary, such as “Preserve the test failure details.” With empty history, the turn ends immediately with `end_turn`.
-- Compaction calls have no tools and emit neither `TEXT_DELTA` nor `THINKING_DELTA`. They still emit `USAGE` (tokens are consumed) and, on completion, `SOPE_EVENT_COMPACT`: `name` is `"auto"` or `"manual"`, and `data` contains the full summary.
-- If compaction fails, history stays intact. Manual compaction ends with `TURN_END(error)`; automatic compaction emits `ERROR` and continues the model call with the full history. Cancelling compaction also leaves history intact.
-- The model sees a plain-text transcript, not the original message structure. Each tool result is truncated to 2000 bytes in the transcript to keep the compaction request itself within the context window. Prompts are in `src/compact.c`.
+- **Automatic**: set `compact.threshold` to a positive token count. Before every model call, Sope estimates the full request (history, system prompt, tool schemas, images and newly added input/tool results), and takes the larger of that estimate and the last reported usage plus estimated growth. Restored histories use the estimate immediately. Missing or invalid usage reports preserve any prior calibration and add locally estimated growth; they do not reset the token watermark. The library default is disabled; the CLI defaults to 100000.
+- **Model window**: set `context.window` to the model's full token capacity. Sope reserves `max(context.reserve, openai.max_tokens)` for output and uses the smaller of the remaining input capacity and `compact.threshold` as the automatic trigger. `context.window=0` means unknown: the soft threshold still works, but no model-specific hard limit can be enforced. `compact.threshold=0` disables all automatic summarization, including overflow recovery; a configured hard window is still checked.
+- **Manual**: `sope_compact(agent, instructions, len, &turn_id)` queues a compaction turn. Optional instructions guide the summary. Empty history ends immediately with `end_turn`.
+- **Retention**: a contiguous recent suffix remains verbatim, including images. An assistant's tool calls and all their results form an indivisible group. Retention is capped by `compact.retain_tokens` (default 8000), one quarter of the existing history, and one quarter of each configured input limit/automatic threshold. The retained suffix must also leave space for system/tool definitions, the incoming user input and the summary output budget plus its wrapper. Oversized groups are summarized, never split into orphan tool results. At turn start, the incoming user message is additionally kept verbatim outside summarization. Mid-turn compaction includes a continuation reminder. Checkpoints carry `"summary":true` in exported history so later compactions distinguish them from user intent.
+- **Bounded summary input**: the model sees a plain-text transcript of the older prefix. Text, tool results and arguments remain complete when the entire summary request fits `compact.input_tokens` and the model window minus `compact.max_tokens`. Only when that request exceeds its budget are per-field limits reduced until it fits, retaining both ends with explicit omission markers. UTF-8 characters remain whole. Instructions and previous checkpoints are never clipped: a checkpoint is the only remaining record of earlier work. If these protected parts and framing cannot fit, compaction fails without changing history. Images outside the retained suffix are represented by an explicit unavailable-pixels notice. Over-budget clipping and model summarization remain lossy; a completed summary is not a guarantee of semantic completeness.
+- **Summary integrity**: the provider must confirm normal completion. The OpenAI provider requires `finish_reason="stop"` and `[DONE]` for summaries; malformed or out-of-order streams, length/content-filter endings, refusals, tool calls (including incomplete calls), empty/whitespace summaries and allocation failures cannot replace history. Summary calls have their own `compact.max_tokens` output limit (default 2048), no tools, and emit neither `TEXT_DELTA` nor `THINKING_DELTA`.
+- **Commit and failure**: a completed candidate is checked against the full input budget, including retained and incoming messages, before replacing the older prefix. Automatic compaction must also reduce the local request estimate. Failure/cancellation preserves original history and any held user input. Checkpoint installation and cancellation are serialized: cancellation accepted before installation prevents that checkpoint from being committed. Manual failure ends with `TURN_END(error)`. Automatic failure can continue only if the original request fits the configured hard budget and has not already been rejected by the server as oversized; otherwise the turn fails without sending that request.
+- **Server overflow recovery**: structured `context_length_exceeded` / `context_window_exceeded` errors cause summary requests to retry at most twice with smaller transcript budgets. When automatic compaction is enabled, a normal request that fails with one of these codes before producing output can compact and retry once per model round. Each new compaction owns its retry budget, even if two compactions occur within one model round. A failed overflow recovery does not resend the known-oversized request. Retry attempts still emit diagnostic errors and consume any reported usage; there is no unbounded retry loop. The model-round limit is checked before automatic compaction, preserving final tool evidence when no next model call is allowed.
+- **Events**: summary calls emit `USAGE` when supplied by the provider. Successful compaction emits `SOPE_EVENT_COMPACT`: `name` is `"auto"` or `"manual"`, and `data` contains the summary text. The retained suffix is available through the normal history export.
+
+Token counts are estimates, not a model-specific tokenizer: ASCII text uses roughly four bytes per token, non-ASCII text is charged conservatively, and image estimates include a conservative encoded-size allowance. Set the window for the model actually used, including `image_model`, and allow headroom. No live model quality evaluation is implied by the deterministic regression suite.
 
 ## 6. Built-in tools
 
@@ -265,16 +268,23 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 | `cwd` | Working directory for built-in tools | Process's current directory |
 | `permissions` | `ask`: built-in tools requiring permission emit `PERMISSION` first; `allow`: execute immediately; `deny`: reject immediately | `ask` |
 | `subagents` | `off` hides the built-in `agent` tool | — |
-| `compact.threshold` | Token threshold for automatic history compaction (see 5.1); `0` disables it | Disabled |
+| `compact.threshold` | Full request token threshold for automatic compaction (see 5.1); `0` disables it | `0` |
+| `context.window` | Full model context capacity, including reserved output; `0` means unknown | `0` |
+| `context.reserve` | Minimum output reservation and default normal response output limit | `4096` |
+| `compact.max_tokens` | Summary output limit/reservation, independent of normal output | `2048` |
+| `compact.input_tokens` | Maximum estimated summary input, including system prompt/instructions | `64000` |
+| `compact.retain_tokens` | Maximum recent original-message tokens; `0` summarizes all older messages | `8000` |
 | `openai.base_url` | Service URL | `https://api.openai.com/v1` |
 | `openai.api_key` | Sent as a Bearer token | — |
-| `openai.max_tokens` | Output token limit | — |
+| `openai.max_tokens` | Normal response output token limit; increases the output reservation when larger | `context.reserve` |
 | `tls.ca_file` | PEM file of trusted CAs, needed only for bundled builds (see section 12); used by both model calls and `web_fetch` | `$SSL_CERT_FILE`, otherwise a system certificate file |
 | `mock.delay_ms` | Delay between mock output chunks | `25` |
 
 ### openai provider
 
 Calls `POST {base_url}/chat/completions` with `stream: true`. Compatible with OpenAI, GLM, DeepSeek, Qwen, vLLM, and others. Supports streaming text, `reasoning_content` (→ `THINKING_DELTA`), parallel tool calls assembled by `index`, and the final usage chunk. Connection failures, 429 responses, and 5xx responses are retried automatically **only if no output has been delivered to the host yet** (up to 3 attempts, with 1s and 2s backoff), logged as `LOG(warn)`.
+
+Budget options are unsigned integers up to 4294967295. Only `compact.threshold`, `context.window` and `compact.retain_tokens` allow zero. Invalid budgets fail the next turn before a provider request. The model window, when known, must exceed both output reservations.
 
 Network dependency: libcurl. Only `src/http.c` uses libcurl; see section 12.
 
@@ -324,7 +334,7 @@ More examples: `examples/hello.c` (minimal host) and `examples/multiplex.c` (one
 
 ## 11. Guidance for language binding authors
 
-- **Do not make blocking `sope_poll` calls on a UI or event loop thread.** Either integrate `sope_agent_fd` into the host event loop or use a polling thread (a Worker in Bun/Node) to block on poll and forward events in batches. Other functions are nonblocking and can be called directly from the main thread. See `bindings/js/` and `tui/src/agent/`.
+- **Do not make blocking `sope_poll` calls on a UI or event loop thread.** Either integrate `sope_agent_fd` into the host event loop or use a polling thread (a Worker in Bun/Node) to block on poll and forward events in batches. Durable admission, outcome submission and recovery APIs perform synchronous SQLite commits. Hosts with strict UI latency requirements should invoke them on a dedicated worker; ephemeral agent operations do not perform journal I/O. See `bindings/js/` and `tui/src/agent/`.
 - Only 64-bit platforms are currently supported; treat `size_t` as u64.
 - `sope_last_error()` is thread-local: read it **on the same thread**, immediately after the failed call.
 - Event strings become invalid at the next poll; bindings should copy them immediately.
@@ -333,17 +343,17 @@ More examples: `examples/hello.c` (minimal host) and `examples/multiplex.c` (one
 
 ## 12. Building and dependencies
 
-The CMake option `SOPE_CURL` selects the HTTP implementation:
+All builds compile SQLite 3.54.1 directly into both `libsope.dylib/.so` and `libsope.a`. CMake downloads the official amalgamation with a pinned SHA3-256 checksum; no system SQLite headers, library, Bun runtime, or Go SQLite driver is required. SQLite symbols use a private namespace, so a host can embed its own SQLite independently. The public ABI exposes no SQLite types. The CMake option `SOPE_CURL` selects the HTTP implementation:
 
 | Value | Meaning | Suitable for |
 |---|---|---|
 | `system` (default) | Link against the system libcurl | macOS (libcurl is included with the OS, and TLS uses the system keychain); Linux with `libcurl-dev` installed |
 | `bundled` | Download curl 8.23.0 and mbedTLS 3.6.7 at build time (pinned SHA-256 hashes) and link them statically into libsope, enabling only HTTP(S) | Linux releases; any deployment that should not depend on system libcurl |
-| `off` | No network support or dependencies; only the `mock` provider | Testing and offline embedding |
+| `off` | No network support or HTTP dependency; only the `mock` provider | Testing and offline embedding |
 
-- The shared library exports only the public `sope_*` functions (23 in total). Internal symbols (`sope__*`) and bundled curl/mbedTLS symbols are hidden, avoiding conflicts with the host's curl or OpenSSL.
-- Bundled mode also produces `libsope-bundled.a`: sope, curl, and mbedTLS merged into one object file with only `sope_*` as global symbols, ready for static linking (macOS also requires `-framework SystemConfiguration -framework CoreFoundation -framework CoreServices`). In `system` mode, the host must link `libsope.a` with `-lcurl`.
-- For offline builds, point `SOPE_CURL_URL` / `SOPE_MBEDTLS_URL` to local source archives.
+- The shared library exports only the public `sope_*` functions. Internal symbols (`sope__*`, including SQLite) and bundled curl/mbedTLS symbols are hidden, avoiding conflicts with the host's SQLite, curl or OpenSSL.
+- Bundled mode also produces `libsope-bundled.a`: sope, SQLite, curl, and mbedTLS merged into one object file with only `sope_*` as global symbols, ready for static linking (macOS also requires `-framework SystemConfiguration -framework CoreFoundation -framework CoreServices`). In `system` mode, the host must link `libsope.a` with `-lcurl` and the platform thread libraries. Neither static archive needs `-lsqlite3`.
+- For offline builds, point `SOPE_SQLITE_URL` (and `SOPE_CURL_URL` / `SOPE_MBEDTLS_URL` in bundled HTTP mode) to local source archives. The pinned checksums still apply.
 
 **Certificates in bundled mode.** mbedTLS cannot read the macOS keychain or the Windows certificate store; it can only read PEM certificate files. Lookup order:
 
@@ -359,8 +369,53 @@ On Linux, administrators typically install corporate root certificates into the 
 - Timers use `CLOCK_REALTIME`; system clock jumps affect mock output timing and retry backoff.
 - The fd and threading implementations currently support only POSIX (macOS/Linux); Windows support is planned using event handles.
 - The library does not persist data itself. The host decides what to save and where using `sope_agent_history` / `sope_agent_load_history`. History cannot be exported during a turn, so a process crash mid-turn loses that turn.
-- Compaction token counts come from provider usage reports. Services that do not report usage will not trigger automatic compaction.
+- Context accounting uses local estimates supplemented by provider usage. Without an explicit `context.window`, Sope cannot know the model's actual capacity; configure it when switching models.
 - Built-in tools are not sandboxed; permissions are the only safeguard. Hosts requiring isolation can replace `bash` with a host tool of the same name, or set `permissions=deny`.
 - `grep` uses POSIX regexes with rewrites for common syntax, rather than ripgrep. It has no multiline matching and supports no Perl extensions beyond backreferences.
 - `web_fetch` returns page text without executing scripts; content generated by scripts will be missing.
-- Images are sent as base64 without resizing or compression. Once added, they stay in history and are included in every subsequent request until compaction, so large images significantly increase request size. Host tools (`sope_tool_result`) cannot yet return images.
+- Images are sent as base64 without resizing or compression. Once added, they stay in history and are included in subsequent requests while retained in history, including across compaction when they fit the recent-message budget, so large images significantly increase request size. Host tools (`sope_tool_result`) cannot yet return images.
+
+
+## Durable execution and recovery
+
+`sope_agent_new` creates an ephemeral agent. `sope_agent_open(&agent, directory)` creates or adopts a durable session directory; its parent must exist. The directory contains `execution.sqlite`, an exclusive `owner.lock`, and `artifacts/`. A second owner fails with `SOPE_EBUSY`, including another agent in the same process. The database format is versioned and unsupported versions are rejected; there is no transcript-only session migration.
+
+The core owns execution persistence. The ordered `events` table retains admitted inputs, assistant responses/tool intents, individual tool results, compaction replacements, and artifact references. `state`, `inbox`, and `results` are projections for resumption. Growing model-history snapshots replace the current projection rather than being appended in full for every step. Earlier evidence remains in the event log after compaction.
+
+The important transaction boundaries are:
+
+1. `sope_send`/`sope_compact` commit input before returning success or scheduling work.
+2. A complete assistant tool batch receives stable numeric call IDs and is committed before any tool is dispatched or exposed to the host.
+3. Each tool result, including images, is committed before successful `TOOL_END` publication and before the model can consume it. A finished member of a parallel batch survives even if another member never returns.
+4. Checkpoints include model history, active input, consumed model rounds, call ID allocation and context calibration. Turn termination and inbox completion commit together. Compaction retains the old persisted checkpoint until the replacement commits.
+
+SQLite uses WAL and `synchronous=FULL`. Failed commits stop execution; an uncommitted result is not reported as successful. Reopen the session after resolving the storage problem. These are process-crash guarantees under the filesystem's SQLite/fsync contract, not a promise of exactly-once external effects.
+
+Opening never starts recovered work. Configure options, credentials and tool definitions again, then call `sope_agent_recovery` (JS `agent.recovery()`). Its JSON contains `pending` and unresolved `calls` with string `call_id`, `name`, JSON-string `input`, and retained `artifacts` paths (including output from an interrupted child). Numeric IDs remain stable across restarts. Reopening and closing without resuming leaves this state intact.
+
+- Completed calls use their committed results and are not dispatched again.
+- Every issued call without a durable receipt is conservatively unknown, including a call that might not have started. No tool is automatically replayed.
+- Inspect the external state and retained evidence; submit the observed outcome with `sope_agent_resolve` / JS `resolve`. This records evidence and never executes the operation. If it cannot be verified, leave the task paused.
+- `sope_agent_resume` / JS `resume` fails with `SOPE_EBUSY` until all unknown calls are reconciled, then continues the original input and its queued successors. Reconciliation itself is durable across another crash.
+
+Interrupted model requests can be attempted again (and may incur another provider charge); consumed rounds remain counted. Streaming text before a completed response is provisional. Completed child tool facts are journaled, but a crashed unfinished child is reconciled at its parent invocation: this API does not resurrect child runtimes or reattach OS shell processes. A shell may outlive its owner process, so reconciliation must check whether it is still running before authorizing any replacement operation.
+
+`sope_agent_close` is explicit cancellation of active/queued work. It is not a suspend API. Closing a recovered session that has not resumed only releases ownership. Durable `reset` requires an idle session and commits immediately. History export/import remains useful for inspection and explicitly seeding an idle agent, but it is not execution recovery. Recovery and history JSON share the same returned-string storage; copy it before the next call to either accessor.
+
+## File mutation isolation
+
+Built-in `read`, `write`, and `edit` coordinate by canonical path, including symlink aliases and existing ancestors of new paths. Contention yields the worker instead of blocking a worker thread. A process-local gate and an advisory file lock cover the complete operation across cooperating sope agents/processes. Lock files under `/tmp/sope-file-locks-<uid>` must not be deleted while agents run.
+
+A modifying call captures the revision the agent had seen at admission. It checks size, mtime and a content fingerprint after acquiring the lock. Two edits admitted against the same revision cannot both overwrite it: the second fails and requires a fresh read. New contents are written and fsynced in a same-directory temporary file, renamed over the canonical target, then the parent directory is synced. Existing permission bits are retained; new files start private. A crash can leave a staging file but cannot expose a partially rewritten target.
+
+These are cooperating file-tool locks. Arbitrary shell commands, editors and other writers do not participate; use workspace isolation when they must mutate concurrently. Atomic replacement changes the target inode, so hard links to its old inode continue to refer to the old contents; ownership, ACL and extended-attribute preservation are not provided by this replacement mechanism.
+
+## Complete tool-output artifacts
+
+Shell stdout/stderr is streamed to a private archive while memory holds only a bounded preview. The archive is created and referenced in the execution journal before the process starts; completion flushes it before publishing the result. A failed archive is explicit and stops continuation rather than silently losing evidence.
+
+Large host/built-in results are saved before generic preview clipping. Truncated `read` output includes a snapshot of the complete source file. `grep` does not discard the middle/end of a matching long line before the generic archive layer. Search result limits and HTTP response-size rejection remain explicit tool limits.
+
+Previews include an absolute path and byte count. `artifact_read({path, offset, limit})` reads zero-based byte ranges up to 32768 bytes, without the file reader's per-line clipping. Text previews still undergo UTF-8/control-character sanitization; archived bytes are unchanged. Existing file/shell tools can search these paths. Background `bash_output` advances its cursor only by the bytes returned, even when it falls behind the memory buffer.
+
+Archives outlive agent destruction. Durable agents keep them under their session directory; ephemeral agents use a private `/tmp/sope-artifacts-*` directory. The embedding host owns quota, retention and deletion. Do not delete referenced artifacts while a task needs recovery or evidence verification. Background jobs remain subject to the process lifecycle described above; the archive does not constitute a reconnectable job handle.

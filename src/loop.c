@@ -13,16 +13,16 @@
  * (sope_tool_result) and subagents (subagent.c). Each step returns instead
  * of blocking, so waiting costs no thread.
  *
- * COMPACT runs before a CALL once the last call reported more input tokens
- * than compact.threshold, or as the whole turn for sope_compact: one model
- * call summarizes the history (prompts in compact.c), and the summary
- * replaces it.
+ * COMPACT runs before a CALL when the full request reaches its budget,
+ * or as the whole turn for sope_compact. A complete summary replaces the
+ * older prefix; a budgeted recent suffix stays verbatim.
  */
 #define _POSIX_C_SOURCE 200809L
 
 #include "tools.h"
 
 #include <inttypes.h>
+#include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -131,7 +131,7 @@ static int begin_turn(sope_agent_t *a)
 {
     turn_state *t = &a->turn;
     msg_node *m;
-    char *provider = NULL, *rounds = NULL, *subagents = NULL, *threshold = NULL, *cwd = NULL, *permissions = NULL;
+    char *provider = NULL, *rounds = NULL, *subagents = NULL, *cwd = NULL, *permissions = NULL;
     size_t n_tools = 0;
     tool_def *td;
     int reset, ok = 1, offer_agent;
@@ -153,11 +153,11 @@ static int begin_turn(sope_agent_t *a)
     memset(t, 0, sizeof *t);
     t->active = 1;
     t->msg = m;
+    t->round = m->resume_round;
     t->phase = PHASE_START;
     provider = sope__option_dup_locked(a, "provider");
     rounds = sope__option_dup_locked(a, "max_rounds");
     subagents = sope__option_dup_locked(a, "subagents");
-    threshold = sope__option_dup_locked(a, "compact.threshold");
     cwd = sope__option_dup_locked(a, "cwd");
     permissions = sope__option_dup_locked(a, "permissions");
     t->system = sope__option_dup_locked(a, "system");
@@ -183,22 +183,22 @@ static int begin_turn(sope_agent_t *a)
         sope__history_clear(&a->history);
         sope__files_clear(a);
         a->context_tokens = 0;
+        a->context_estimate = 0;
     }
 
     t->max_rounds = rounds ? (int32_t)strtol(rounds, NULL, 10) : DEFAULT_MAX_ROUNDS;
     if (t->max_rounds <= 0) t->max_rounds = DEFAULT_MAX_ROUNDS;
-    t->compact_threshold = threshold ? strtoull(threshold, NULL, 10) : 0;
     t->provider = find_provider(provider ? provider : "mock");
     if (!t->system && ok) ok = (t->system = sope__strdup(DEFAULT_SYSTEM)) != NULL;
 
-    user = ok && !m->compact ? sope__message_new(SOPE__MSG_USER, m->text, m->len) : NULL;
+    user = ok && !m->compact && !m->resume ? sope__message_new(SOPE__MSG_USER, m->text, m->len) : NULL;
     if (user) { /* the attached images move into the message */
         user->images = m->images;
         user->n_images = m->n_images;
         m->images = NULL;
         m->n_images = 0;
     }
-    if (!ok || (!m->compact && !user)) {
+    if (!ok || (!m->compact && !m->resume && !user)) {
         sope__push_event(a, SOPE_EVENT_ERROR, m->turn_id, 0, SOPE_ENOMEM, NULL, 0, "out of memory", 13);
         finish_turn(a, SOPE_STOP_ERROR);
     } else {
@@ -208,12 +208,19 @@ static int begin_turn(sope_agent_t *a)
             int n = snprintf(msg, sizeof msg, "unknown provider '%s'", provider);
             sope__push_event(a, SOPE_EVENT_ERROR, m->turn_id, 0, SOPE_ENOTFOUND, NULL, 0, msg, (size_t)n);
             finish_turn(a, SOPE_STOP_ERROR);
+        } else if (!sope__context_configure(a)) {
+            finish_turn(a, SOPE_STOP_ERROR);
         }
+    }
+    if (t->active) {
+        pthread_mutex_lock(a->mu);
+        ok = sope__journal_checkpoint(a, "begin", 0);
+        pthread_mutex_unlock(a->mu);
+        if (!ok) finish_turn(a, SOPE_STOP_ERROR);
     }
     free(provider);
     free(rounds);
     free(subagents);
-    free(threshold);
     free(cwd);
     free(permissions);
     return 1;
@@ -228,7 +235,7 @@ static void drop_pending_locked(sope_agent_t *a)
         pending_call *p = *pp;
         if (p->owner == a) {
             *pp = p->next;
-            if (!p->done && p->kind != PENDING_SUBAGENT)
+            if (!p->done && !p->reported && p->kind != PENDING_SUBAGENT)
                 sope__push_event_locked(a, SOPE_EVENT_TOOL_END, p->turn_id, p->call_id, 1, p->name, strlen(p->name),
                                         "Cancelled.", 10);
             sope__pending_free(p);
@@ -248,9 +255,26 @@ static void finish_turn(sope_agent_t *a, int32_t stop)
         sope__call_free(t->call);
     }
     if (t->held) sope__history_append(&a->history, t->held); /* cancelled while compacting */
-    if (stop != SOPE_STOP_END_TURN) sope__history_repair(&a->history);
-
     pthread_mutex_lock(a->mu);
+    /* Keep committed results even when another call in the batch is cancelled. */
+    const sope_message *asst = sope__history_last(&a->history, SOPE__MSG_ASSISTANT);
+    if (asst) for (size_t i = 0; i < asst->n_tool_uses; i++) {
+        const sope_tool_use *u = &asst->tool_uses[i];
+        int answered = 0;
+        for (const sope_message *m = asst->next; m; m = m->next)
+            if (m->role == SOPE__MSG_TOOL && !strcmp(m->tool_use_id, u->id)) answered = 1;
+        if (answered) continue;
+        for (pending_call *p = a->root->pending; p; p = p->next) if (p->call_id == u->call_id && p->done) {
+            sope_message *result = sope__tool_message(u, p->content, p->len, p->is_error);
+            if (result) {
+                result->images = p->images; result->n_images = p->n_images;
+                p->images = NULL; p->n_images = 0;
+                sope__history_append(&a->history, result);
+            }
+        }
+    }
+    if (stop != SOPE_STOP_END_TURN) sope__history_repair(&a->history);
+    if (!sope__journal_checkpoint(a, "end", 1)) stop = SOPE_STOP_ERROR;
     drop_pending_locked(a); /* late sope_tool_result calls now get ENOTFOUND */
     a->active_turn = 0;
     a->cancel_requested = 0;
@@ -277,22 +301,45 @@ static void turn_error(sope_agent_t *a, int code, const char *msg)
 
 static sope_next start_compact(sope_agent_t *a);
 
+static int turn_cancelled(sope_agent_t *a)
+{
+    int cancelled;
+    pthread_mutex_lock(a->mu);
+    cancelled = a->cancel_requested || a->closing;
+    pthread_mutex_unlock(a->mu);
+    return cancelled;
+}
+
 static sope_next start_call(sope_agent_t *a)
 {
     turn_state *t = &a->turn;
     sope_call *c;
 
-    if (t->compact_threshold && a->context_tokens >= t->compact_threshold && !t->compact_tried)
-        return start_compact(a);
-    t->compact_tried = 0;
-
-    if (++t->round > (uint64_t)t->max_rounds) {
+    if (turn_cancelled(a)) return next(SOPE__NEXT_CONTINUE);
+    if (t->round >= (uint64_t)t->max_rounds) {
         char msg[64];
         snprintf(msg, sizeof msg, "stopped after %d model rounds (max_rounds)", (int)t->max_rounds);
         turn_error(a, SOPE_ERROR, msg);
         finish_turn(a, SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);
     }
+    uint64_t tokens = sope__context_tokens(a), limit = sope__context_limit(a);
+    uint64_t threshold = t->compact_threshold < limit ? t->compact_threshold : limit;
+
+    if (t->compact_threshold && tokens >= threshold && !t->compact_tried && (t->round || a->history.count > 1))
+        return start_compact(a);
+    t->compact_tried = 0;
+    if (tokens > limit) {
+        turn_error(a, SOPE_ERROR, "request exceeds context.window after reserving output; history preserved");
+        finish_turn(a, SOPE_STOP_ERROR);
+        return next(SOPE__NEXT_CONTINUE);
+    }
+
+    t->round++;
+    pthread_mutex_lock(a->mu);
+    int committed = sope__journal_checkpoint(a, "round", 0);
+    pthread_mutex_unlock(a->mu);
+    if (!committed) { finish_turn(a, SOPE_STOP_ERROR); return next(SOPE__NEXT_CONTINUE); }
     if (!(c = sope__call_new(a, t->round, 0))) {
         turn_error(a, SOPE_ENOMEM, "out of memory");
         finish_turn(a, SOPE_STOP_ERROR);
@@ -359,7 +406,6 @@ static int dispatch(sope_agent_t *a, sope_tool_use *u)
     is_agent = offered && !strcmp(u->name, SOPE__AGENT_TOOL);
 
     pthread_mutex_lock(a->mu);
-    u->call_id = ++a->root->next_call_id;
     if (p && (p->name = sope__strdup(u->name))) {
         p->call_id = u->call_id;
         p->turn_id = sope__turn_id(a);
@@ -388,9 +434,7 @@ static int dispatch(sope_agent_t *a, sope_tool_use *u)
     } else if (builtin) {
         sope__push_event(a, SOPE_EVENT_TOOL_START, sope__turn_id(a), u->call_id, 0, u->name, strlen(u->name),
                          u->input, u->input_len);
-        if ((err = start_builtin(a, p, u, builtin, why, sizeof why))) /* announced: it ends like every built-in */
-            sope__push_event(a, SOPE_EVENT_TOOL_END, sope__turn_id(a), u->call_id, 1, u->name, strlen(u->name), err,
-                             strlen(err));
+        err = start_builtin(a, p, u, builtin, why, sizeof why);
     } else {
         sope__push_event(a, SOPE_EVENT_TOOL_CALL, sope__turn_id(a), u->call_id, 0, u->name, strlen(u->name),
                          u->input, u->input_len);
@@ -400,7 +444,13 @@ static int dispatch(sope_agent_t *a, sope_tool_use *u)
         p->content = sope__strdup(err);
         p->len = p->content ? strlen(err) : 0;
         p->is_error = 1;
-        p->done = 1;
+        p->done = sope__journal_result(a, p);
+        if (builtin) {
+            p->reported = 1;
+            const char *result = p->done ? err : "Result not committed";
+            sope__push_event_locked(a, SOPE_EVENT_TOOL_END, sope__turn_id(a), u->call_id, 1,
+                                   u->name, strlen(u->name), result, strlen(result));
+        }
         pthread_mutex_unlock(a->mu);
     }
     return 1;
@@ -417,6 +467,14 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
     t->provider->finish(c->state);
     c->state = NULL;
     if (rc != SOPE_OK || c->failed) {
+        if (c->context_exceeded && !c->text.len && !c->n_uses && t->compact_threshold &&
+            !t->overflow_retried && a->history.count > 1) {
+            t->overflow_retried = 1;
+            t->round--; /* retry the same round, preserving a new user input at turn start */
+            sope__call_free(c);
+            t->call = NULL;
+            return start_compact(a);
+        }
         if (!c->failed) turn_error(a, rc, sope_strerror(rc));
         finish_turn(a, SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);
@@ -431,9 +489,13 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
     asst->n_tool_uses = c->n_uses;
     c->uses = NULL;
     c->n_uses = 0;
+    sope__history_append(&a->history, asst);
+    /* Missing usage is not evidence that the previous calibration was wrong. */
+    a->context_tokens = c->has_usage ? c->usage_tokens : sope__context_tokens(a);
+    a->context_estimate = sope__request_tokens(a);
+    t->overflow_retried = 0;
     sope__call_free(c);
     t->call = NULL;
-    sope__history_append(&a->history, asst);
 
     if (!asst->n_tool_uses) {
         finish_turn(a, SOPE_STOP_END_TURN);
@@ -442,10 +504,27 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
 
     t->asst = asst;
     t->phase = PHASE_TOOLS;
+    /* Allocate all IDs and commit the entire batch before any tool can run. */
+    pthread_mutex_lock(a->mu);
+    for (i = 0; i < asst->n_tool_uses; i++) {
+        sope_tool_use *u = &asst->tool_uses[i];
+        u->call_id = ++a->root->next_call_id;
+        if (!*u->id) {
+            char id[32];
+            snprintf(id, sizeof id, "call_%" PRIu64, u->call_id);
+            free(u->id); u->id = sope__strdup(id);
+        }
+    }
+    int committed = sope__journal_checkpoint(a, "model", 0);
+    pthread_mutex_unlock(a->mu);
+    if (!committed) { finish_turn(a, SOPE_STOP_ERROR); return next(SOPE__NEXT_CONTINUE); }
     for (i = 0; i < asst->n_tool_uses; i++)
         if (!dispatch(a, &asst->tool_uses[i])) {
             turn_error(a, SOPE_ENOMEM, "out of memory");
-            finish_turn(a, SOPE_STOP_ERROR);
+            pthread_mutex_lock(a->mu);
+            t->failed = 1;
+            a->cancel_requested = 1;
+            pthread_mutex_unlock(a->mu);
             return next(SOPE__NEXT_CONTINUE);
         }
     return next(SOPE__NEXT_CONTINUE);
@@ -477,13 +556,19 @@ static sope_next collect_tools(sope_agent_t *a)
         if (p) *pp = p->next;
         m = p ? sope__tool_message(u, p->content ? p->content : "", p->len, p->is_error)
               : sope__tool_message(u, "(no result)", 11, 1);
+        if (!m) {
+            if (p) { p->next = a->root->pending; a->root->pending = p; }
+            sope__storage_fail_locked(a, "Cannot materialize committed tool results; execution stopped for recovery.");
+            pthread_mutex_unlock(a->mu);
+            return next(SOPE__NEXT_CONTINUE);
+        }
         if (m && p && p->n_images) {
             m->images = p->images;
             m->n_images = p->n_images;
             p->images = NULL;
             p->n_images = 0;
         }
-        if (m) sope__history_append(&a->history, m);
+        sope__history_append(&a->history, m);
         if (p) sope__pending_free(p);
     }
     pthread_mutex_unlock(a->mu);
@@ -496,7 +581,15 @@ static sope_next collect_tools(sope_agent_t *a)
 /* compaction                                                                */
 /* ------------------------------------------------------------------------ */
 
+static sope_next start_compact_attempt(sope_agent_t *a);
+
 static sope_next start_compact(sope_agent_t *a)
+{
+    a->turn.compact_retries = 0; /* each new compaction owns its retry budget */
+    return start_compact_attempt(a);
+}
+
+static sope_next start_compact_attempt(sope_agent_t *a)
 {
     turn_state *t = &a->turn;
     msg_node *m = t->msg;
@@ -504,18 +597,48 @@ static sope_next start_compact(sope_agent_t *a)
     sope_call *c;
     char *text;
     size_t len;
+    int rc;
+    uint64_t budget, retain;
 
+    if (turn_cancelled(a)) return next(SOPE__NEXT_CONTINUE);
+    t->compact_before = sope__request_tokens(a) + (t->held ? sope__message_tokens(t->held) : 0);
     t->compact_tried = 1;
     if (!a->history.count) { /* sope_compact on an empty conversation */
         finish_turn(a, SOPE_STOP_END_TURN);
         return next(SOPE__NEXT_CONTINUE);
     }
-    if (!m->compact && t->round == 0 && a->history.count > 1) {
+    if (!m->compact && !t->held && t->round == 0 && a->history.count > 1) {
         /* Compacting before the turn's first call: summarize what came
          * before and keep the new request verbatim after the summary. */
         t->held = sope__history_pop(&a->history);
     }
-    text = sope__compact_request(&a->history, m->compact ? m->text : NULL, m->compact ? m->len : 0, &len);
+    budget = t->compact_retries ? t->compact_request_budget / 2 : t->compact_input_tokens;
+    if (t->context_window && budget > t->context_window - t->summary_tokens)
+        budget = t->context_window - t->summary_tokens;
+    t->compact_request_budget = budget;
+    retain = sope__history_tokens(&a->history) / 4;
+    if (retain > t->retain_tokens) retain = t->retain_tokens;
+    if (t->compact_threshold && retain > t->compact_threshold / 4) retain = t->compact_threshold / 4;
+    if (retain > sope__context_limit(a) / 4) retain = sope__context_limit(a) / 4;
+    /* Reserve room for the new checkpoint, its wrapper and the current input
+     * before choosing a suffix that the summarizer will not see. */
+    uint64_t fixed = sope__request_tokens(a) - sope__history_tokens(&a->history);
+    if (t->held) fixed += sope__message_tokens(t->held);
+    fixed += t->summary_tokens + 128;
+    uint64_t available = sope__context_limit(a) > fixed ? sope__context_limit(a) - fixed : 0;
+    if (retain > available) retain = available;
+    t->compact_keep = sope__compact_suffix(&a->history, retain);
+    rc = sope__compact_request(&a->history, t->compact_keep, m->compact ? m->text : NULL,
+                               m->compact ? m->len : 0, budget, &text, &len);
+    if (rc != SOPE_OK) {
+        turn_error(a, rc, rc == SOPE_ENOMEM ? "out of memory" : "compaction instructions and transcript cannot fit input budget");
+        if (t->held) sope__history_append(&a->history, t->held);
+        t->held = NULL;
+        if (m->compact || t->overflow_retried) { finish_turn(a, SOPE_STOP_ERROR); return next(SOPE__NEXT_CONTINUE); }
+        return start_call(a);
+    }
+    t->compact_request_budget = sope__text_tokens(text, len) +
+                                sope__text_tokens(sope__compact_system, strlen(sope__compact_system)) + 24;
     if (text) req = sope__message_new(SOPE__MSG_USER, text, len);
     free(text);
     if (!req || !(c = sope__call_new(a, t->round, 1))) {
@@ -535,7 +658,7 @@ static sope_next start_compact(sope_agent_t *a)
         t->call = NULL;
         if (t->held) sope__history_append(&a->history, t->held);
         t->held = NULL;
-        if (m->compact) {
+        if (m->compact || t->overflow_retried) {
             finish_turn(a, SOPE_STOP_ERROR);
             return next(SOPE__NEXT_CONTINUE);
         }
@@ -556,9 +679,18 @@ static sope_next end_compact(sope_agent_t *a, int32_t rc)
 
     t->provider->finish(c->state);
     c->state = NULL;
+    if (turn_cancelled(a)) return next(SOPE__NEXT_CONTINUE); /* abort_turn owns cleanup */
+    if (c->context_exceeded && t->compact_retries < 2 && t->compact_request_budget > 1) {
+        t->compact_retries++;
+        sope__call_free(c);
+        t->call = NULL;
+        return start_compact_attempt(a);
+    }
     ok = rc == SOPE_OK && !c->failed;
-    if (ok && !c->text.len) {
-        turn_error(a, SOPE_ERROR, "compaction failed: the model returned an empty summary");
+    size_t nonspace = 0;
+    while (nonspace < c->text.len && isspace((unsigned char)c->text.ptr[nonspace])) nonspace++;
+    if (ok && (!c->complete || c->n_uses || nonspace == c->text.len)) {
+        turn_error(a, SOPE_ERROR, "compaction failed: incomplete or empty summary");
         ok = 0;
     } else if (!ok && !c->failed) {
         turn_error(a, rc, sope_strerror(rc));
@@ -571,22 +703,57 @@ static sope_next end_compact(sope_agent_t *a, int32_t rc)
         }
     }
     if (ok) {
-        sope__history_clear(&a->history);
-        sope__history_append(&a->history, summary);
+        sope_history suffix = { .head = t->compact_keep };
+        uint64_t candidate = sope__request_tokens(a) - sope__history_tokens(&a->history) +
+                             sope__message_tokens(summary) + sope__history_tokens(&suffix);
+        if (t->held) candidate += sope__message_tokens(t->held);
+        if (candidate > sope__context_limit(a) || (!manual && candidate >= t->compact_before)) {
+            turn_error(a, SOPE_ERROR, "compaction did not produce a smaller history within the context budget");
+            sope__message_free(summary);
+            summary = NULL;
+            ok = 0;
+        }
     }
+    /* Cancellation and checkpoint installation have one ordering under the
+     * same lock as sope_cancel. Never publish a checkpoint after cancellation
+     * has already won; abort_turn restores held input and frees the call. */
+    pthread_mutex_lock(a->mu);
+    if (a->cancel_requested || a->closing) {
+        pthread_mutex_unlock(a->mu);
+        sope__message_free(summary);
+        free(text);
+        return next(SOPE__NEXT_CONTINUE);
+    }
+    if (ok) {
+        while (a->history.head != t->compact_keep) {
+            sope_message *old = a->history.head;
+            a->history.head = old->next;
+            a->history.count--;
+            sope__message_free(old);
+        }
+        summary->is_summary = 1;
+        summary->next = a->history.head;
+        a->history.head = summary;
+        if (!summary->next) a->history.tail = summary;
+        a->history.count++;
+    }
+    t->compact_keep = NULL;
     if (t->held) sope__history_append(&a->history, t->held);
     t->held = NULL;
     if (ok) {
-        a->context_tokens = len / 4; /* rough until the next call reports usage */
-        sope__push_event(a, SOPE_EVENT_COMPACT, sope__turn_id(a), 0, 0, manual ? "manual" : "auto",
+        a->context_tokens = 0;
+        a->context_estimate = 0; /* new window: measure summary, retained messages and current input */
+        ok = sope__journal_checkpoint(a, "compact", manual);
+        if (ok) sope__push_event_locked(a, SOPE_EVENT_COMPACT, sope__turn_id(a), 0, 0, manual ? "manual" : "auto",
                          manual ? 6 : 4, c->text.ptr, c->text.len);
     }
+    pthread_mutex_unlock(a->mu);
     free(text);
     sope__call_free(c);
     t->call = NULL;
     t->phase = PHASE_START;
 
-    if (manual) {
+    if (manual || (!ok && t->overflow_retried)) {
         finish_turn(a, ok ? SOPE_STOP_END_TURN : SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);
     }
@@ -641,7 +808,7 @@ static sope_next abort_turn(sope_agent_t *a)
     pthread_mutex_unlock(a->mu);
     if (waiting) return next(SOPE__NEXT_WAIT); /* child_closed and finished runs wake us */
 
-    finish_turn(a, SOPE_STOP_CANCELLED);
+    finish_turn(a, a->turn.failed ? SOPE_STOP_ERROR : SOPE_STOP_CANCELLED);
     return next(SOPE__NEXT_CONTINUE);
 }
 
@@ -651,12 +818,24 @@ static sope_next close_agent(sope_agent_t *a)
     msg_node *dropped;
 
     pthread_mutex_lock(a->mu);
+    /* Closing a recovered-but-not-resumed session must not consume its inbox. */
+    if (a->recovering || a->journal_failed) {
+        a->closed = 1;
+        if (a->root == a) sope__signal_closed_locked(a);
+        pthread_mutex_unlock(a->mu);
+        return next(SOPE__NEXT_CLOSED);
+    }
     dropped = a->in_head;
     a->in_head = a->in_tail = NULL;
     pthread_mutex_unlock(a->mu);
 
     while (dropped) {
         msg_node *n = dropped->next;
+        a->turn.active = 1; a->turn.msg = dropped;
+        pthread_mutex_lock(a->mu);
+        sope__journal_checkpoint(a, "cancel_queued", 1);
+        pthread_mutex_unlock(a->mu);
+        memset(&a->turn, 0, sizeof a->turn);
         sope__push_event(a, SOPE_EVENT_TURN_END, dropped->turn_id, 0, SOPE_STOP_CANCELLED, NULL, 0, NULL, 0);
         sope__msg_node_free(dropped);
         dropped = n;
@@ -672,14 +851,17 @@ static sope_next close_agent(sope_agent_t *a)
 sope_next sope__agent_run(sope_task *task)
 {
     sope_agent_t *a = task->owner;
-    int closing, stopped;
+    int closing, stopped, paused;
 
     pthread_mutex_lock(a->mu);
     closing = a->closing;
     stopped = closing || a->cancel_requested;
+    paused = a->recovering || a->root->journal_failed;
     pthread_mutex_unlock(a->mu);
 
     if (a->turn.active) return stopped ? abort_turn(a) : step_turn(a);
+
+    if (!closing && paused) return next(SOPE__NEXT_WAIT);
 
     /* A subagent lives for exactly one turn. */
     if (closing || (a->parent && a->turns_finished > 0)) return close_agent(a);
