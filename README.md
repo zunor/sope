@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="#get-started">Get started</a> ·
+  <a href="https://github.com/zunor/sope/releases/latest">Download</a> ·
   <a href="#a-place-to-work">The TUI</a> ·
   <a href="#bring-the-agent-to-your-app">Embed</a> ·
   <a href="docs/README.md">Documentation</a>
@@ -50,12 +51,20 @@ bun run tui
 bun run tui -- "Explain how requests flow through this project."
 ```
 
-Prefer a release archive? It includes a single `sope` executable with libsope embedded:
+Prefer a ready-to-run executable? [Release 0.5.0](https://github.com/zunor/sope/releases/tag/v0.5.0) includes a **macOS Apple Silicon (arm64)** package with libsope embedded. Bun is not required to run it.
 
 ```sh
+curl -fLO https://github.com/zunor/sope/releases/download/v0.5.0/sope-0.5.0-darwin-arm64.tar.gz
+curl -fLO https://github.com/zunor/sope/releases/download/v0.5.0/sope-0.5.0-darwin-arm64.tar.gz.sha256
+shasum -a 256 -c sope-0.5.0-darwin-arm64.tar.gz.sha256
 tar xzf sope-0.5.0-darwin-arm64.tar.gz
-sope-0.5.0-darwin-arm64/install.sh
+./sope-0.5.0-darwin-arm64/install.sh
+~/.local/bin/sope --version
 ```
+
+The installer places `sope` in `~/.local/bin`; add that directory to your `PATH`, then [configure your model](docs/guide/quickstart.md#install). This release ships a macOS arm64 binary; Linux and Intel Mac users can build from source. The macOS binary is ad-hoc signed and is not notarized.
+
+Version 0.5.0 adds `/context` usage details and `/effort` controls, fixes agent shutdown and tool cancellation, and improves long-output rendering and GLM 5.3 demos. See the [release notes](https://github.com/zunor/sope/releases/tag/v0.5.0) for the full changes. Embedded hosts must rebuild against the 0.5 C ABI and matching bindings.
 
 [Installation and first steps →](docs/guide/quickstart.md)
 
