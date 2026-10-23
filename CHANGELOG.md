@@ -2,11 +2,20 @@
 
 The version in `include/sope.h` is authoritative. The library, bindings, and `sope` executable are released together; see [docs/release.md](docs/release.md) for the policy.
 
-## 0.4.0 — 2026-10-23
+## 0.4.0 — 2026-10-24
+
+This release adds durable execution and host integration across libsope and its
+bindings, plus permission-aware TUI workflows and stronger context handling.
+The ABI advances to 0.4; hosts built for 0.3 must recompile.
+
+### Bindings
 
 - Add a Go SDK with typed lifecycle, recovery, durable receipts, event replay,
   terminal outcomes and context-aware waits; include shared/static pkg-config
   metadata. SQLite remains private inside libsope.
+
+### libsope (C ABI 0.4)
+
 - Commit tool receipts with replayable completion events; preserve committed
   cursors on rollback, filter stale live commands after suspension, and make
   SDK handle contention interruptible by context cancellation and close.
@@ -20,11 +29,7 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
   Go tests for SIGKILL, concurrency, repeated recovery, output archives and
   incomplete model responses.
 
-## Unreleased
-
-Adds permission modes, a model picker, and slash-command suggestions, and improves the tab bar, status animation, and tool output interactions. Also strengthens context compaction and adds durable execution, isolated file mutations, and complete output archives. New C recovery functions are exported; the event layout is unchanged.
-
-### Durable execution and tools
+#### Durable execution and tools
 
 - Add `sope_agent_open`, `sope_agent_recovery`, `sope_agent_resolve`, and `sope_agent_resume` (and JS equivalents). Persist accepted inputs, stable tool intents, individual results, round accounting, and checkpoints with SQLite WAL/FULL transactions; retain an ordered execution log independently of compressed model history.
 - Hold exclusive session ownership across processes. Reopened unfinished tasks stay paused; committed results are reused and unknown outcomes require explicit reconciliation. Journal/archival failures stop execution. Options, credentials and host tool definitions are supplied again by the host.
@@ -33,7 +38,7 @@ Adds permission modes, a model picker, and slash-command suggestions, and improv
 - Archive full shell stdout/stderr, large built-in/host results and truncated file reads. Add `artifact_read` byte pagination; background readers no longer advance over omitted bytes. The host owns archive retention.
 - Add real SIGKILL, repeated recovery, queued-input, failed-commit, atomic-write interruption, concurrent-process mutation, long-output and TUI journal-authority regressions. SQLite is compiled into both shared and static libsope artifacts, including offline builds; no system SQLite installation or host SQLite driver is required. Its private symbol namespace avoids collisions with a host's SQLite.
 
-### Context compaction
+#### Context compaction
 
 - Validate complete streamed summaries before replacing history; truncated, malformed, empty or cancelled summaries preserve the original conversation.
 - Estimate full requests before sending, including restored history, system/tool definitions, new user input, images and tool results. Add explicit model windows and output reservations, and bounded recovery for server-reported context overflow.

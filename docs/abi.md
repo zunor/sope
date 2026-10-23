@@ -277,13 +277,15 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 | `compact.retain_tokens` | Maximum recent original-message tokens; `0` summarizes all older messages | `8000` |
 | `openai.base_url` | Service URL | `https://api.openai.com/v1` |
 | `openai.api_key` | Sent as a Bearer token | — |
+| `openai.wire_api` | `chat` (Chat Completions) or `responses` (stateless Responses with encrypted reasoning replay) | `chat` |
+| `reasoning.effort` | `none`, `minimal`, `low`, `medium`, `high` or `xhigh`; support depends on the model | Provider default |
 | `openai.max_tokens` | Normal response output token limit; increases the output reservation when larger | `context.reserve` |
 | `tls.ca_file` | PEM file of trusted CAs, needed only for bundled builds (see section 12); used by both model calls and `web_fetch` | `$SSL_CERT_FILE`, otherwise a system certificate file |
 | `mock.delay_ms` | Delay between mock output chunks | `25` |
 
 ### openai provider
 
-Calls `POST {base_url}/chat/completions` with `stream: true`. Compatible with OpenAI, GLM, DeepSeek, Qwen, vLLM, and others. Supports streaming text, `reasoning_content` (→ `THINKING_DELTA`), parallel tool calls assembled by `index`, and the final usage chunk. Connection failures, 429 responses, and 5xx responses are retried automatically **only if no output has been delivered to the host yet** (up to 3 attempts, with 1s and 2s backoff), logged as `LOG(warn)`.
+By default, calls `POST {base_url}/chat/completions` with `stream: true`. Compatible with OpenAI, GLM, DeepSeek, Qwen, vLLM, and others. Supports streaming text, `reasoning_content` (→ `THINKING_DELTA`), parallel tool calls assembled by `index`, and the final usage chunk. With `openai.wire_api=responses`, calls `POST {base_url}/responses` with `store:false`, retaining complete output items and encrypted reasoning for replay. The endpoint and model must support the selected protocol. Connection failures, 429 responses, and 5xx responses are retried automatically **only if no output has been delivered to the host yet** (up to 3 attempts, with 1s and 2s backoff), logged as `LOG(warn)`.
 
 Budget options are unsigned integers up to 4294967295. Only `compact.threshold`, `context.window` and `compact.retain_tokens` allow zero. Invalid budgets fail the next turn before a provider request. The model window, when known, must exceed both output reservations.
 
@@ -352,7 +354,7 @@ All builds compile SQLite 3.54.1 directly into both `libsope.dylib/.so` and `lib
 | `bundled` | Download curl 8.23.0 and mbedTLS 3.6.7 at build time (pinned SHA-256 hashes) and link them statically into libsope, enabling only HTTP(S) | Linux releases; any deployment that should not depend on system libcurl |
 | `off` | No network support or HTTP dependency; only the `mock` provider | Testing and offline embedding |
 
-- The shared library exports only the public `sope_*` functions. Internal symbols (`sope__*`, including SQLite) and bundled curl/mbedTLS symbols are hidden, avoiding conflicts with the host's SQLite, curl or OpenSSL.
+- The shared library exports only the public `sope_*` functions (35 in total). Internal symbols (`sope__*`, including SQLite) and bundled curl/mbedTLS symbols are hidden, avoiding conflicts with the host's SQLite, curl or OpenSSL.
 - Bundled mode also produces `libsope-bundled.a`: sope, SQLite, curl, and mbedTLS merged into one object file with only `sope_*` as global symbols, ready for static linking (macOS also requires `-framework SystemConfiguration -framework CoreFoundation -framework CoreServices`). In `system` mode, the host must link `libsope.a` with `-lcurl` and the platform thread libraries. Neither static archive needs `-lsqlite3`.
 - For offline builds, point `SOPE_SQLITE_URL` (and `SOPE_CURL_URL` / `SOPE_MBEDTLS_URL` in bundled HTTP mode) to local source archives. The pinned checksums still apply.
 
