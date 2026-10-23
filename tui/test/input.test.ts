@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 import { expect, test } from "bun:test";
 import { InputParser, keyId, type InputEvent } from "../src/term/input";
+import { Editor } from "../src/ui/editor";
 
 const enc = new TextEncoder();
 const ids = (events: InputEvent[]) =>
   events.map((e) =>
-    e.type === "key" ? keyId(e) : e.type === "mouse" ? `mouse:${e.action}` : (e.type === "osc" || e.type === "apc") ? `${e.type}:${e.data}` : `${e.type}:${e.text}`,
+    e.type === "key" ? keyId(e) : e.type === "mouse" ? `mouse:${e.action}` : e.type === "cell-size" ? `cell:${e.width}x${e.height}` : (e.type === "osc" || e.type === "apc") ? `${e.type}:${e.data}` : `${e.type}:${e.text}`,
   );
 
 function parse(...chunks: string[]): string[] {
@@ -29,6 +30,18 @@ test("CSI keys with modifiers", () => {
 
 test("alt combinations", () => {
   expect(parse("\x1bb\x1b\x7f\x1bB")).toEqual(["alt+b", "alt+backspace", "alt+shift+b"]);
+});
+
+test("legacy and enhanced newline shortcuts insert a line while Enter remains send", () => {
+  for (const sequence of ["\x0a", "\x1b\r", "\x1b[13;2u", "\x1b[106;5u", "\x1b[13;3u"]) {
+    const editor = new Editor();
+    editor.insert("first");
+    for (const id of parse(sequence)) expect(editor.key(id, 20)).toBe(true);
+    editor.insert("second");
+    expect(editor.text).toBe("first\nsecond");
+    expect(editor.layout(20).rows).toHaveLength(2);
+  }
+  expect(parse("\r")).toEqual(["enter"]);
 });
 
 test("a lone ESC resolves on flush, a split sequence does not", () => {

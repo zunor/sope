@@ -17,6 +17,7 @@ export interface Cursor {
 export class Renderer {
   #front: CellBuffer | null = null;
   image: PixelImage | null = null;
+  images: PixelImage[] = [];
   #back: CellBuffer;
   cursor: Cursor = { x: 0, y: 0, visible: false };
 
@@ -34,6 +35,7 @@ export class Renderer {
     else this.#back.clear();
     this.cursor = { x: 0, y: 0, visible: false };
     this.image = null;
+    this.images = [];
     return this.#back;
   }
 
@@ -94,7 +96,7 @@ export class Renderer {
       }
     }
 
-    out += this.graphics?.render(this.image, full) ?? "";
+    out += this.graphics?.render([...this.images, ...(this.image ? [this.image] : [])], full) ?? "";
     out += "\x1b[0m";
     if (this.cursor.visible) out += `\x1b[${this.cursor.y + 1};${this.cursor.x + 1}H\x1b[?25h`;
     out += "\x1b[?2026l";

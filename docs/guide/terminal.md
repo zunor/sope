@@ -14,7 +14,7 @@ The approval dialog for `write` / `edit` shows a diff against the current file, 
 
 ## Sessions
 
-The top bar shows recently used sessions (up to 5). Each tab has a light background, is one row high and 24 columns wide (narrower in very small windows), and is separated from the next by one column. Long titles are truncated and slowly scroll back and forth on hover; the active session has a bold title and a slightly brighter background. The `⋯` button on the right (or `/sessions`) lists all saved sessions for the current directory: type to filter and press Enter to open one. Each tab is an independent agent that continues running in the background when you switch away. Sessions are stored in SQLite (`~/.local/share/sope/sope.db`, configurable with `SOPE_DB`). Execution state is stored by the native library under `<database path>.executions/<session id>/`; the UI database keeps the displayed conversation and a history cache. On reopening, the execution journal is authoritative, including results committed during a turn. Old transcript-only sessions are not automatically migrated.
+The top bar shows recently used sessions (up to 5). The tab bar occupies two rows. Each tab uses a thin rounded image outline, is 20 columns wide (narrower in very small windows), and is separated from the next by one column. Titles are rendered into the image, vertically centered with space above and below; long titles are truncated and slowly scroll back and forth on hover. All tab titles use regular weight; the active session has a white outline. Image tabs require Kitty graphics support, a terminal cell-size response, and the text rasterizer; otherwise tabs use native text with subtle background colors. Set `SOPE_GRAPHICS=0` to use the text fallback. The `⋯` button on the right (or `/sessions`) lists all saved sessions for the current directory: type to filter and press Enter to open one. Each tab is an independent agent that continues running in the background when you switch away. Sessions are stored in SQLite (`~/.local/share/sope/sope.db`, configurable with `SOPE_DB`). Execution state is stored by the native library under `<database path>.executions/<session id>/`; the UI database keeps the displayed conversation and a history cache. On reopening, the execution journal is authoritative, including results committed during a turn. Old transcript-only sessions are not automatically migrated.
 
 Click `+`, press `alt+n`, or use `/new` to create a session. Click a tab or press `alt+1…9` to switch sessions. Hover over a tab to reveal `×`, then click it (or use `alt+w` or `/close`) to close the session. Closing only hides it from the bar; its data remains in the database. A `?` on a tab means the session is waiting for approval; `•` means it has finished running in the background.
 
@@ -51,10 +51,14 @@ In the approval dialog, select with `↑`/`↓` and confirm with Enter. You can 
 
 ## Keys and commands
 
+Sent user messages appear in right-aligned rounded character boxes. Only the latest user message has a breathing border: gray to white and back over six seconds. Older borders stay gray; the idle animation updates at 10 fps and stops when that message is offscreen or covered by the session list.
+
+The rounded input box grows with explicit newlines and wrapped text, up to eight content rows (fewer in short windows), then scrolls to keep the cursor visible. Enter sends the message; Ctrl+J is the fallback newline shortcut when a terminal cannot distinguish Shift+Enter.
+
 | Key | Action |
 |---|---|
 | `enter` | Send |
-| `ctrl+j` / `alt+enter` | Insert a newline |
+| `shift+enter` / `ctrl+j` / `alt+enter` | Insert a newline (`shift+enter` requires enhanced keyboard support) |
 | `esc` | Cancel the current turn, including subagents |
 | `shift+tab` | Cycle permission modes |
 | `alt+n` / `alt+w` | Create / close a session |
@@ -62,7 +66,7 @@ In the approval dialog, select with `↑`/`↓` and confirm with Enter. You can 
 | `alt+1` … `alt+9` | Switch to the Nth session |
 | `ctrl+t` / `F2` | Toggle the ABI trace panel: `→` marks calls from the TUI into the library; `←` marks events returned by `sope_poll` |
 | `pgup` / `pgdn` | Scroll the conversation |
-| Hover over / click a tool output's `⎿` or `… N more lines` | Highlight the connector and hint together; click to expand, then click `show fewer lines` or the connector to collapse |
+| Hover over / click a long tool output block | Hover anywhere in the block to turn its connector and `… N more lines` white; click anywhere to expand, then click the expanded block to collapse |
 | `↑` / `↓` | Move within multiline input; browse input history at its boundaries |
 | `ctrl+a/e`, `alt+b/f`, `ctrl+w/u/k` | Emacs-style editing (word movement supports Chinese word segmentation) |
 | `ctrl+c` | Cancel a running turn, clear nonempty input, or otherwise exit |

@@ -17,7 +17,7 @@ Precedence, from lowest to highest: `~/.config/sope/config` (`KEY=VALUE` format)
 | `SOPE_CONTEXT_WINDOW` | | `0` (unknown); set to the full token window of the model used |
 | `SOPE_LIB` | | Load a different libsope instead of the embedded copy |
 | `SOPE_MOUSE` | | `1`; `0` leaves mouse input to the terminal (the wheel becomes ↑/↓) |
-| `SOPE_GRAPHICS` | | Automatically probes for the Kitty graphics protocol; `0` disables the pixel meteor |
+| `SOPE_GRAPHICS` | | Automatically probes for the Kitty graphics protocol; `0` disables image tabs and the pixel meteor |
 | `SOPE_TRUECOLOR` | | Automatically detected; `0`/`1` forces 256 colors / true color |
 
 Context is checked before each model request, including restored sessions and newly added tool results. Set `SOPE_CONTEXT_WINDOW` for the model actually used (use the smaller capacity if switching between text and image models). The default output reservation is 4096 tokens. In the TUI, `/set context.window 128000` changes the window from the next turn; `/set context.reserve 8192` increases the normal output allowance. A window value of zero leaves the model capacity unknown.

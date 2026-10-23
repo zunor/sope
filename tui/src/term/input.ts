@@ -27,7 +27,8 @@ export type MouseEvent = {
 /** A reply to an OSC query, without the ESC ] and the terminator, e.g. "11;rgb:1e1e/1e1e/1e1e". */
 export type OscEvent = { type: "osc"; data: string };
 export type ApcEvent = { type: "apc"; data: string };
-export type InputEvent = KeyEvent | TextEvent | PasteEvent | MouseEvent | OscEvent | ApcEvent;
+export type CellSizeEvent = { type: "cell-size"; width: number; height: number };
+export type InputEvent = KeyEvent | TextEvent | PasteEvent | MouseEvent | OscEvent | ApcEvent | CellSizeEvent;
 
 const PASTE_END = "\x1b[201~";
 
@@ -106,6 +107,11 @@ function parseCsi(s: string, i: number, final: boolean): Parsed {
   }
 
   const params = body.split(";").map((p) => parseInt(p.split(":")[0] ?? "", 10));
+  if (fin === "t" && /^6;\d+;\d+$/.test(body)) {
+    const [, height = 0, width = 0] = params;
+    const valid = width > 0 && height > 0 && width <= 256 && height <= 512;
+    return { event: valid ? { type: "cell-size", width, height } : undefined, end };
+  }
   if (fin === "~") {
     const name = TILDE_KEYS[params[0] ?? 0];
     return { event: name ? key(name, modsFrom(params[1])) : undefined, end };

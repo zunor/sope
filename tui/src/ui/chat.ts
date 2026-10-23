@@ -3,6 +3,7 @@
 // styled lines with a one-glyph gutter, scrollable from the bottom.
 
 import type { CellBuffer, Style } from "../render/buffer";
+import { mix } from "../render/color";
 import { palette } from "../theme";
 import { stringWidth, truncate } from "../unicode/width";
 import { renderMarkdown, slice } from "./markdown";
@@ -47,11 +48,16 @@ export interface Rect {
 interface Span {
   text: string;
   style: Style;
+  userBorder?: boolean;
 }
 
 interface Line {
   spans: Span[];
-  fold?: "connector" | "control";
+  /** Horizontal inset within the transcript content area. */
+  offset?: number;
+  fold?: "connector" | "control" | "body";
+  /** Output row used to preserve the viewport when this block changes size. */
+  foldRow?: number;
   /** First line of a message: draws the gutter glyph. */
   head?: boolean;
 }
@@ -60,6 +66,7 @@ const GUTTER = 2;
 const RESULT_LINES = 6;
 const THINKING_TAIL = 3;
 const SUBAGENT_STEPS = 5;
+const USER_BORDER_BREATH_MS = 6000;
 
 const blank: Span = { text: "  ", style: {} };
 const marker: Span = { text: "⎿ ", style: { fg: palette.faint } };
@@ -79,19 +86,39 @@ function markdownLines(text: string, width: number): Line[] {
   return wrapText(styled.text, width).map((row) => ({ spans: slice(styled, row.start, row.end, {}) }));
 }
 
-/** A tool or subagent result, with a clickable preview when longer than `max`. */
+/** Right-aligned user bubbles, with ordinary text and rounded character borders. */
+function userLines(text: string, width: number): Line[] {
+  if (width < 6) return textLines(text, width, {});
+  const maxWidth = Math.min(width, Math.max(6, Math.floor(width * 0.75)));
+  const expanded = text.replace(/\t/g, "    ").replace(/\n+$/, "");
+  const rows = wrapText(expanded, maxWidth - 4)
+    .map((row) => truncate(expanded.slice(row.start, row.end).trimEnd(), maxWidth - 4));
+  const inner = Math.max(1, ...rows.map(stringWidth));
+  const offset = width - inner - 4;
+  const edge = (text: string): Span => ({ text, style: { fg: palette.faint }, userBorder: true });
+  return [
+    { offset, spans: [edge(`╭${"─".repeat(inner + 2)}╮`)] },
+    ...rows.map((text): Line => ({ offset, spans: [
+      edge("│ "), { text: text + " ".repeat(inner - stringWidth(text)), style: {} }, edge(" │"),
+    ] })),
+    { offset, spans: [edge(`╰${"─".repeat(inner + 2)}╯`)] },
+  ];
+}
+
+/** A tool or subagent result whose entire block toggles its long preview. */
 function resultLines(text: string, width: number, ok: boolean | undefined, expanded: boolean, max = RESULT_LINES): Line[] {
   const lines = textLines(text || "(empty)", width, { fg: ok === false ? palette.error : palette.muted }, [marker, blank]);
   if (lines.length <= max) return lines;
-  lines[0]!.fold = "connector";
+  lines.forEach((line, i) => { line.fold = i === 0 ? "connector" : "body"; line.foldRow = i; });
+  if (expanded) return lines;
   const control: Line = {
     fold: "control",
-    spans: [blank, { text: expanded ? "⌃ show fewer lines" : `… ${lines.length - max} more lines`, style: { fg: palette.faint } }],
+    foldRow: max,
+    spans: [blank, { text: `… ${lines.length - max} more lines`, style: { fg: palette.faint } }],
   };
   return [
     ...lines.slice(0, max),
     control,
-    ...(expanded ? [...lines.slice(max), control] : []),
   ];
 }
 
@@ -130,8 +157,7 @@ function linesFor(m: Message, width: number, showThinking: boolean, expanded: bo
   let lines: Line[];
   switch (m.role) {
     case "user":
-      lines = textLines(m.text, width, {});
-      break;
+      return userLines(m.text, width);
     case "assistant":
       lines = markdownLines(m.text, width);
       break;
@@ -213,9 +239,12 @@ export class ChatView {
   #height = 0;
   #lastLayout = { lines: 0, width: 0 };
   #expanded = new WeakSet<Message>();
-  #foldHits: Array<{ x0: number; x1: number; y: number; row: number; msg: Message; fold: NonNullable<Line["fold"]> }> = [];
+  #foldHits: Array<{ x0: number; x1: number; y: number; row: number; msg: Message; outputRow: number }> = [];
   #pointer: { x: number; y: number } | null = null;
-  #foldAnchor: { msg: Message; fold: NonNullable<Line["fold"]>; row: number } | null = null;
+  #foldAnchor: { msg: Message; outputRow: number; row: number } | null = null;
+  #breathingMessage: Message | null = null;
+  #breathStarted = 0;
+  hasVisibleAnimation = false;
   showThinking = false;
 
   /** The transcript, oldest first. */
@@ -244,6 +273,7 @@ export class ChatView {
     this.#scroll = 0;
     this.#lastLayout = { lines: 0, width: 0 };
     this.#foldAnchor = null;
+    this.#breathingMessage = null;
     this.resetInteractions();
   }
 
@@ -255,6 +285,7 @@ export class ChatView {
   resetInteractions(): void {
     this.#foldHits = [];
     this.#pointer = null;
+    this.hasVisibleAnimation = false;
   }
 
   toggleAt(x: number, y: number): boolean {
@@ -263,10 +294,10 @@ export class ChatView {
     const opening = !this.#expanded.has(hit.msg);
     if (opening) this.#expanded.add(hit.msg);
     else this.#expanded.delete(hit.msg);
-    // Keep the clicked control in view. Make room for newly revealed output
-    // when the control was near the bottom of the viewport.
+    // Keep the clicked output near the pointer. A row hidden by collapsing
+    // maps to the more-lines label instead; opening makes room below it.
     const row = opening ? Math.min(hit.row, Math.floor(this.#height / 2)) : hit.row;
-    this.#foldAnchor = { msg: hit.msg, fold: hit.fold, row };
+    this.#foldAnchor = { msg: hit.msg, outputRow: opening ? hit.outputRow : Math.min(hit.outputRow, RESULT_LINES), row };
     this.#foldHits = []; // a second queued click must not hit the old layout
     return true;
   }
@@ -287,8 +318,18 @@ export class ChatView {
     return Math.max(1, this.#height - 2);
   }
 
-  render(buf: CellBuffer, r: Rect, spin: string): void {
+  render(buf: CellBuffer, r: Rect, spin: string, now = performance.now()): void {
     this.#foldHits = [];
+    this.hasVisibleAnimation = false;
+    const latestUser = this.#messages.findLast((m) => m.role === "user") ?? null;
+    if (latestUser !== this.#breathingMessage) {
+      this.#breathingMessage = latestUser;
+      this.#breathStarted = now;
+    }
+    // Quantize to 10 fps even when other animations repaint more often.
+    const elapsed = Math.floor(Math.max(0, now - this.#breathStarted) / 100) * 100;
+    const breath = (1 - Math.cos(2 * Math.PI * elapsed / USER_BORDER_BREATH_MS)) / 2;
+    const borderColor = mix(palette.faint, 0xffffff, breath);
     const contentWidth = Math.max(1, r.w - GUTTER);
     const all: Array<{ line: Line; msg: Message | null }> = [];
     for (const m of this.#messages) {
@@ -303,7 +344,7 @@ export class ChatView {
     this.#maxScroll = Math.max(0, all.length - r.h);
     if (this.#foldAnchor) {
       const anchor = this.#foldAnchor;
-      const index = all.findIndex(({ line, msg }) => msg === anchor.msg && line.fold === anchor.fold);
+      const index = all.findIndex(({ line, msg }) => msg === anchor.msg && line.foldRow === anchor.outputRow);
       if (index >= 0) this.#scroll = this.#maxScroll - (index - anchor.row);
       this.#foldAnchor = null;
     }
@@ -312,14 +353,19 @@ export class ChatView {
 
     // Build only visible targets, clipped to the chat pane (including trace mode).
     const scrollLabel = this.#scroll > 0 ? ` ↓ ${this.#scroll} more ` : "";
+    const blockWidths = new Map<Message, number>();
+    for (const { line, msg } of all) {
+      if (line.fold && msg) blockWidths.set(msg, Math.max(blockWidths.get(msg) ?? 0,
+        line.spans.reduce((width, span) => width + stringWidth(span.text), 0)));
+    }
     for (let row = 0; row < r.h && first + row < all.length; row++) {
       const { line, msg } = all[first + row]!;
       if (!line.fold || !msg) continue;
-      const x0 = r.x + GUTTER + (line.fold === "control" ? 2 : 0);
-      const width = line.fold === "control" ? stringWidth(line.spans[1]!.text) : 2;
+      const x0 = r.x + GUTTER;
+      const width = blockWidths.get(msg)!;
       const end = r.x + r.w - (row === r.h - 1 ? scrollLabel.length : 0);
       const x1 = Math.min(end, x0 + width);
-      if (x1 > x0) this.#foldHits.push({ x0, x1, y: r.y + row, row, msg, fold: line.fold });
+      if (x1 > x0) this.#foldHits.push({ x0, x1, y: r.y + row, row, msg, outputRow: line.foldRow! });
     }
     const hovered = this.#pointer ? this.#foldAt(this.#pointer.x, this.#pointer.y)?.msg : undefined;
 
@@ -330,11 +376,14 @@ export class ChatView {
         const g = gutterFor(msg, spin);
         buf.text(r.x, y, g.text, g.style);
       }
-      let x = r.x + GUTTER;
+      let x = r.x + GUTTER + (line.offset ?? 0);
       for (let i = 0; i < line.spans.length; i++) {
         const s = line.spans[i]!;
         const highlight = msg === hovered && (line.fold === "connector" ? i === 0 : line.fold === "control" && i === 1);
-        x = buf.text(x, y, s.text, highlight ? { ...s.style, fg: palette.accent, bold: true } : s.style, r.x + r.w);
+        const breathing = msg === latestUser && s.userBorder;
+        if (breathing) this.hasVisibleAnimation = true;
+        const style = breathing ? { ...s.style, fg: borderColor } : highlight ? { ...s.style, fg: 0xffffff } : s.style;
+        x = buf.text(x, y, s.text, style, r.x + r.w);
       }
     }
 

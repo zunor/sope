@@ -119,6 +119,7 @@ export class App {
   #showTrace = false;
   #inputWidth = 40;
   #ticker: ReturnType<typeof setInterval> | null = null;
+  #tickInterval = 0;
   #escTimer: ReturnType<typeof setTimeout> | null = null;
   #renderQueued = false;
   #frame = { ms: 0, bytes: 0 };
@@ -282,6 +283,10 @@ export class App {
   }
 
   #handle(ev: InputEvent): void {
+    if (ev.type === "cell-size") {
+      this.#term.cellSize = { width: ev.width, height: ev.height };
+      return;
+    }
     if (ev.type === "apc") return this.#term.graphics.reply(ev.data);
     if (ev.type === "osc") return this.#handleOsc(ev.data);
     if (ev.type === "mouse") return this.#handleMouse(ev);
@@ -435,7 +440,9 @@ export class App {
       this.#popup = this.#popup instanceof ModePicker ? null : this.#modePicker();
       return;
     }
-    if (ev.action !== "drag") this.#session.chat.hover(p);
+    // All pointer motion updates hover, just as it does for tabs. Selection
+    // still handles drag separately; a motion event must not clear hover.
+    this.#session.chat.hover(p);
     switch (ev.action) {
       case "move":
         return;
@@ -591,15 +598,14 @@ export class App {
 
   // ---- rendering ------------------------------------------------------
 
-  /** Redraws while a session runs or a hovered tab may scroll its title. */
+  /** Slow border breathing only keeps the timer alive while its bubble is visible. */
   #tick(on: boolean): void {
-    on = !this.#quitting && (on || (this.#hover !== null && this.#hover >= 0));
-    if (on && !this.#ticker) {
-      this.#ticker = setInterval(() => this.#scheduleRender(), TICK_MS);
-    } else if (!on && this.#ticker) {
-      clearInterval(this.#ticker);
-      this.#ticker = null;
-    }
+    const fast = on || (this.#hover !== null && this.#hover >= 0);
+    const interval = this.#quitting ? 0 : fast ? TICK_MS : this.#session.chat.hasVisibleAnimation ? 100 : 0;
+    if (interval === this.#tickInterval) return;
+    if (this.#ticker) clearInterval(this.#ticker);
+    this.#tickInterval = interval;
+    this.#ticker = interval ? setInterval(() => this.#scheduleRender(), interval) : null;
   }
 
   #scheduleRender(): void {
@@ -622,6 +628,7 @@ export class App {
 
     if (W < 24 || H < 10) {
       s.chat.resetInteractions();
+      this.#tick(this.#busy);
       buf.text(0, 0, "terminal too small", { fg: palette.muted });
       this.#renderer.end();
       return;
@@ -629,12 +636,12 @@ export class App {
 
     const inner = W - PAD * 2;
     const promptWidth = stringWidth(PROMPT);
-    this.#inputWidth = inner - promptWidth;
+    this.#inputWidth = inner - 4 - promptWidth;
     const layout = s.editor.layout(this.#inputWidth);
     // A popup takes the input's place, its box where the two rules were.
     const popup = this.#docked;
-    const room = H - (TAB_ROWS + 1) - 2 - (s.busy ? 1 : 0) - 1 - 2 - 1; // tab bar and gap, transcript, status gap, status, box edges, footer
-    const inputRows = popup ? popup.height(room) : Math.min(MAX_INPUT_ROWS, layout.rows.length);
+    const room = H - TAB_ROWS - 2 - (s.busy ? 1 : 0) - 1 - 2 - 1; // tab bar, transcript, status gap, status, box edges, footer
+    const inputRows = popup ? popup.height(room) : Math.max(1, Math.min(MAX_INPUT_ROWS, room, layout.rows.length));
     this.#popupRows = popup ? inputRows + 2 : 0;
 
     const footerY = H - 1;
@@ -642,10 +649,12 @@ export class App {
     const inputY = ruleBottomY - inputRows;
     const ruleTopY = inputY - 1;
     const statusY = ruleTopY - (s.busy ? METEOR_ROWS : 1); // a blank row when idle
-    const bodyY = TAB_ROWS + 1; // below the tab bar and a blank row
+    const bodyY = TAB_ROWS; // immediately below the two-row tab bar
     const bodyH = Math.max(1, statusY - bodyY - (s.busy ? 1 : 0)); // one blank row above the running status
 
-    this.#tabHits = drawTabs(buf, PAD, 0, inner, this.#tabInfo(), this.#tabs.active, this.#dir, this.#hover, t0 - this.#hoverStarted, this.#colors);
+    const tabGraphics = this.#term.graphics.supported && this.#term.cellSize
+      ? { cell: this.#term.cellSize, images: this.#renderer.images } : undefined;
+    this.#tabHits = drawTabs(buf, PAD, 0, inner, this.#tabInfo(), this.#tabs.active, this.#dir, this.#hover, t0 - this.#hoverStarted, this.#colors, tabGraphics);
     this.#drawBody(buf, { x: PAD, y: bodyY, w: inner, h: bodyH }, t0);
     if (s.busy) this.#drawStatus(buf, statusY, inner, t0);
     this.#choiceHits = [];
@@ -655,9 +664,8 @@ export class App {
       this.#choiceHits = frame.hits;
       this.#renderer.cursor = frame.cursor ? { ...frame.cursor, visible: true } : { x: 0, y: 0, visible: false };
     } else {
-      buf.text(PAD, ruleTopY, "─".repeat(inner), { fg: palette.faint });
+      drawBox(buf, PAD, ruleTopY, inner, inputRows + 2, palette.faint);
       this.#drawInput(buf, inputY, inputRows, layout, promptWidth);
-      buf.text(PAD, ruleBottomY, "─".repeat(inner), { fg: palette.faint });
     }
     this.#drawFooter(buf, footerY, inner);
     if (this.#list) {
@@ -679,6 +687,7 @@ export class App {
     }
 
     const bytes = this.#renderer.end();
+    this.#tick(this.#busy);
     this.#frame = { ms: performance.now() - t0, bytes };
   }
 
@@ -692,19 +701,19 @@ export class App {
   #drawBody(buf: CellBuffer, r: { x: number; y: number; w: number; h: number }, now: number): void {
     const { chat, trace } = this.#session;
     const spin = SPINNER[Math.floor(now / SPINNER_MS) % SPINNER.length]!;
-    if (!this.#showTrace) return chat.render(buf, r, spin);
+    if (!this.#showTrace) return chat.render(buf, r, spin, now);
 
     const stats = `${trace.count} · ${this.#frame.ms.toFixed(1)}ms ${this.#frame.bytes}B`;
     if (r.w >= 100) {
       const traceW = Math.min(64, Math.floor(r.w * 0.42));
       const chatW = r.w - traceW - 3;
-      chat.render(buf, { ...r, w: chatW }, spin);
+      chat.render(buf, { ...r, w: chatW }, spin, now);
       for (let y = r.y; y < r.y + r.h; y++) buf.text(r.x + chatW + 1, y, "│", { fg: palette.faint });
       trace.render(buf, { x: r.x + chatW + 3, y: r.y, w: traceW, h: r.h }, stats);
     } else {
       const traceH = Math.max(3, Math.floor(r.h * 0.45));
       const chatH = r.h - traceH - 1;
-      chat.render(buf, { ...r, h: chatH }, spin);
+      chat.render(buf, { ...r, h: chatH }, spin, now);
       buf.text(r.x, r.y + chatH, "┄".repeat(r.w), { fg: palette.faint });
       trace.render(buf, { x: r.x, y: r.y + chatH + 1, w: r.w, h: traceH }, stats);
     }
@@ -721,12 +730,12 @@ export class App {
 
   #drawInput(buf: CellBuffer, y: number, rows: number, layout: ReturnType<Editor["layout"]>, promptWidth: number): void {
     const editor = this.#session.editor;
-    const x = PAD + promptWidth;
-    buf.text(PAD, y, PROMPT, { fg: palette.accent, bold: true });
+    const x = PAD + 2 + promptWidth;
+    buf.text(PAD + 2, y, PROMPT, { fg: palette.accent, bold: true });
 
     if (!editor.text) {
       const placeholder = this.#session.provider === "mock" ? "Message sope…  try !echo hi, !agent a | b, or /help" : "Message sope…  /help for commands";
-      buf.text(x, y, placeholder, { fg: palette.faint });
+      buf.text(x, y, placeholder, { fg: palette.faint }, x + this.#inputWidth);
     } else {
       const scroll = Math.max(0, layout.cursorRow - rows + 1);
       for (let i = 0; i < rows; i++) {

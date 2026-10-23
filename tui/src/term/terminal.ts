@@ -10,10 +10,11 @@ const ENTER = [
   "\x1b[?25l", // hide cursor
   "\x1b[?7l", // no auto-wrap: writing the last column must never scroll
   "\x1b[?2004h", // bracketed paste
+  "\x1b[>1u", // distinguish modified Enter (Kitty keyboard protocol)
   "\x1b[H\x1b[2J",
 ].join("");
 
-const LEAVE = ["\x1b[0m", "\x1b[?2004l", "\x1b[?7h", "\x1b[?25h", "\x1b[?1049l"].join("");
+const LEAVE = ["\x1b[<u", "\x1b[0m", "\x1b[?2004l", "\x1b[?7h", "\x1b[?25h", "\x1b[?1049l"].join("");
 
 // Button presses, all motion (drag selection, hovering the tabs), SGR encoding.
 const MOUSE_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
@@ -25,6 +26,7 @@ const QUERY_BACKGROUND = "\x1b]11;?\x1b\\";
 export class Terminal {
   readonly truecolor = detectTruecolor();
   readonly graphics = new KittyGraphics();
+  cellSize: { width: number; height: number } | null = null;
   #active = false;
   #mouse = false;
   #restoreOnExit = () => this.leave();
@@ -46,7 +48,7 @@ export class Terminal {
     this.#active = true;
     process.stdin.setRawMode(true);
     process.stdin.resume();
-    this.write(ENTER + (this.#mouse ? MOUSE_ON : "") + QUERY_BACKGROUND + this.graphics.query());
+    this.write(ENTER + (this.#mouse ? MOUSE_ON : "") + QUERY_BACKGROUND + this.graphics.query() + "\x1b[16t");
     process.on("exit", this.#restoreOnExit);
   }
 
@@ -75,7 +77,11 @@ export class Terminal {
   }
 
   onResize(cb: () => void): void {
-    process.stdout.on("resize", cb);
+    process.stdout.on("resize", () => {
+      this.cellSize = null;
+      this.write("\x1b[16t");
+      cb();
+    });
   }
 
   write(s: string): void {

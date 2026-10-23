@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: MIT
-// The tab bar: fixed-width, single-row sessions on subtle background tiles.
+// The tab bar: fixed-width sessions in two-row image outlines, with a text fallback.
 //
 //    explain the thread pool     fix grep context ×    +    ~/src/app  ⋯
 //
-// The active tab is bold in the normal text color, the others muted.
+// All titles use regular weight; the active tab has a white outline.
 // Hovering a tab shows × to close it. ? marks a tab waiting for approval,
 // • one that finished in the background. ⋯ at the far right lists every
 // saved session. Fixed-width tabs truncate long titles; hovering scrolls the
 // title. Overflow keeps the active tab in view (‹ 2 and 3 › count hidden tabs).
 
 import type { CellBuffer } from "../render/buffer";
+import type { PixelImage } from "../render/graphics";
+import { tabFrame, type CellSize } from "./tab-frame";
+import { imageTextAvailable, tabTextImage, type LabelRegion } from "./tab-text";
+import { luminance } from "../render/color";
 import { palette, surfaces, type Surfaces } from "../theme";
 import { graphemes, graphemeWidth, stringWidth, truncate } from "../unicode/width";
 
@@ -52,12 +56,12 @@ export interface TabLayout {
   dir: { x: number; text: string } | null;
 }
 
-export const TAB_WIDTH = 24;
+export const TAB_WIDTH = 20;
 const PLUS = " + ";
 const MORE = " ⋯ ";
 
 /** Rows the bar takes. */
-export const TAB_ROWS = 1;
+export const TAB_ROWS = 2;
 const TAB_GAP = 1;
 const overflowLabel = (n: number, left: boolean, w: number) =>
   w < 30 ? (left ? "‹" : "›") : left ? `‹ ${n}` : `${n} ›`;
@@ -148,46 +152,68 @@ export function drawTabs(
   hover: number | null,
   hoverElapsed = 0,
   colors: Surfaces = surfaces(null),
+  graphics?: { cell: CellSize; images: PixelImage[] },
 ): TabHit[] {
+  if (graphics && !imageTextAvailable()) graphics = undefined;
   const l = layoutTabs(tabs, active, x, w, dir);
   const hits: TabHit[] = [];
-  const textY = y;
+  const regions: LabelRegion[] = [];
+  const textY = y + 1;
 
   // The scroll markers step to the nearest hidden tab.
   if (l.hiddenLeft) {
-    const end = buf.text(x, textY, overflowLabel(l.hiddenLeft, true, w), { fg: palette.faint });
-    hits.push({ x0: x, x1: end, y0: textY, y1: textY + 1, index: l.hiddenLeft - 1 });
+    const label = overflowLabel(l.hiddenLeft, true, w);
+    const end = buf.text(x, textY, label, { fg: palette.faint });
+    regions.push({ column: 0, columns: end - x, text: label });
+    hits.push({ x0: x, x1: end, y0: graphics ? y : textY, y1: y + TAB_ROWS, index: l.hiddenLeft - 1 });
   }
   for (const p of l.tabs) {
     const t = tabs[p.index]!;
     const on = p.index === active;
+    regions.push({ column: p.x - x, columns: p.width, text: t.title });
     const end = p.x + p.width - 1;
-    const bg = on ? colors.tabSelected : p.index === hover ? colors.tabHover : colors.tab;
-    buf.fill(p.x, y, p.width, 1, { bg });
+    const bg = graphics ? undefined : on ? colors.tabSelected : p.index === hover ? colors.tabHover : colors.tab;
+    if (graphics) {
+      const color = on ? 0xffffff : p.index === hover ? palette.muted : palette.faint;
+      graphics.images.push(tabFrame(p.x, y, p.width, p.index + 1, color, graphics.cell));
+    } else {
+      buf.fill(p.x, textY, p.width, 1, { bg });
+    }
     let cx = p.x + 2;
-    if (t.state === "waiting") cx = buf.text(cx, textY, "? ", { fg: palette.tool, bg, bold: true });
+    if (t.state === "waiting") cx = buf.text(cx, textY, "? ", { fg: palette.tool, bg });
     else if (t.state === "unread") cx = buf.text(cx, textY, "• ", { fg: palette.accent, bg });
     const title = tabTitle(t.title, p.titleWidth, p.index === hover ? hoverElapsed : undefined);
-    buf.text(cx, textY, title, on ? { bg, bold: true } : p.index === hover ? { bg } : { bg, fg: palette.muted }, cx + p.titleWidth);
+    buf.text(cx, textY, title, on || p.index === hover ? { bg } : { bg, fg: palette.muted }, cx + p.titleWidth);
     const closeX = end - 2;
     if (p.index === hover) buf.text(closeX, textY, "×", { fg: palette.muted, bg });
 
-    hits.push({ x0: closeX - 1, x1: closeX + 2, y0: textY, y1: textY + 1, index: p.index, close: true });
+    hits.push({ x0: closeX - 1, x1: closeX + 2, y0: graphics ? y : textY, y1: y + TAB_ROWS, index: p.index, close: true });
     hits.push({ x0: p.x, x1: end + 1, y0: y, y1: y + TAB_ROWS, index: p.index });
   }
   if (l.hiddenRight) {
     const mx = l.plusX - stringWidth(overflowLabel(l.hiddenRight, false, w));
     const end = buf.text(mx, textY, overflowLabel(l.hiddenRight, false, w), { fg: palette.faint });
-    hits.push({ x0: mx, x1: end, y0: textY, y1: textY + 1, index: tabs.length - l.hiddenRight });
+    regions.push({ column: mx - x, columns: end - mx, text: overflowLabel(l.hiddenRight, false, w) });
+    hits.push({ x0: mx, x1: end, y0: graphics ? y : textY, y1: y + TAB_ROWS, index: tabs.length - l.hiddenRight });
   }
 
   const button = (bx: number, label: string, index: number) => {
     const lit = hover === index;
+    regions.push({ column: bx - x, columns: stringWidth(label), text: label, bold: lit });
     buf.text(bx, textY, label, lit ? { fg: palette.accent, bold: true } : { fg: palette.muted });
-    hits.push({ x0: bx, x1: bx + stringWidth(label), y0: textY, y1: textY + 1, index });
+    hits.push({ x0: bx, x1: bx + stringWidth(label), y0: graphics ? y : textY, y1: y + TAB_ROWS, index });
   };
   button(l.plusX, PLUS, NEW_TAB);
-  if (l.dir) buf.text(l.dir.x, textY, l.dir.text, { fg: palette.faint });
+  if (l.dir) {
+    buf.text(l.dir.x, textY, l.dir.text, { fg: palette.faint });
+    regions.push({ column: l.dir.x - x, columns: stringWidth(l.dir.text), text: l.dir.text });
+  }
   button(l.moreX, MORE, ALL_SESSIONS);
+  if (graphics) {
+    const foreground = luminance(colors.tab) > 0.5 ? 0x20212a : 0xe5e7eb;
+    graphics.images.push(tabTextImage(buf, x, y, w, graphics.cell, foreground, regions));
+    // Do not draw a second, row-aligned copy behind the centered glyphs.
+    buf.fill(x, y, w, TAB_ROWS, {});
+  }
   return hits;
 }
