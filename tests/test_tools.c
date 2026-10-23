@@ -503,9 +503,10 @@ static void test_todo_and_subagents(void)
     sope_agent_free(a);
 }
 
-/* Fork before starting any library threads. A stuck file open must fail the
- * test, not pin the test runner forever when freeing an agent. */
-static void test_special_files(void)
+/* Exec each probe in a fresh process: injected diagnostics such as macOS
+ * leaks may already have threads even before libsope starts its own.
+ * A stuck file open must fail the test, not pin the runner during teardown. */
+static void test_special_files(const char *executable)
 {
     char fifo[512], ignored[512], ignore_dir[512];
     snprintf(fifo, sizeof fifo, "%s/pipe", dir);
@@ -522,19 +523,14 @@ static void test_special_files(void)
         "!read {\"file_path\":\"/dev/null\"}"
     };
     for (size_t i = 0; i < sizeof commands / sizeof commands[0]; i++) {
+        char command[1024];
+        snprintf(command, sizeof command, commands[i], fifo);
         pid_t child = fork();
         CHECK(child >= 0);
         if (child == 0) {
             alarm(3);
-            char command[1024];
-            snprintf(command, sizeof command, commands[i], fifo);
-            sope_agent_t *a = new_agent("allow");
-            run_log log;
-            run(a, command, &log, NO_ANSWER, NULL);
-            CHECK(log.n == 1 && log.is_error[0] == (i != 3));
-            sope_agent_free(a);
-            CHECK(sope_shutdown() == SOPE_OK);
-            _exit(failures ? 1 : 0);
+            execlp(executable, executable, "--special-file", dir, command, i != 3 ? "1" : "0", (char *)NULL);
+            _exit(127);
         }
         if (child > 0) {
             int status = 0;
@@ -545,8 +541,21 @@ static void test_special_files(void)
     unlink(fifo); unlink(ignored); rmdir(ignore_dir);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc == 5 && !strcmp(argv[1], "--special-file")) {
+        alarm(3);
+        snprintf(dir, sizeof dir, "%s", argv[2]);
+        CHECK(sope_set_threads(2) == SOPE_OK);
+        sope_agent_t *a = new_agent("allow");
+        run_log log;
+        run(a, argv[3], &log, NO_ANSWER, NULL);
+        CHECK(log.n == 1 && log.is_error[0] == atoi(argv[4]));
+        sope_agent_free(a);
+        CHECK(sope_shutdown() == SOPE_OK);
+        alarm(0); /* Allow at-exit diagnostics to finish after the probe. */
+        return failures ? 1 : 0;
+    }
     char tmpl[] = "/tmp/sope-tools-XXXXXX";
     char *made = mkdtemp(tmpl);
     char resolved[256];
@@ -556,7 +565,7 @@ int main(void)
     snprintf(dir, sizeof dir, "%s", realpath(made, resolved) ? resolved : made);
     CHECK(sope_set_threads(2) == SOPE_OK);
 
-    test_special_files();
+    test_special_files(argv[0]);
 
     test_read_image();
     test_read_write_edit();

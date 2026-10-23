@@ -2,7 +2,7 @@
 
 `include/sope.h` is the source of truth for the ABI. This document covers details that do not fit in header comments: the threading model, lifetimes, turn and subagent semantics, ownership, and guidance for language binding authors.
 
-> Current version: 0.4.0 (ABI 0.4). Compatibility rules (`sope_version_number()` returns the version actually loaded at runtime):
+> Current version: 0.5.0 (ABI 0.5). Compatibility rules (`sope_version_number()` returns the version actually loaded at runtime):
 > - From 1.0 onward, semantic versioning applies: a host compiled against X.Y can use any X.Z library where Z ≥ Y. Breaking changes require a new major version.
 > - Before 1.0, a minor version change may break the ABI: the host requires matching major and minor versions; patch versions may differ.
 >
@@ -355,7 +355,7 @@ All builds compile SQLite 3.54.1 directly into both `libsope.dylib/.so` and `lib
 | `bundled` | Download curl 8.23.0 and mbedTLS 3.6.7 at build time (pinned SHA-256 hashes) and link them statically into libsope, enabling only HTTP(S) | Linux releases; any deployment that should not depend on system libcurl |
 | `off` | No network support or HTTP dependency; only the `mock` provider | Testing and offline embedding |
 
-- The shared library exports only the public `sope_*` functions (35 in total). Internal symbols (`sope__*`, including SQLite) and bundled curl/mbedTLS symbols are hidden, avoiding conflicts with the host's SQLite, curl or OpenSSL.
+- The shared library exports only the public `sope_*` functions (36 in total). Internal symbols (`sope__*`, including SQLite) and bundled curl/mbedTLS symbols are hidden, avoiding conflicts with the host's SQLite, curl or OpenSSL.
 - Bundled mode also produces `libsope-bundled.a`: sope, SQLite, curl, and mbedTLS merged into one object file with only `sope_*` as global symbols, ready for static linking (macOS also requires `-framework SystemConfiguration -framework CoreFoundation -framework CoreServices`). In `system` mode, the host must link `libsope.a` with `-lcurl` and the platform thread libraries. Neither static archive needs `-lsqlite3`.
 - For offline builds, point `SOPE_SQLITE_URL` (and `SOPE_CURL_URL` / `SOPE_MBEDTLS_URL` in bundled HTTP mode) to local source archives. The pinned checksums still apply.
 
@@ -425,9 +425,10 @@ Previews include an absolute path and byte count. `artifact_read({path, offset, 
 Archives outlive agent destruction. Durable agents keep them under their session directory; ephemeral agents use a private `/tmp/sope-artifacts-*` directory. The embedding host owns quota, retention and deletion. Do not delete referenced artifacts while a task needs recovery or evidence verification. Background jobs remain subject to the process lifecycle described above; the archive does not constitute a reconnectable job handle.
 
 
-## 12. Embedding contract (ABI 0.4)
+## 12. Embedding contract (ABI 0.5)
 
-ABI 0.4 adds policy/sealing, idempotent admission, durable public event cursors,
+ABI 0.5 adds `sope_agent_context` to the embedding contract introduced in 0.4:
+policy/sealing, idempotent admission, durable public event cursors,
 terminal outcome queries, and suspend/wait. Native session format is version 2;
 version 1 sessions are rejected without migration. See `include/sope.h` for exact
 signatures and [the Go SDK contract](../bindings/go/README.md) for the host recovery

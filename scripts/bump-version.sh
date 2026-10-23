@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: MIT
 # Sets the version everywhere it is written down:
 #
-#   scripts/bump-version.sh 0.4.0
+#   scripts/bump-version.sh 0.5.0
 #
 #   include/sope.h            SOPE_VERSION_MAJOR/MINOR/PATCH/STRING (the source of truth)
 #   package.json (×3)         root, bindings/js, tui
+#   bun.lock                 workspace package versions (dependency pins unchanged)
 #   bindings/js/src/ffi.ts    ABI the bindings are written against (major.minor)
 #   docs/abi.md               "Current version: x.y.z (ABI x.y)"
 #   README.md, docs/guide/quickstart.md  release tarball names in install examples
@@ -29,6 +30,17 @@ perl -pi -e "s/^(#define SOPE_VERSION_MAJOR) \d+/\$1 $major/; s/^(#define SOPE_V
 for pkg in package.json bindings/js/package.json tui/package.json; do
   perl -pi -e "s/^  \"version\": \"[^\"]*\",\$/  \"version\": \"$new\",/" "$pkg"
 done
+python3 - "$new" <<'PYLOCK'
+import pathlib, re, sys
+p = pathlib.Path('bun.lock')
+s = p.read_text()
+for workspace in ('bindings/js', 'tui'):
+    pattern = r'("' + re.escape(workspace) + r'":\s*\{[^}]*?"version":\s*")[^"]+(")'
+    s, count = re.subn(pattern, lambda m: m[1] + sys.argv[1] + m[2], s, count=1)
+    if count != 1:
+        raise SystemExit(f'bun.lock: expected one version for {workspace}')
+p.write_text(s)
+PYLOCK
 perl -pi -e "s/^export const ABI = \{ major: \d+, minor: \d+ \}/export const ABI = { major: $major, minor: $minor }/" bindings/js/src/ffi.ts
 # A version bump must update the Go SDK's compile-time and runtime ABI guard.
 python3 - "$major" "$minor" <<'PYGO'
@@ -45,7 +57,7 @@ perl -pi -e "s/Current version: [0-9.]+ \(ABI [0-9.]+\)/Current version: ${new} 
 perl -pi -e "s/sope-[0-9]+\.[0-9]+\.[0-9]+-/sope-$new-/g" README.md docs/guide/quickstart.md
 
 echo "version: $old -> $new"
-git --no-pager diff --stat -- include/sope.h package.json bindings/js/package.json tui/package.json \
+git --no-pager diff --stat -- include/sope.h package.json bindings/js/package.json tui/package.json bun.lock \
   bindings/js/src/ffi.ts docs/abi.md README.md docs/guide/quickstart.md || true
 if grep -q "^## $new\b\|^## Unreleased (${new})" CHANGELOG.md; then
   echo "CHANGELOG.md has a section for $new"

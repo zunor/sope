@@ -2,36 +2,54 @@
 
 The version in `include/sope.h` is authoritative. The library, bindings, and `sope` executable are released together; see [docs/release.md](docs/release.md) for the policy.
 
-## Unreleased
+## 0.5.0 — 2026-10-24
 
-### libsope
+This release adds context visibility, hardens agent execution, and improves
+long-session rendering and live demos. The C ABI advances to 0.5 because
+`sope_agent_context` is new; hosts built for ABI 0.4 must rebuild with the
+matching header and bindings.
 
-- Add `sope_agent_context`: how full the context is, as JSON, measured the way
-  automatic compaction measures it, split into system prompt, tools, summary,
-  messages, tool results and images, with the largest tool results. It works
-  between turns and, from a snapshot, while a turn runs. Go `Agent.Context()`
-  and JS `agent.context()` expose it.
+### libsope (C ABI 0.5)
 
-### Terminal
+- Add `sope_agent_context`: report context usage, its breakdown, the automatic
+  compaction threshold, and the largest tool results, including during a turn.
+- Reject concurrent pool acquisition and duplicate shutdown during teardown.
+- Reject malformed tool-call batches before dispatching any tool in the batch.
+- Reject FIFOs and other special files in file, search, ignore-file and artifact
+  readers, preventing shared workers from blocking on unbounded input.
 
-- Restore shell-tool access to Bun and other developer commands by passing an
-  explicit execution environment through the JS binding's new `setPolicy()`.
-  Model credentials and shell startup hooks are not inherited.
-- Run the demos against GLM 5.3 when credentials are configured, with `--offline`
-  for deterministic local responses and `--live` to require a real model.
-  Failed offline edit verification now prints the tool output and exits nonzero.
+### Bindings
 
-- Add `/context`: a breakdown of the context window in the conversation, with a
-  bar, a legend and the largest tool results; the bottom bar shows the model
-  and `used / window`.
-- Size automatic compaction from the model's window: 80% of what the
-  endpoint's `/models` reports (or `SOPE_CONTEXT_WINDOW`), still 100000 while
-  it is unknown; `SOPE_COMPACT_THRESHOLD` overrides it. The window is also
-  passed to libsope as `context.window`.
-- Add `/effort`: a slider over reasoning effort levels (default, low, medium,
-  high, extra high; `none` and `minimal` by name) for the session's next turns
-  and new sessions, with `--effort` / `SOPE_REASONING_EFFORT` at startup and a
-  hint when a model rejects a level.
+- Expose context usage through Go `Agent.Context()` and JS `agent.context()`.
+- Expose the native execution policy through JS `agent.setPolicy()`.
+- Update the Go and JS compile/runtime guards to ABI 0.5.
+
+### TUI
+
+- Add `/context`, model/context usage in the bottom bar, and `/effort` with
+  `--effort` / `SOPE_REASONING_EFFORT` controls.
+- Size automatic compaction from 80% of the model's reported context window,
+  while respecting explicit threshold and window settings.
+- Scope host-tool cancellation by both agent and turn, so one finished
+  subagent cannot cancel a sibling's tools.
+- Avoid repeated Markdown style scans and cache folded output widths;
+  measure fold hit areas only for visible output blocks.
+- Handle malformed terminal key code points and zero-height approval previews.
+- Restore shell access to Bun and other developer tools using an explicit
+  environment, without inheriting model credentials or shell startup hooks.
+- Use real GLM 5.3 for configured demos, with `--offline` for deterministic
+  local responses and `--live` to require the configured endpoint. Failed
+  offline edit verification reports the command output and exits nonzero.
+- Update the README with the user-provided Ghostty capture of the live GLM 5.3
+  edit demo.
+
+### Development
+
+- Move the repository release skill from `.claude` to `.agents` and update its
+  documentation links.
+- Keep Bun workspace lockfile versions in sync when bumping a release.
+- Run special-file regression probes in fresh processes so macOS leak
+  instrumentation does not interfere with their timeout checks.
 
 ## 0.4.0 — 2026-10-24
 

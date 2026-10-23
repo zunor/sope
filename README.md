@@ -53,8 +53,8 @@ bun run tui -- "Explain how requests flow through this project."
 Prefer a release archive? It includes a single `sope` executable with libsope embedded:
 
 ```sh
-tar xzf sope-0.4.0-darwin-arm64.tar.gz
-sope-0.4.0-darwin-arm64/install.sh
+tar xzf sope-0.5.0-darwin-arm64.tar.gz
+sope-0.5.0-darwin-arm64/install.sh
 ```
 
 [Installation and first steps →](docs/guide/quickstart.md)

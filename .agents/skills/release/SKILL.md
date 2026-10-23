@@ -35,7 +35,7 @@ so a minor bump means hosts must rebuild: say so in the CHANGELOG.
 scripts/bump-version.sh X.Y.Z
 ```
 
-It updates `include/sope.h`, the three `package.json`, the bindings' `ABI`
+It updates `include/sope.h`, the three `package.json` and workspace versions in `bun.lock`, the bindings' `ABI`
 in `bindings/js/src/ffi.ts`, the version line of `docs/abi.md`, and the
 tarball names in `README.md` and `docs/guide/quickstart.md`, and reports whether `CHANGELOG.md` has a
 section for X.Y.Z. Then by hand:
@@ -135,8 +135,8 @@ tar xzf dist/sope-X.Y.Z-*.tar.gz -C <scratch> && <scratch>/sope-X.Y.Z-*/install.
 (cd / && ~/.local/bin/sope -p "In one sentence: what is 1+1?")   # with .env loaded
 ```
 
-The repository has no remote: do not push, and do not upload the tarball
-anywhere unless the user asks. Each platform needs its own run of
+Push to the configured remote and upload release assets only when the user
+asks for publication. Each platform needs its own run of
 `release.sh` on a machine of that platform (no cross compiling).
 
 ## 6. Report
