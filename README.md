@@ -63,9 +63,9 @@ sope-0.4.0-darwin-arm64/install.sh
 
 The TUI keeps the work in view: a conversation in the center, independent sessions above, and your next message below. It is written from scratch and uses the same ABI as an embedded application.
 
-[![Four sope session tabs in Ghostty, with a completed edit and four passing tests](docs/assets/tui-edit.png)](docs/assets/tui-edit.png)
+[![Four sope session tabs in Ghostty, with GLM 5.3 editing a retry policy and running tests](docs/assets/tui-edit.png)](docs/assets/tui-edit.png)
 
-*Four sessions, one workspace. Captured in Ghostty with scripted English conversations, real file edits, and four passing tests. Click to view at full resolution.*
+*Four sessions, one workspace. A live GLM 5.3 demo in Ghostty, showing real file edits and test output while awaiting the final model response. The other three tabs contain prepared notes. Click to view at full resolution.*
 
 **Follow the work.** Streamed Markdown, code, task lists, and foldable tool output keep long conversations readable. Subagents report their progress alongside the main conversation.
 
