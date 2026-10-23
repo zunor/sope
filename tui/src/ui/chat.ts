@@ -242,6 +242,7 @@ export class ChatView {
   #messages: Message[] = [];
   #nextId = 1;
   #cache = new WeakMap<Message, { key: string; lines: Line[] }>();
+  #foldWidths = new WeakMap<Line[], number>();
   #scroll = 0; // rows scrolled up from the bottom; 0 follows new output
   #maxScroll = 0;
   #height = 0;
@@ -362,15 +363,22 @@ export class ChatView {
     // Build only visible targets, clipped to the chat pane (including trace mode).
     const scrollLabel = this.#scroll > 0 ? ` ↓ ${this.#scroll} more ` : "";
     const blockWidths = new Map<Message, number>();
-    for (const { line, msg } of all) {
-      if (line.fold && msg) blockWidths.set(msg, Math.max(blockWidths.get(msg) ?? 0,
-        line.spans.reduce((width, span) => width + stringWidth(span.text), 0)));
-    }
     for (let row = 0; row < r.h && first + row < all.length; row++) {
       const { line, msg } = all[first + row]!;
       if (!line.fold || !msg) continue;
       const x0 = r.x + GUTTER;
-      const width = blockWidths.get(msg)!;
+      let width = blockWidths.get(msg);
+      if (width === undefined) {
+        const lines = this.#cache.get(msg)!.lines;
+        width = this.#foldWidths.get(lines);
+        if (width === undefined) {
+          width = 0;
+          for (const l of lines) if (l.fold)
+            width = Math.max(width, l.spans.reduce((n, span) => n + stringWidth(span.text), 0));
+          this.#foldWidths.set(lines, width);
+        }
+        blockWidths.set(msg, width);
+      }
       const end = r.x + r.w - (row === r.h - 1 ? scrollLabel.length : 0);
       const x1 = Math.min(end, x0 + width);
       if (x1 > x0) this.#foldHits.push({ x0, x1, y: r.y + row, row, msg, outputRow: line.foldRow! });
