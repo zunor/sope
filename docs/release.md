@@ -77,12 +77,14 @@ bundled 模式把 curl（curl 许可证，MIT 风格）和 mbedTLS（Apache-2.0�
 ## 发布步骤
 
 ```sh
-# 1. 改 include/sope.h 的版本号，以及三个 package.json 的 version
-# 2. 在 CHANGELOG.md 写本版本的变更
+scripts/bump-version.sh 0.4.0           # sope.h、三个 package.json、绑定的 ABI、文档里的版本号
+# 在 CHANGELOG.md 写 “## 0.4.0 — 日期” 一节
 bash scripts/release.sh                 # 构建、测试、打包到 dist/
-git tag -a v0.1.0 -m "sope 0.1.0"
-dist/sope-0.1.0-darwin-arm64/install.sh # 本机安装
+git tag -a v0.4.0 -m "sope 0.4.0"
+dist/sope-0.4.0-darwin-arm64/install.sh # 本机安装
 ```
+
+完整的检查清单（ASan/TSan/泄漏、bundled 构建、真实模型、提交前查密钥、从压缩包安装验证）写在 `.claude/skills/release/SKILL.md`，在 Claude Code 里输入 `/release` 就按它走一遍。
 
 每个平台需要在对应的机器上运行一次（libsope 是原生代码，不能交叉编译）。上传到 GitHub Releases 等分发渠道目前是手动步骤。
 

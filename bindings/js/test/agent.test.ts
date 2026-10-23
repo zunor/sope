@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 import { afterEach, expect, test } from "bun:test";
-import { abiCompatible, Agent, SopeError, ErrorCode, version, type SopeEvent } from "../src";
+import { ABI, abiCompatible, Agent, SopeError, ErrorCode, version, type SopeEvent } from "../src";
 
 let agent: Agent | null = null;
 
@@ -31,9 +31,11 @@ test("version matches the header and the package", async () => {
 
 test("checks ABI compatibility", () => {
   const v = (major: number, minor: number, patch = 0) => (major << 16) | (minor << 8) | patch;
-  expect(abiCompatible(v(0, 3, 7))).toBe(true);
-  expect(abiCompatible(v(0, 2))).toBe(false); // 0.x: minor versions may break the ABI
-  expect(abiCompatible(v(0, 4))).toBe(false);
+  const { major, minor } = ABI;
+  expect(major).toBe(0); // the rules below are the 0.x ones
+  expect(abiCompatible(v(major, minor, 7))).toBe(true);
+  expect(abiCompatible(v(major, minor - 1))).toBe(false); // 0.x: minor versions may break the ABI
+  expect(abiCompatible(v(major, minor + 1))).toBe(false);
   expect(abiCompatible(v(1, 1))).toBe(false);
 });
 
