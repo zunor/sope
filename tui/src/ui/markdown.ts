@@ -98,8 +98,19 @@ export function renderMarkdown(src: string): Styled {
 /** Splits [start, end) of a styled text into spans with their styles. */
 export function slice(s: Styled, start: number, end: number, base: Style): Array<{ text: string; style: Style }> {
   const spans: Array<{ text: string; style: Style }> = [];
+  if (end <= start) return spans;
+  // Runs are ordered and disjoint. Jump to the first overlap instead of
+  // rescanning the whole prefix for every wrapped row of a long reply.
+  let lo = 0;
+  let hi = s.runs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (s.runs[mid]!.end <= start) lo = mid + 1;
+    else hi = mid;
+  }
   let pos = start;
-  for (const run of s.runs) {
+  for (let i = lo; i < s.runs.length; i++) {
+    const run = s.runs[i]!;
     if (run.end <= pos) continue;
     if (run.start >= end) break;
     if (run.start > pos) spans.push({ text: s.text.slice(pos, run.start), style: base });

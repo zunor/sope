@@ -26,3 +26,23 @@ test("slices runs across wrapped rows", () => {
   const s = renderMarkdown("**abcdef**");
   expect(slice(s, 2, 4, {})).toEqual([{ text: "cd", style: { bold: true } }]);
 });
+
+test("slicing a late row skips earlier style runs", () => {
+  const s = renderMarkdown("**row**\n".repeat(20_000));
+  let reads = 0;
+  s.runs = new Proxy(s.runs, {
+    get(target, key, receiver) {
+      if (typeof key === "string" && /^\d+$/.test(key)) reads++;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  expect(slice(s, s.text.length - 4, s.text.length - 1, {})).toEqual([{ text: "row", style: { bold: true } }]);
+  expect(reads).toBeLessThan(32);
+});
+
+test("style slicing preserves gaps and empty intervals", () => {
+  const s = renderMarkdown("a **bc** d `ef` g");
+  expect(slice(s, 3, 8, { italic: true }).map((span) => span.text)).toEqual(["c", " d ", "e"]);
+  expect(slice(s, 4, 7, {})).toEqual([{ text: " d ", style: {} }]);
+  expect(slice(s, 3, 3, {})).toEqual([]);
+});
