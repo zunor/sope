@@ -28,5 +28,5 @@ for linkage in shared static; do
     export CGO_LDFLAGS="\"$static\" $deps -pthread -lm"
   fi
   echo "Go host ($linkage)"
-  "${GO:-go}" run "$root/tests/go_embed/main.go"
+  "${GO:-go}" run -a "$root/tests/go_embed/main.go"
 done

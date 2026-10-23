@@ -127,7 +127,6 @@ subagent_def *sope__subagent_general_purpose(int *rc)
 void sope__subagent_add(sope_agent_t *a, subagent_def *d)
 {
     subagent_def **pp;
-    pthread_mutex_lock(a->mu);
     pp = &a->subagents;
     while (*pp && strcmp((*pp)->name, d->name) != 0) pp = &(*pp)->next;
     if (*pp) {
@@ -135,7 +134,6 @@ void sope__subagent_add(sope_agent_t *a, subagent_def *d)
         sope__subagent_free(*pp);
     }
     *pp = d;
-    pthread_mutex_unlock(a->mu);
 }
 
 int sope__subagent_spec_locked(const sope_agent_t *a, sope_buf *desc, sope_buf *schema)
@@ -297,9 +295,12 @@ unlock:
     child->task.on_closed = child_closed;
     sope__json_free(input);
 
+    if (sope__push_event(a, SOPE_EVENT_SUBAGENT_START, sope__turn_id(a), u->call_id, 0, name, strlen(name), u->input,
+                        u->input_len) != SOPE_OK) {
+        sope__agent_free_memory(child);
+        return "subagent start was not committed";
+    }
     sope__pool_acquire(); /* cannot fail: the pool is running */
-    sope__push_event(a, SOPE_EVENT_SUBAGENT_START, sope__turn_id(a), u->call_id, 0, name, strlen(name), u->input,
-                     u->input_len);
     pthread_mutex_lock(a->mu);
     child->sibling = a->children;
     a->children = child;
@@ -335,10 +336,8 @@ static void child_closed(sope_task *task)
     }
     if (p) {
         p->is_error = stop != SOPE_STOP_END_TURN || result.oom;
-        p->done = sope__journal_result(parent, p);
+        p->done = parent->root->suspending ? 0 : sope__journal_subagent_result(parent, p, stop);
     }
-    sope__push_event_locked(parent, SOPE_EVENT_SUBAGENT_END, child->parent_turn_id, child->agent_id, stop, NULL, 0,
-                     p && p->done && p->content ? p->content : "Result not committed", p && p->done && p->content ? p->len : 20);
     for (pp = &parent->children; *pp; pp = &(*pp)->sibling)
         if (*pp == child) {
             *pp = child->sibling;

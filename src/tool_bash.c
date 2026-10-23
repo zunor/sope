@@ -110,7 +110,7 @@ static sope_next tool_bash(tool_run *r)
         int committed = sope__journal_artifact(r->agent, r->call_id, archive_path);
         pthread_mutex_unlock(r->agent->mu);
         if (!committed) { close(archive_fd); free(archive_path); return sope__run_fail(r, "Cannot commit shell archive; command did not run."); }
-        r->proc = sope__proc_start(cmd, r->cwd, background ? NULL : &r->task, archive_fd, archive_path, err, sizeof err);
+        r->proc = sope__proc_start(cmd, r->cwd, r->agent->root->environment, background ? NULL : &r->task, archive_fd, archive_path, err, sizeof err);
         free(archive_path);
         if (!r->proc) return sope__run_fail(r, "%s", err);
         if (background) {

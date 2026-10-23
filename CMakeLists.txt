@@ -50,6 +50,7 @@ set(SOPE_SOURCES
   src/agent.c
   src/artifact.c
   src/journal.c
+  src/runtime.c
   src/call.c
   src/compact.c
   src/context.c
@@ -154,6 +155,9 @@ if(SOPE_BUILD_TESTS)
   add_executable(test_tools tests/test_tools.c)
   target_link_libraries(test_tools PRIVATE sope_static)
   add_test(NAME tools COMMAND test_tools)
+  add_executable(test_runtime tests/test_runtime.c)
+  target_link_libraries(test_runtime PRIVATE sope_static sope_sqlite_headers)
+  add_test(NAME runtime COMMAND test_runtime)
   add_executable(test_durable tests/test_durable.c)
   target_link_libraries(test_durable PRIVATE sope_static sope_sqlite_headers)
   add_test(NAME durable COMMAND test_durable)
@@ -184,4 +188,39 @@ endif()
 include(GNUInstallDirs)
 install(TARGETS sope sope_static)
 install(FILES include/sope.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY bindings/go DESTINATION ${CMAKE_INSTALL_DATADIR}/sope/bindings
+  FILES_MATCHING PATTERN "*.go" PATTERN "go.mod" PATTERN "README.md")
 install(FILES cmake/SQLite-NOTICE.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/sope RENAME sqlite.txt)
+
+# The Go SDK consumes installed or build-tree pkg-config metadata. SQLite is
+# always inside the archive; no host SQLite driver or -lsqlite3 is required.
+set(SOPE_PC_ARCHIVE libsope.a)
+set(SOPE_PC_DEPS "")
+if(SOPE_CURL STREQUAL "system")
+  set(SOPE_PC_DEPS "-lcurl")
+elseif(SOPE_CURL STREQUAL "bundled")
+  set(SOPE_PC_ARCHIVE libsope-bundled.a)
+  if(APPLE)
+    set(SOPE_PC_DEPS "-framework SystemConfiguration -framework CoreFoundation -framework CoreServices")
+  endif()
+  install(FILES ${_amalgam_a} DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+foreach(_pc sope sope-static)
+  set(SOPE_PC_PREFIX ${CMAKE_BINARY_DIR})
+  set(SOPE_PC_LIBDIR ${CMAKE_BINARY_DIR})
+  set(SOPE_PC_INCLUDEDIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  configure_file(cmake/pkgconfig/${_pc}.pc.in pkgconfig/${_pc}.pc @ONLY)
+  file(RELATIVE_PATH _pc_to_prefix "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/pkgconfig" "${CMAKE_INSTALL_PREFIX}")
+  set(SOPE_PC_PREFIX "\${pcfiledir}/${_pc_to_prefix}")
+  set(SOPE_PC_LIBDIR "\${prefix}/${CMAKE_INSTALL_LIBDIR}")
+  set(SOPE_PC_INCLUDEDIR "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
+  configure_file(cmake/pkgconfig/${_pc}.pc.in install-pkgconfig/${_pc}.pc @ONLY)
+  install(FILES ${CMAKE_BINARY_DIR}/install-pkgconfig/${_pc}.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+endforeach()
+if(SOPE_BUILD_TESTS AND SOPE_GO_EXECUTABLE AND NOT SOPE_SANITIZE)
+  add_test(NAME sdk_go COMMAND ${CMAKE_COMMAND} -E env
+    "PKG_CONFIG_PATH=${CMAKE_BINARY_DIR}/pkgconfig" "CGO_ENABLED=1" "CGO_CFLAGS=" "CGO_LDFLAGS="
+    "SOPE_TEST_HTTP=${SOPE_CURL}"
+    "${SOPE_GO_EXECUTABLE}" test -a -count=1 -race ./...)
+  set_tests_properties(sdk_go PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bindings/go TIMEOUT 120)
+endif()

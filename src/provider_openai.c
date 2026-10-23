@@ -10,7 +10,7 @@
  * Options: openai.base_url (default https://api.openai.com/v1),
  * openai.api_key, model (required), openai.max_tokens.
  */
-#include "sope_internal.h"
+#include "agent.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +29,7 @@ typedef struct {
     sope_buf url, body, auth; /* kept for retries */
     char *ca_file;            /* option tls.ca_file, or NULL */
     sope_http *http;          /* NULL while waiting to retry */
+    int responses;
     int attempts;
     int emitted; /* output reached the host: retrying would duplicate it */
     sope_buf in; /* received bytes not yet parsed */
@@ -119,6 +120,9 @@ static void build_body(sope_call *c, sope_buf *b, const char *model)
     sope__buf_appends(b, ",\"stream\":true,\"stream_options\":{\"include_usage\":true}");
     sope__buf_appendf(b, ",\"max_tokens\":%llu", (unsigned long long)sope__call_max_tokens(c));
 
+    char *effort = sope__call_option(c, "reasoning.effort");
+    if (effort) { sope__buf_appends(b, ","); put_string(b, "reasoning_effort", effort, strlen(effort)); }
+    free(effort);
     sope__buf_appends(b, ",\"messages\":[");
     if (system && *system) {
         sope__buf_appends(b, "{\"role\":\"system\",");
@@ -191,6 +195,80 @@ static void build_body(sope_call *c, sope_buf *b, const char *model)
     sope__buf_appends(b, "}");
 }
 
+/* Stateless Responses requests replay complete output items. In particular,
+ * encrypted reasoning is opaque provider state and must survive tool rounds,
+ * history serialization and crash recovery without being summarized in place. */
+static void response_parts(sope_buf *b, const sope_message *m)
+{
+    sope__buf_appends(b, "[{\"type\":\"input_text\",");
+    put_string(b, "text", m->content, m->content_len);
+    sope__buf_appends(b, "}");
+    for (size_t i = 0; i < m->n_images; i++) {
+        sope__buf_appendf(b, ",{\"type\":\"input_image\",\"image_url\":\"data:%s;base64,", m->images[i].media_type);
+        sope__buf_append(b, m->images[i].data, m->images[i].len);
+        sope__buf_appends(b, "\"}");
+    }
+    sope__buf_appends(b, "]");
+}
+static void build_responses(sope_call *c, sope_buf *b, const char *model)
+{
+    sope__buf_appends(b, "{"); put_string(b, "model", model, strlen(model));
+    sope__buf_appendf(b, ",\"stream\":true,\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"max_output_tokens\":%llu",
+                     (unsigned long long)sope__call_max_tokens(c));
+    const char *system = sope__call_system(c);
+    if (system && *system) { sope__buf_appends(b, ","); put_string(b, "instructions", system, strlen(system)); }
+    char *effort = sope__call_option(c, "reasoning.effort");
+    if (effort) { sope__buf_appends(b, ",\"reasoning\":{"); put_string(b, "effort", effort, strlen(effort)); sope__buf_appends(b, "}"); }
+    free(effort);
+    sope__buf_appends(b, ",\"input\":[");
+    int first = 1;
+    for (const sope_message *m = sope__call_history(c)->head; m; m = m->next) {
+        if (m->response_items) {
+            size_t len = strlen(m->response_items);
+            if (len > 2) {
+                if (!first) sope__buf_appends(b, ","); first = 0;
+                sope__buf_append(b, m->response_items + 1, len - 2);
+            }
+            continue;
+        }
+        if (!first) sope__buf_appends(b, ","); first = 0;
+        if (m->role == SOPE__MSG_TOOL) {
+            sope__buf_appends(b, "{\"type\":\"function_call_output\",");
+            put_string(b, "call_id", m->tool_use_id, strlen(m->tool_use_id));
+            sope__buf_appends(b, ",\"output\":");
+            if (m->n_images) response_parts(b, m);
+            else sope__buf_append_json_string(b, m->content, m->content_len);
+            sope__buf_appends(b, "}");
+        } else {
+            sope__buf_appendf(b, "{\"role\":\"%s\",\"content\":", m->role == SOPE__MSG_ASSISTANT ? "assistant" : "user");
+            if (m->n_images) response_parts(b, m);
+            else sope__buf_append_json_string(b, m->content, m->content_len);
+            sope__buf_appends(b, "}");
+            for (size_t i = 0; i < m->n_tool_uses; i++) {
+                const sope_tool_use *u = &m->tool_uses[i];
+                sope__buf_appends(b, ",{\"type\":\"function_call\",");
+                put_string(b, "call_id", u->id, strlen(u->id)); sope__buf_appends(b, ",");
+                put_string(b, "name", u->name, strlen(u->name)); sope__buf_appends(b, ",");
+                put_string(b, "arguments", u->input, u->input_len); sope__buf_appends(b, "}");
+            }
+        }
+    }
+    sope__buf_appends(b, "]");
+    size_t n = sope__call_tool_count(c);
+    if (n) {
+        sope__buf_appends(b, ",\"tools\":[");
+        for (size_t i = 0; i < n; i++) {
+            const sope_tool_spec *t = sope__call_tool(c, i);
+            sope__buf_appends(b, i ? ",{\"type\":\"function\",\"strict\":false," : "{\"type\":\"function\",\"strict\":false,");
+            put_string(b, "name", t->name, strlen(t->name)); sope__buf_appends(b, ",");
+            put_string(b, "description", t->description, strlen(t->description));
+            sope__buf_appends(b, ",\"parameters\":"); sope__buf_appends(b, t->input_schema); sope__buf_appends(b, "}");
+        }
+        sope__buf_appends(b, "]");
+    }
+    sope__buf_appends(b, "}");
+}
+
 static sope_http *post(sope_call *c, oa_state *s)
 {
     const char *headers[3];
@@ -224,6 +302,7 @@ static void *oa_start(sope_call *c)
     char *base = sope__call_option(c, "openai.base_url");
     char *key = sope__call_option(c, "openai.api_key");
     char *model = sope__call_option(c, "model");
+    char *wire = sope__call_option(c, "openai.wire_api");
     char *image_model = sope__call_option(c, "image_model");
     oa_state *s = NULL;
     size_t base_len;
@@ -240,13 +319,20 @@ static void *oa_start(sope_call *c)
         sope__call_error(c, SOPE_ENOMEM, "openai: out of memory");
         goto done;
     }
+    if (wire && strcmp(wire, "chat") && strcmp(wire, "responses")) {
+        sope__call_error(c, SOPE_EINVAL, "openai.wire_api must be chat or responses"); oa_free(s); s = NULL; goto done;
+    }
+    if (key && (strchr(key, '\r') || strchr(key, '\n'))) {
+        sope__call_error(c, SOPE_EINVAL, "credential contains a line break"); oa_free(s); s = NULL; goto done;
+    }
+    s->responses = wire && !strcmp(wire, "responses");
     sope__buf_appends(&s->url, base ? base : "https://api.openai.com/v1");
     base_len = s->url.len;
     while (base_len && s->url.ptr[base_len - 1] == '/') base_len--;
     s->url.len = base_len;
-    sope__buf_appends(&s->url, "/chat/completions");
+    sope__buf_appends(&s->url, s->responses ? "/responses" : "/chat/completions");
     /* A model that reads images takes over once the conversation has any. */
-    build_body(c, &s->body, image_model && *image_model && history_has_images(sope__call_history(c)) ? image_model : model);
+    (s->responses ? build_responses : build_body)(c, &s->body, image_model && *image_model && history_has_images(sope__call_history(c)) ? image_model : model);
     if (key && *key) sope__buf_appendf(&s->auth, "Authorization: Bearer %s", key);
     s->ca_file = sope__call_option(c, "tls.ca_file");
     if (s->url.oom || s->body.oom || s->auth.oom) {
@@ -266,6 +352,7 @@ static void *oa_start(sope_call *c)
     }
 
 done:
+    free(wire);
     free(base);
     free(key);
     free(model);
@@ -308,6 +395,79 @@ static int usage_count(const sope_json *usage, const char *key, uint64_t *out)
     return (double)*out == n;
 }
 
+static int response_chunk(sope_call *c, oa_state *s, const sope_json *root)
+{
+    const char *type = sope__json_string(sope__json_get(root, "type"), NULL);
+    if (!type) goto invalid;
+    if (!strcmp(type, "response.output_text.delta")) {
+        size_t n; const char *text = sope__json_string(sope__json_get(root, "delta"), &n);
+        if (!text) goto invalid;
+        sope__call_text(c, text, n); s->emitted |= n > 0;
+    } else if (!strcmp(type, "response.reasoning_summary_text.delta")) {
+        size_t n; const char *text = sope__json_string(sope__json_get(root, "delta"), &n);
+        if (!text) goto invalid;
+        sope__call_thinking(c, text, n); s->emitted |= n > 0;
+    } else if (!strcmp(type, "response.completed")) {
+        const sope_json *response = sope__json_get(root, "response");
+        const char *status = sope__json_string(sope__json_get(response, "status"), NULL);
+        const sope_json *output = sope__json_get(response, "output");
+        if (!status || strcmp(status, "completed") || !output || output->type != SOPE_JSON_ARRAY) goto invalid;
+        sope_buf text = {0}, items = {0};
+        int ok = sope__json_canonical(&items, output, 0);
+        size_t calls = 0;
+        for (const sope_json *v = output->child; ok && v; v = v->next) {
+            const char *kind = sope__json_string(sope__json_get(v, "type"), NULL);
+            const sope_json *item_status = sope__json_get(v, "status");
+            if (!kind || (item_status && item_status->type != SOPE_JSON_NULL &&
+                (item_status->type != SOPE_JSON_STRING || strcmp(item_status->str, "completed")))) { ok = 0; break; }
+            if (!strcmp(kind, "function_call")) {
+                const char *id = sope__json_string(sope__json_get(v, "call_id"), NULL);
+                const char *name = sope__json_string(sope__json_get(v, "name"), NULL);
+                size_t len; const char *args = sope__json_string(sope__json_get(v, "arguments"), &len);
+                sope_json *arguments = args ? sope__json_parse(args, len) : NULL;
+                const sope_json *name_value = sope__json_get(v, "name"), *id_value = sope__json_get(v, "call_id");
+                ok = id && *id && strlen(id) == id_value->len && name &&
+                     sope__valid_name(name, name_value->len) && arguments && arguments->type == SOPE_JSON_OBJECT &&
+                     ++calls <= MAX_TOOL_CALLS && !sope__call_is_compaction(c);
+                for (size_t i = 0; ok && i < c->n_uses; i++) if (!strcmp(c->uses[i].id, id)) ok = 0;
+                if (ok) ok = sope__call_tool_use(c, id, name, args, len) == SOPE_OK;
+                sope__json_free(arguments);
+            } else if (!strcmp(kind, "message")) {
+                const sope_json *content = sope__json_get(v, "content");
+                if (!content || content->type != SOPE_JSON_ARRAY) { ok = 0; break; }
+                for (const sope_json *part = content->child; part; part = part->next) {
+                    const char *part_type = sope__json_string(sope__json_get(part, "type"), NULL);
+                    size_t len; const char *value = sope__json_string(sope__json_get(part, "text"), &len);
+                    if (!part_type || strcmp(part_type, "output_text") || !value) { ok = 0; break; }
+                    sope__buf_append(&text, value, len);
+                }
+            } else if (!strcmp(kind, "reasoning")) {
+                const char *encrypted = sope__json_string(sope__json_get(v, "encrypted_content"), NULL);
+                if (!encrypted || !*encrypted) { ok = 0; break; }
+            } else { ok = 0; break; }
+        }
+        /* Completion is authoritative; a mismatch means a corrupt/partial
+         * stream. Never dispatch a tool from an incomplete model response. */
+        if (c->text.len && (c->text.len != text.len || memcmp(c->text.ptr, text.ptr, text.len))) ok = 0;
+        if (ok && !text.oom && !items.oom) {
+            if (!c->text.len && text.len) sope__call_text(c, text.ptr, text.len);
+            c->response_items = items.ptr; items.ptr = NULL;
+            s->finish = calls ? 2 : 1; s->saw_done = 1;
+            const sope_json *usage = sope__json_get(response, "usage");
+            uint64_t input, out;
+            if (usage_count(usage, "input_tokens", &input) && usage_count(usage, "output_tokens", &out)) sope__call_usage(c, input, out);
+        } else ok = 0;
+        sope__buf_free(&text); sope__buf_free(&items);
+        if (!ok) goto invalid;
+    } else if (!strcmp(type, "response.failed") || !strcmp(type, "response.incomplete") || !strcmp(type, "error")) {
+        classify_error(c, sope__json_get(sope__json_get(root, "response"), "error"));
+        sope__call_error(c, SOPE_ERROR, "openai: %s", type); return 0;
+    }
+    return 1;
+invalid:
+    sope__call_error(c, SOPE_ERROR, "openai: invalid or incomplete Responses output");
+    return 0;
+}
 static int handle_chunk(sope_call *c, oa_state *s, const char *data, size_t n)
 {
     sope_json *root = sope__json_parse(data, n);
@@ -327,6 +487,7 @@ static int handle_chunk(sope_call *c, oa_state *s, const char *data, size_t n)
         return 0;
     }
 
+    if (s->responses) { int ok = response_chunk(c, s, root); sope__json_free(root); return ok; }
     choice = sope__json_at(sope__json_get(root, "choices"), 0);
     if (choice && s->finish) {
         sope__call_error(c, SOPE_ERROR, "openai: response content after finish_reason");

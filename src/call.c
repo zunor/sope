@@ -32,6 +32,7 @@ void sope__call_free(sope_call *c)
     sope__history_clear(&c->request);
     sope__buf_free(&c->text);
     sope__tool_uses_free(c->uses, c->n_uses);
+    free(c->response_items);
     free(c);
 }
 
@@ -72,7 +73,7 @@ char *sope__call_option(sope_call *c, const char *key)
 {
     char *v;
     pthread_mutex_lock(c->agent->mu);
-    v = sope__option_dup_locked(c->agent, key);
+    v = sope__option_dup_locked(!strcmp(key, "openai.api_key") ? c->agent->root : c->agent, key);
     pthread_mutex_unlock(c->agent->mu);
     return v;
 }

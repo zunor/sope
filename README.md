@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  C11 · C ABI · Bun / TypeScript · MIT
+  C11 · C ABI · Go · Bun / TypeScript · MIT
 </p>
 
 <p align="center">
@@ -25,7 +25,7 @@ The included `sope` executable puts that library to work in a full-screen termin
 
 | Capability | What it gives you |
 |---|---|
-| **One interface** | A C ABI for your application, with Bun/TypeScript bindings included. |
+| **One interface** | A C ABI for your application, with Go and Bun/TypeScript bindings included. |
 | **Useful tools, built in** | Read, edit, search, run commands, and fetch pages. Register your own tools when you need more. |
 | **Concurrency without dedicated threads** | A shared pool runs agents and parallel tool calls; waiting for a model or child agent releases the worker. |
 | **Context that carries forward** | Save and restore history, attach images, and compact long conversations. |
@@ -53,8 +53,8 @@ bun run tui -- "Explain how requests flow through this project."
 Prefer a release archive? It includes a single `sope` executable with libsope embedded:
 
 ```sh
-tar xzf sope-0.3.0-darwin-arm64.tar.gz
-sope-0.3.0-darwin-arm64/install.sh
+tar xzf sope-0.4.0-darwin-arm64.tar.gz
+sope-0.4.0-darwin-arm64/install.sh
 ```
 
 [Installation and first steps →](docs/guide/quickstart.md)
@@ -84,6 +84,8 @@ Each interactive demo opens alongside three prepared conversations, so you can e
 [Explore the terminal →](docs/guide/terminal.md) · [Reproduce the demos →](docs/guide/demos.md)
 
 ## Bring the agent to your app
+
+[Go SDK and durable host integration →](bindings/go/README.md)
 
 The library handles the agent loop. Your application handles the experience.
 

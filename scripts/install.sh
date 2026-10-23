@@ -36,7 +36,9 @@ echo "installed $prefix/bin/sope ($("$prefix/bin/sope" --version))"
 
 if [[ $with_lib == 1 ]]; then
   mkdir -p "$prefix/lib" "$prefix/include"
-  cp -P "$pkg"/lib/* "$prefix/lib/"
+  cp -RP "$pkg"/lib/. "$prefix/lib/"
+  mkdir -p "$prefix/share/sope/bindings"
+  cp -R "$pkg/bindings/go" "$prefix/share/sope/bindings/"
   install -m 644 "$pkg/include/sope.h" "$prefix/include/sope.h"
   echo "installed libsope and sope.h under $prefix"
 fi

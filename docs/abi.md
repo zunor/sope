@@ -2,7 +2,7 @@
 
 `include/sope.h` is the source of truth for the ABI. This document covers details that do not fit in header comments: the threading model, lifetimes, turn and subagent semantics, ownership, and guidance for language binding authors.
 
-> Current version: 0.3.0 (ABI 0.3). Compatibility rules (`sope_version_number()` returns the version actually loaded at runtime):
+> Current version: 0.4.0 (ABI 0.4). Compatibility rules (`sope_version_number()` returns the version actually loaded at runtime):
 > - From 1.0 onward, semantic versioning applies: a host compiled against X.Y can use any X.Z library where Z ≥ Y. Breaking changes require a new major version.
 > - Before 1.0, a minor version change may break the ABI: the host requires matching major and minor versions; patch versions may differ.
 >
@@ -252,7 +252,8 @@ Static assertions in `src/agent.c` enforce this layout.
 | 56 | `data_len` | u64 |
 | 64 | `code` | i32 |
 | 68 | `reserved` | u32 |
-| | Total | 72 bytes |
+| 72 | `sequence` | u64 |
+| | Total | 80 bytes |
 
 ## 9. Options and providers
 
@@ -419,3 +420,37 @@ Large host/built-in results are saved before generic preview clipping. Truncated
 Previews include an absolute path and byte count. `artifact_read({path, offset, limit})` reads zero-based byte ranges up to 32768 bytes, without the file reader's per-line clipping. Text previews still undergo UTF-8/control-character sanitization; archived bytes are unchanged. Existing file/shell tools can search these paths. Background `bash_output` advances its cursor only by the bytes returned, even when it falls behind the memory buffer.
 
 Archives outlive agent destruction. Durable agents keep them under their session directory; ephemeral agents use a private `/tmp/sope-artifacts-*` directory. The embedding host owns quota, retention and deletion. Do not delete referenced artifacts while a task needs recovery or evidence verification. Background jobs remain subject to the process lifecycle described above; the archive does not constitute a reconnectable job handle.
+
+
+## 12. Embedding contract (ABI 0.4)
+
+ABI 0.4 adds policy/sealing, idempotent admission, durable public event cursors,
+terminal outcome queries, and suspend/wait. Native session format is version 2;
+version 1 sessions are rejected without migration. See `include/sope.h` for exact
+signatures and [the Go SDK contract](../bindings/go/README.md) for the host recovery
+protocol and build/link instructions. SQLite stays inside libsope.
+
+A sealed configuration can only change its explicit `openai.api_key` credential.
+`openai.wire_api` accepts `chat` or `responses`; `reasoning.effort` accepts `none`,
+`minimal`, `low`, `medium`, `high` or `xhigh` (model support varies). Responses uses
+stateless full-input replay with encrypted reasoning items retained in history.
+See the [Responses streaming specification](https://developers.openai.com/api/reference/resources/responses/streaming-events)
+and [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning).
+
+The `sequence` field is the durable public stream cursor, zero for ephemeral
+agents or uncommitted failure notifications. Root terminal events share a
+transaction with the outcome and inbox completion. Tool receipts and their public
+completion events also share one transaction, including host reconciliation.
+A failed receipt commit leaves the operation unknown and emits an error, not a
+completion. Cancellation tool completions precede the terminal event.
+Live polling and durable replay are separate interfaces; polling does not
+acknowledge persistent events. Poll filters obsolete tool/permission commands
+after suspension or cancellation; already delivered commands remain the host's
+responsibility. Build durable projections from ordered replay pages and only
+advance the host cursor across pages actually applied, not a Poll/Status watermark.
+Public events may contain NUL bytes and retain their explicit lengths.
+
+Subprocess environments no longer inherit the host process environment. Unsealed
+C agents default to `PATH=/usr/bin:/bin` plus fixed noninteractive settings; an
+explicit policy environment replaces the default. Supply `HOME` explicitly for
+home-directory expansion. A policy is capability routing, not an OS sandbox.

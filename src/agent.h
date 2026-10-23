@@ -25,6 +25,7 @@ typedef struct ev_node {
     uint64_t turn_id;
     uint64_t call_id;
     uint64_t agent_id;
+    uint64_t sequence;
     char *name;
     size_t name_len;
     char *data;
@@ -35,6 +36,7 @@ typedef struct msg_node { /* queued input, one per turn */
     struct msg_node *next;
     uint64_t turn_id;
     int compact; /* sope_compact: text holds optional instructions */
+    char *request_key;
     int resume;
     uint64_t resume_round;
     char *text;
@@ -81,6 +83,7 @@ typedef struct pending_call {
     tool_run *run;  /* built-in waiting for sope_permit; NULL once answered */
     int done;
     int reported; /* TOOL_END already published, independently of commit success */
+    int permission; /* 1: waiting for host, 2: allowed, 0: dispatched */
     int is_error;
     char *content;
     size_t len;
@@ -130,6 +133,7 @@ typedef struct turn_state {
     uint64_t compact_before;    /* local request estimate before compaction */
     uint64_t compact_request_budget;
     int compact_retries, overflow_retried;
+    int terminal_committed;
     char *cwd;                  /* option cwd: where built-in tools work */
     permit_mode permit;         /* option permissions */
 } turn_state;
@@ -141,6 +145,7 @@ struct sope_call { /* a model call, as the loop holds it (call.c) */
     int compaction;       /* summarizes `request` instead of the agent's history */
     sope_history request; /* compaction only */
     sope_buf text;
+    char *response_items;
     sope_tool_use *uses;
     size_t n_uses, cap_uses;
     int failed; /* an error was reported */
@@ -174,6 +179,13 @@ struct sope_agent {
     int journal_failed;
     int recovering; /* scheduler stopped until explicit resume/reconciliation */
     char *artifact_dir;
+    char *session_id, *instance_id;
+    char *policy_json;
+    sope_json *policy;
+    char **environment;
+    int sealed, contract_required;
+    int suspending, suspended;
+    uint64_t event_sequence;
 
     /* ---- every agent, guarded by *mu ---- */
     tool_def *tools;
@@ -222,8 +234,20 @@ char *sope__option_dup_locked(sope_agent_t *a, const char *key);
 int sope__valid_name(const char *s, size_t n);
 /* journal.c; callers hold *mu unless noted. Commit before publication/effects. */
 int sope__journal_input(sope_agent_t *a, const msg_node *m);
+int sope__journal_duplicate(sope_agent_t *a, const msg_node *m, uint64_t *id);
+int sope__journal_event(sope_agent_t *a, ev_node *event);
+int sope__journal_terminal(sope_agent_t *a, int stop);
+int sope__journal_restore(sope_agent_t *a);
+int sope__journal_seal(sope_agent_t *a, const char *manifest);
+int sope__contract_ready_locked(sope_agent_t *a);
+int sope__policy_allows(const sope_agent_t *a, const char *name);
+int sope__policy_external(const sope_agent_t *a, const char *name);
+int sope__policy_authorize(const sope_agent_t *a);
+void sope__policy_free(sope_agent_t *a);
+char *sope__identity(void);
 int sope__journal_checkpoint(sope_agent_t *a, const char *kind, int terminal);
 int sope__journal_result(sope_agent_t *a, pending_call *p);
+int sope__journal_subagent_result(sope_agent_t *a, pending_call *p, int32_t stop);
 int sope__journal_artifact(sope_agent_t *a, uint64_t call, const char *path);
 int sope__storage_fail_locked(sope_agent_t *a, const char *message);
 void sope__journal_close(sope_agent_t *a);

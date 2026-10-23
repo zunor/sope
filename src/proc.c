@@ -34,7 +34,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-extern char **environ;
+
 
 #define HEAD_MAX (16 * 1024)
 #define TAIL_MAX (256 * 1024)
@@ -249,28 +249,30 @@ static int ensure_started_locked(void)
 }
 
 /* environ with our overrides: commands run without a terminal or a pager. */
-static char **child_env(void)
+static char **child_env(char *const *base)
 {
     static const char *const overrides[] = { "PAGER=cat", "GIT_PAGER=cat", "GIT_TERMINAL_PROMPT=0",
                                              "TERM=dumb", "NO_COLOR=1" };
+    static char *defaults[] = { "PATH=/usr/bin:/bin", NULL };
+    if (!base) base = defaults;
     size_t n = 0, k = 0, i, j;
     char **env;
-    while (environ && environ[n]) n++;
+    while (base[n]) n++;
     env = calloc(n + sizeof overrides / sizeof overrides[0] + 1, sizeof *env);
     if (!env) return NULL;
     for (i = 0; i < n; i++) {
         int shadowed = 0;
         for (j = 0; j < sizeof overrides / sizeof overrides[0]; j++) {
             size_t klen = (size_t)(strchr(overrides[j], '=') - overrides[j]);
-            if (!strncmp(environ[i], overrides[j], klen + 1)) shadowed = 1;
+            if (!strncmp(base[i], overrides[j], klen + 1)) shadowed = 1;
         }
-        if (!shadowed) env[k++] = environ[i];
+        if (!shadowed) env[k++] = base[i];
     }
     for (j = 0; j < sizeof overrides / sizeof overrides[0]; j++) env[k++] = (char *)overrides[j];
     return env;
 }
 
-sope_proc *sope__proc_start(const char *command, const char *cwd, sope_task *wake, int archive_fd,
+sope_proc *sope__proc_start(const char *command, const char *cwd, char *const *environment, sope_task *wake, int archive_fd,
                            const char *archive_path, char *err, size_t errlen)
 {
     static const char prologue[] = "cd -- \"$1\" || exit 1\nshift\n";
@@ -289,7 +291,7 @@ sope_proc *sope__proc_start(const char *command, const char *cwd, sope_task *wak
     sope__buf_appends(&script, command);
     p = calloc(1, sizeof *p);
     if (p) { p->archive_fd = archive_fd; p->archive_path = sope__strdup(archive_path); }
-    env = child_env();
+    env = child_env(environment);
     if (!p || !p->archive_path || !env || script.oom) {
         snprintf(err, errlen, "out of memory");
         goto fail;

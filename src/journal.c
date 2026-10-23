@@ -31,6 +31,7 @@ int sope__storage_fail_locked(sope_agent_t *a, const char *msg)
         root->cancel_requested = 1;
         sope__push_event_locked(root, SOPE_EVENT_ERROR, root->active_turn, 0, SOPE_ERROR,
                                NULL, 0, msg, strlen(msg));
+        pthread_cond_broadcast(&root->poll_cv);
         sope__task_wake(&root->task);
     }
     return 0;
@@ -78,13 +79,15 @@ int sope__journal_input(sope_agent_t *a, const msg_node *m)
     char *body = one_message(&user);
     sqlite3 *db = a->root->journal->db;
     int ok = body && sql(db, "BEGIN IMMEDIATE") && audit(a, "input", m->turn_id, 0, body);
-    if (ok && !a->parent) ok = sql(db, "INSERT INTO inbox(id,compact,payload,status) VALUES(%lld,%d,%Q,0)",
-                                  (long long)m->turn_id, m->compact, body);
+    if (ok && !a->parent) ok = sql(db, "INSERT INTO inbox(id,compact,payload,status,request_key) VALUES(%lld,%d,%Q,0,%Q)",
+                                  (long long)m->turn_id, m->compact, body, m->request_key);
     if (ok) ok = sql(db, "COMMIT");
     if (!ok) sql(db, "ROLLBACK");
     free(body);
     return ok || fail(a);
 }
+
+static int stream_event(sope_agent_t *a, const ev_node *e);
 
 int sope__journal_checkpoint(sope_agent_t *a, const char *kind, int terminal)
 {
@@ -96,6 +99,7 @@ int sope__journal_checkpoint(sope_agent_t *a, const char *kind, int terminal)
     char *fact = !strcmp(kind, "model") || !strcmp(kind, "end") ? one_message(a->history.tail) : NULL;
     const char *body = !strcmp(kind, "compact") || !strcmp(kind, "import") ? history : fact;
     uint64_t id = a->turn.active ? sope__turn_id(a) : 0;
+    uint64_t sequence = a->root->event_sequence;
     int ok = history && (strcmp(kind, "model") || fact) && sql(db, "BEGIN IMMEDIATE") &&
              audit(a, kind, id, 0, body);
     if (ok && !strcmp(kind, "model")) {
@@ -103,14 +107,36 @@ int sope__journal_checkpoint(sope_agent_t *a, const char *kind, int terminal)
         if (m) for (size_t i = 0; ok && i < m->n_tool_uses; i++)
             ok = audit(a, "intent", id, m->tool_uses[i].call_id, m->tool_uses[i].input);
     }
+    if (ok && !strcmp(kind, "compact")) {
+        const sope_call *c = a->turn.call;
+        int manual = a->turn.msg && a->turn.msg->compact;
+        ev_node compact = { .type = SOPE_EVENT_COMPACT, .turn_id = id, .agent_id = a->agent_id,
+            .name = manual ? "manual" : "auto", .name_len = manual ? 6 : 4,
+            .data = c ? c->text.ptr : NULL, .data_len = c ? c->text.len : 0 };
+        ok = c && stream_event(a, &compact);
+    }
+    /* Cancellation completions precede TURN_END in both replay and live order. */
+    if (ok && terminal) for (pending_call *p = a->root->pending; ok && p; p = p->next) {
+        if (p->owner != a || p->done || p->reported || p->kind == PENDING_SUBAGENT) continue;
+        ev_node end = { .type = SOPE_EVENT_TOOL_END, .agent_id = a->agent_id,
+            .turn_id = p->turn_id, .call_id = p->call_id, .code = 1,
+            .name = p->name, .name_len = strlen(p->name), .data = "Cancelled.", .data_len = 10 };
+        ok = stream_event(a, &end);
+    }
     if (ok && !a->parent) {
         ok = sql(db, "UPDATE state SET history=%Q,active=%lld,round=%lld,next_call=%lld,tokens=%lld,estimate=%lld WHERE id=1",
                  history, (long long)(terminal ? 0 : id), (long long)a->turn.round,
                  (long long)a->next_call_id, (long long)a->context_tokens, (long long)a->context_estimate);
         if (ok && id) ok = sql(db, "UPDATE inbox SET status=%d WHERE id=%lld", terminal ? 2 : 1, (long long)id);
+        if (ok && terminal && id) ok = sope__journal_terminal(a, a->last_stop);
+    }
+    if (ok && terminal && a->parent) {
+        ev_node end = { .type = SOPE_EVENT_TURN_END, .agent_id = a->agent_id,
+            .turn_id = id, .code = a->last_stop };
+        ok = stream_event(a, &end);
     }
     if (ok) ok = sql(db, "COMMIT");
-    if (!ok) sql(db, "ROLLBACK");
+    if (!ok) { sql(db, "ROLLBACK"); a->root->event_sequence = sequence; }
     free(fact);
     free(history);
     return ok || fail(a);
@@ -124,23 +150,46 @@ static const sope_tool_use *find_use(sope_agent_t *a, uint64_t id)
     return NULL;
 }
 
+/* A receipt and its public completion are one durable fact. Publish while the
+ * root lock is still held so live sequence order matches the committed stream. */
+static int commit_result(sope_agent_t *a, pending_call *p, uint32_t type, int32_t code)
+{
+    ev_node event = { .type = type, .agent_id = a->agent_id, .turn_id = p->turn_id,
+        .call_id = p->call_id, .code = code, .data = p->content, .data_len = p->len,
+        .name = type == SOPE_EVENT_TOOL_END ? p->name : NULL,
+        .name_len = type == SOPE_EVENT_TOOL_END ? strlen(p->name) : 0 };
+    if (a->root->journal) {
+        if (a->root->journal_failed) return 0;
+        const sope_tool_use *u = find_use(a, p->call_id);
+        if (!u) return fail(a);
+        sope_message msg = { .role = SOPE__MSG_TOOL, .content = p->content, .content_len = p->len,
+            .tool_use_id = u->id, .tool_name = p->name, .is_error = p->is_error,
+            .images = p->images, .n_images = p->n_images };
+        char *body = one_message(&msg);
+        sqlite3 *db = a->root->journal->db;
+        uint64_t sequence = a->root->event_sequence;
+        int ok = body && sql(db, "BEGIN IMMEDIATE") && audit(a, "result", p->turn_id, p->call_id, body) &&
+            sql(db, "INSERT INTO results(call,payload) VALUES(%lld,%Q)", (long long)p->call_id, body) &&
+            stream_event(a, &event);
+        if (ok) ok = sql(db, "COMMIT");
+        if (!ok) { sql(db, "ROLLBACK"); a->root->event_sequence = sequence; }
+        free(body);
+        if (!ok) return fail(a);
+    }
+    sope__push_event_locked(a, event.type, event.turn_id, event.call_id, event.code,
+                           event.name, event.name_len, event.data, event.data_len);
+    p->reported = 1;
+    return 1;
+}
+
 int sope__journal_result(sope_agent_t *a, pending_call *p)
 {
-    if (!a->root->journal) return 1;
-    if (a->root->journal_failed) return 0;
-    const sope_tool_use *u = find_use(a, p->call_id);
-    if (!u) return fail(a);
-    sope_message msg = { .role = SOPE__MSG_TOOL, .content = p->content, .content_len = p->len,
-                        .tool_use_id = u->id, .tool_name = p->name, .is_error = p->is_error,
-                        .images = p->images, .n_images = p->n_images };
-    char *body = one_message(&msg);
-    sqlite3 *db = a->root->journal->db;
-    int ok = body && sql(db, "BEGIN IMMEDIATE") && audit(a, "result", p->turn_id, p->call_id, body) &&
-             sql(db, "INSERT INTO results(call,payload) VALUES(%lld,%Q)", (long long)p->call_id, body);
-    if (ok) ok = sql(db, "COMMIT");
-    if (!ok) sql(db, "ROLLBACK");
-    free(body);
-    return ok || fail(a);
+    return commit_result(a, p, SOPE_EVENT_TOOL_END, p->is_error);
+}
+
+int sope__journal_subagent_result(sope_agent_t *a, pending_call *p, int32_t stop)
+{
+    return commit_result(a, p, SOPE_EVENT_SUBAGENT_END, stop);
 }
 
 int sope__journal_artifact(sope_agent_t *a, uint64_t call, const char *path)
@@ -173,7 +222,7 @@ static int answered(const sope_message *asst, const sope_tool_use *u)
     return 0;
 }
 
-static int restore(sope_agent_t *a)
+int sope__journal_restore(sope_agent_t *a)
 {
     sqlite3 *db = a->journal->db;
     sqlite3_stmt *s = NULL;
@@ -276,15 +325,28 @@ int sope_agent_open(sope_agent_t **out, const char *directory)
     if (sqlite3_prepare_v2(j->db, "PRAGMA user_version", -1, &version, NULL) != SQLITE_OK) goto bad;
     int schema = sqlite3_step(version) == SQLITE_ROW ? sqlite3_column_int(version, 0) : -1;
     sqlite3_finalize(version);
-    if (schema != 0 && schema != 1) goto bad;
+    if (schema != 0 && schema != 2) goto bad;
     if (!sql(j->db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=3000;"
         "CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1),history TEXT NOT NULL,active INTEGER NOT NULL,round INTEGER NOT NULL,next_call INTEGER NOT NULL,tokens INTEGER NOT NULL,estimate INTEGER NOT NULL);"
         "INSERT OR IGNORE INTO state VALUES(1,'[]',0,0,0,0,0);"
-        "CREATE TABLE IF NOT EXISTS inbox(id INTEGER PRIMARY KEY,compact INTEGER NOT NULL,payload TEXT NOT NULL,status INTEGER NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS inbox(id INTEGER PRIMARY KEY,compact INTEGER NOT NULL,payload TEXT NOT NULL,status INTEGER NOT NULL,request_key TEXT UNIQUE);"
         "CREATE TABLE IF NOT EXISTS results(call INTEGER PRIMARY KEY,payload TEXT NOT NULL);"
         "CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY,kind TEXT NOT NULL,agent INTEGER NOT NULL,turn INTEGER NOT NULL,call INTEGER NOT NULL,payload TEXT NOT NULL);"
-        "PRAGMA user_version=1;")) goto bad;
-    if (!restore(a)) goto bad;
+        "CREATE TABLE IF NOT EXISTS runtime(id INTEGER PRIMARY KEY CHECK(id=1),session_id TEXT NOT NULL,manifest TEXT);"
+        "CREATE TABLE IF NOT EXISTS stream(seq INTEGER PRIMARY KEY AUTOINCREMENT,type INTEGER NOT NULL,agent INTEGER NOT NULL,turn INTEGER NOT NULL,call INTEGER NOT NULL,code INTEGER NOT NULL,name TEXT NOT NULL,data TEXT NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS outcomes(turn INTEGER PRIMARY KEY,payload TEXT NOT NULL);"
+        "CREATE INDEX IF NOT EXISTS stream_origin ON stream(agent,turn,type,seq);"
+        "PRAGMA user_version=2;")) goto bad;
+    if (!sql(j->db, "INSERT OR IGNORE INTO runtime VALUES(1,%Q,NULL)", a->session_id)) goto bad;
+    sqlite3_stmt *identity = NULL;
+    if (sqlite3_prepare_v2(j->db, "SELECT session_id,manifest IS NOT NULL,(SELECT COALESCE(MAX(seq),0) FROM stream) FROM runtime WHERE id=1", -1, &identity, NULL) != SQLITE_OK) goto bad;
+    if (sqlite3_step(identity) != SQLITE_ROW) { sqlite3_finalize(identity); goto bad; }
+    free(a->session_id);
+    a->session_id = sope__strdup((const char *)sqlite3_column_text(identity, 0));
+    a->contract_required = sqlite3_column_int(identity, 1);
+    a->event_sequence = (uint64_t)sqlite3_column_int64(identity, 2);
+    sqlite3_finalize(identity);
+    if (!a->session_id || !sope__journal_restore(a)) goto bad;
     sope__buf_free(&path); free(dir); *out = a;
     return SOPE_OK;
 bad:
@@ -344,10 +406,26 @@ int sope_agent_resolve(sope_agent_t *a, uint64_t call, int error, const char *co
 {
     if (!a || (!content && len)) return sope__set_error(SOPE_EINVAL, "invalid reconciliation arguments");
     pthread_mutex_lock(a->mu);
+    if (a->closing || a->journal_failed || !sope__contract_ready_locked(a)) {
+        pthread_mutex_unlock(a->mu); return sope__set_error(SOPE_EBUSY, "cannot reconcile closed, failed or unsealed session");
+    }
     pending_call *p = sope__pending_find_locked(a, call, PENDING_TOOL);
     if (!a->recovering || !p || p->done) { pthread_mutex_unlock(a->mu); return sope__set_error(SOPE_ENOTFOUND, "no unresolved interrupted call with this ID"); }
-    p->content = sope__strndup(content ? content : "", len); p->len = len; p->is_error = error != 0;
-    int ok = p->content && sope__journal_result(a, p);
+    pthread_mutex_unlock(a->mu);
+    sope_buf output = {0}; sope__buf_append(&output, content ? content : "", len);
+    if (!sope__artifact_preview(a, call, &output, 512 * 1024)) {
+        sope__buf_free(&output); return sope__set_error(SOPE_ERROR, "cannot archive reconciled tool output");
+    }
+    pthread_mutex_lock(a->mu);
+    p = sope__pending_find_locked(a, call, PENDING_TOOL);
+    if (!a->recovering || !p || p->done || a->closing || a->journal_failed) {
+        pthread_mutex_unlock(a->mu); sope__buf_free(&output);
+        return sope__set_error(SOPE_ENOTFOUND, "interrupted call was already reconciled");
+    }
+    p->content = output.ptr; p->len = output.len; p->is_error = error != 0;
+    int ok = p->content && (!strcmp(p->name, SOPE__AGENT_TOOL)
+        ? sope__journal_subagent_result(a, p, p->is_error ? SOPE_STOP_ERROR : SOPE_STOP_END_TURN)
+        : sope__journal_result(a, p));
     if (ok) p->done = 1;
     else { free(p->content); p->content = NULL; p->len = 0; }
     pthread_mutex_unlock(a->mu);
@@ -358,7 +436,7 @@ int sope_agent_resume(sope_agent_t *a)
 {
     if (!a) return sope__set_error(SOPE_EINVAL, "agent is required");
     pthread_mutex_lock(a->mu);
-    if (!a->recovering || a->closing || a->journal_failed) { pthread_mutex_unlock(a->mu); return sope__set_error(SOPE_EBUSY, "session is not awaiting resume, is closed, or has a storage failure"); }
+    if ((!a->recovering && !a->suspended) || a->closing || a->journal_failed || !sope__contract_ready_locked(a)) { pthread_mutex_unlock(a->mu); return sope__set_error(SOPE_EBUSY, "session is not awaiting resume, is closed, or has a storage failure"); }
     for (pending_call *p = a->pending; p; p = p->next) if (!p->done) {
         pthread_mutex_unlock(a->mu);
         return sope__set_error(SOPE_EBUSY, "interrupted tools have unknown outcomes; reconcile each call before resuming");
@@ -374,8 +452,163 @@ int sope_agent_resume(sope_agent_t *a)
         sope__history_append(&a->history, m);
     }
     while (a->pending) { pending_call *p = a->pending; a->pending = p->next; sope__pending_free(p); }
-    a->recovering = 0;
+    a->recovering = a->suspended = 0;
     sope__task_wake(&a->task);
     pthread_mutex_unlock(a->mu);
     return SOPE_OK;
+}
+
+/* The host consumes a separate public stream; internal audit facts remain an
+ * implementation detail. A terminal stream event and outcome share the same
+ * transaction as the final checkpoint. */
+static int stream_event(sope_agent_t *a, const ev_node *e)
+{
+    if (!a->root->journal) return 1;
+    sqlite3 *db = a->root->journal->db;
+    sqlite3_stmt *stmt = NULL;
+    int ok = sqlite3_prepare_v2(db, "INSERT INTO stream(type,agent,turn,call,code,name,data) VALUES(?,?,?,?,?,?,?)", -1, &stmt, NULL) == SQLITE_OK;
+    if (ok) {
+        sqlite3_bind_int(stmt, 1, (int)e->type);
+        sqlite3_bind_int64(stmt, 2, (sqlite3_int64)e->agent_id);
+        sqlite3_bind_int64(stmt, 3, (sqlite3_int64)e->turn_id);
+        sqlite3_bind_int64(stmt, 4, (sqlite3_int64)e->call_id);
+        sqlite3_bind_int(stmt, 5, e->code);
+        ok = sqlite3_bind_text64(stmt, 6, e->name ? e->name : "", e->name_len, SQLITE_STATIC, SQLITE_UTF8) == SQLITE_OK &&
+             sqlite3_bind_text64(stmt, 7, e->data ? e->data : "", e->data_len, SQLITE_STATIC, SQLITE_UTF8) == SQLITE_OK &&
+             sqlite3_step(stmt) == SQLITE_DONE;
+    }
+    if (ok) a->root->event_sequence = (uint64_t)sqlite3_last_insert_rowid(db);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+int sope__journal_event(sope_agent_t *a, ev_node *e)
+{
+    if (!a->root->journal || a->root->journal_failed) return 1;
+    int completion = e->type == SOPE_EVENT_TOOL_END || e->type == SOPE_EVENT_SUBAGENT_END;
+    if (e->type == SOPE_EVENT_TURN_END || e->type == SOPE_EVENT_COMPACT || completion) {
+        sqlite3_stmt *s = NULL;
+        if (sqlite3_prepare_v2(a->root->journal->db, "SELECT seq FROM stream WHERE type=? AND turn=? AND agent=? AND call=? ORDER BY seq DESC LIMIT 1", -1, &s, NULL) != SQLITE_OK) return fail(a);
+        sqlite3_bind_int(s, 1, (int)e->type); sqlite3_bind_int64(s, 2, (sqlite3_int64)e->turn_id);
+        sqlite3_bind_int64(s, 3, (sqlite3_int64)e->agent_id);
+        sqlite3_bind_int64(s, 4, (sqlite3_int64)e->call_id);
+        int step = sqlite3_step(s);
+        if (step == SQLITE_ROW) e->sequence = (uint64_t)sqlite3_column_int64(s, 0);
+        sqlite3_finalize(s);
+        if (step == SQLITE_ROW) return 1;
+        if (step != SQLITE_DONE || !completion) return fail(a);
+    }
+    return stream_event(a, e) || fail(a);
+}
+int sope__journal_terminal(sope_agent_t *a, int stop)
+{
+    const sope_message *last = stop == SOPE_STOP_END_TURN && !a->turn.msg->compact ? a->history.tail : NULL;
+    if (last && (last->role != SOPE__MSG_ASSISTANT || last->n_tool_uses)) last = NULL;
+    sope_buf b = {0};
+    uint64_t id = sope__turn_id(a);
+    sope__buf_appendf(&b, "{\"turn_id\":\"%" PRIu64 "\",\"stop\":%d,\"final\":", id, stop);
+    sope__buf_append_json_string(&b, last && last->content ? last->content : "", last ? last->content_len : 0);
+    sope__buf_appends(&b, "}");
+    ev_node event = { .type = SOPE_EVENT_TURN_END, .turn_id = id, .code = stop };
+    int ok = !b.oom && sql(a->journal->db, "INSERT INTO outcomes VALUES(%lld,%Q)", (long long)id, b.ptr) && stream_event(a, &event);
+    sope__buf_free(&b);
+    return ok;
+}
+int sope__journal_duplicate(sope_agent_t *a, const msg_node *m, uint64_t *id)
+{
+    if (!m->request_key) return 0;
+    if (!a->journal) return sope__set_error(SOPE_EINVAL, "idempotent submit requires a durable session");
+    sope_message user = { .role = SOPE__MSG_USER, .content = m->text, .content_len = m->len,
+                          .images = a->attached, .n_images = a->n_attached };
+    char *body = one_message(&user);
+    sqlite3_stmt *s = NULL;
+    int rc = SOPE_ERROR;
+    if (!body || sqlite3_prepare_v2(a->journal->db, "SELECT id,payload FROM inbox WHERE request_key=?", -1, &s, NULL) != SQLITE_OK) goto out;
+    sqlite3_bind_text(s, 1, m->request_key, -1, SQLITE_STATIC);
+    int step = sqlite3_step(s);
+    if (step == SQLITE_DONE) rc = 0;
+    else if (step == SQLITE_ROW) {
+        rc = strcmp(body, (const char *)sqlite3_column_text(s, 1)) ? SOPE_ECONFLICT : 1;
+        if (rc == 1 && id) *id = (uint64_t)sqlite3_column_int64(s, 0);
+    }
+out:
+    sqlite3_finalize(s); free(body);
+    if (rc < 0) sope__set_error(rc, "request key conflicts or journal lookup failed");
+    return rc;
+}
+int sope__journal_seal(sope_agent_t *a, const char *manifest)
+{
+    if (!a->journal) return SOPE_OK;
+    sqlite3_stmt *s = NULL;
+    int rc = SOPE_ERROR;
+    if (sqlite3_prepare_v2(a->journal->db, "SELECT manifest FROM runtime WHERE id=1", -1, &s, NULL) != SQLITE_OK) goto out;
+    if (sqlite3_step(s) != SQLITE_ROW) goto out;
+    const char *old = (const char *)sqlite3_column_text(s, 0);
+    if (old && strcmp(old, manifest)) { rc = SOPE_ECONFLICT; goto out; }
+    sqlite3_finalize(s); s = NULL;
+    if (!sql(a->journal->db, "UPDATE runtime SET manifest=%Q WHERE id=1", manifest)) goto out;
+    a->contract_required = 1;
+    rc = SOPE_OK;
+out:
+    sqlite3_finalize(s);
+    if (rc) sope__set_error(rc, "execution configuration differs from the session contract, or storage failed");
+    return rc;
+}
+static int return_json(sope_agent_t *a, sope_buf *b, const char **json, size_t *len)
+{
+    if (b->oom || !b->ptr) { sope__buf_free(b); return SOPE_ENOMEM; }
+    free(a->history_json); a->history_json = b->ptr; *json = b->ptr;
+    if (len) *len = b->len;
+    return SOPE_OK;
+}
+int sope_agent_status(sope_agent_t *a, const char **json, size_t *len)
+{
+    if (!a || !json) return SOPE_EINVAL;
+    pthread_mutex_lock(a->mu);
+    const char *state = a->closed ? "closed" : a->journal_failed ? "storage_failed" : a->closing ? "closing" :
+        a->suspending ? "suspending" : a->recovering ? "recovering" : a->suspended ? "suspended" :
+        a->active_turn ? "running" : a->in_head ? "queued" : "idle";
+    sope_buf b = {0};
+    sope__buf_appendf(&b, "{\"session_id\":\"%s\",\"instance_id\":\"%s\",\"state\":\"%s\",\"active_turn\":\"%" PRIu64 "\",\"last_sequence\":\"%" PRIu64 "\",\"sealed\":%s}",
+        a->session_id, a->instance_id, state, a->active_turn, a->event_sequence, a->sealed ? "true" : "false");
+    int rc = return_json(a, &b, json, len);
+    pthread_mutex_unlock(a->mu);
+    return rc;
+}
+int sope_agent_events(sope_agent_t *a, uint64_t after, uint32_t limit, const char **json, size_t *len)
+{
+    if (!a || !a->journal || !json || !limit || limit > 256 || after > INT64_MAX) return SOPE_EINVAL;
+    pthread_mutex_lock(a->mu);
+    sope_buf b = {0}; sqlite3_stmt *s = NULL; int rc = SOPE_ERROR;
+    if (sqlite3_prepare_v2(a->journal->db, "SELECT seq,type,agent,turn,call,code,name,data FROM stream WHERE seq>? ORDER BY seq LIMIT ?", -1, &s, NULL) != SQLITE_OK) goto out;
+    sqlite3_bind_int64(s, 1, (sqlite3_int64)after); sqlite3_bind_int(s, 2, (int)limit);
+    sope__buf_appends(&b, "["); int step, n = 0;
+    while ((step = sqlite3_step(s)) == SQLITE_ROW) {
+        sope__buf_appendf(&b, "%s{\"sequence\":\"%lld\",\"type\":%d,\"agent_id\":\"%lld\",\"turn_id\":\"%lld\",\"call_id\":\"%lld\",\"code\":%d,\"name\":", n++ ? "," : "", sqlite3_column_int64(s,0), sqlite3_column_int(s,1), sqlite3_column_int64(s,2), sqlite3_column_int64(s,3), sqlite3_column_int64(s,4), sqlite3_column_int(s,5));
+        sope__buf_append_json_string(&b, (const char *)sqlite3_column_text(s,6), (size_t)sqlite3_column_bytes(s,6));
+        sope__buf_appends(&b, ",\"data\":");
+        sope__buf_append_json_string(&b, (const char *)sqlite3_column_text(s,7), (size_t)sqlite3_column_bytes(s,7));
+        sope__buf_appends(&b, "}");
+    }
+    sope__buf_appends(&b, "]");
+    if (step == SQLITE_DONE) { rc = return_json(a, &b, json, len); b.ptr = NULL; }
+out:
+    sqlite3_finalize(s); sope__buf_free(&b); pthread_mutex_unlock(a->mu);
+    return rc;
+}
+int sope_agent_outcome(sope_agent_t *a, uint64_t id, const char **json, size_t *len)
+{
+    if (!a || !a->journal || !json || id > INT64_MAX) return SOPE_EINVAL;
+    pthread_mutex_lock(a->mu);
+    sqlite3_stmt *s = NULL; int rc = SOPE_ERROR;
+    if (sqlite3_prepare_v2(a->journal->db, "SELECT payload FROM outcomes WHERE turn=?", -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(s, 1, (sqlite3_int64)id);
+        int step = sqlite3_step(s);
+        if (step == SQLITE_DONE) rc = SOPE_ENOTFOUND;
+        else if (step == SQLITE_ROW) {
+            sope_buf b = {0}; sope__buf_appends(&b, (const char *)sqlite3_column_text(s,0));
+            rc = return_json(a, &b, json, len);
+        }
+    }
+    sqlite3_finalize(s); pthread_mutex_unlock(a->mu);
+    return rc;
 }

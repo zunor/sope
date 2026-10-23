@@ -121,7 +121,9 @@ static char *normalize(const char *p)
 
 char *sope__run_path(tool_run *r, const char *path)
 {
-    const char *home = getenv("HOME");
+    const char *home = NULL;
+    char **env = r->agent->root->environment;
+    if (env) for (size_t i = 0; env[i]; i++) if (!strncmp(env[i], "HOME=", 5)) home = env[i] + 5;
     sope_buf b = { 0 };
     char *norm;
     if (path[0] == '~' && (path[1] == '/' || !path[1]) && home && *home) {
@@ -234,8 +236,6 @@ static void run_closed(sope_task *task)
         r->out.ptr = NULL;
         r->out.len = r->out.cap = 0;
     }
-    sope__push_event_locked(a, SOPE_EVENT_TOOL_END, r->turn_id, r->call_id, p && p->done ? r->is_error : 1, r->tool->name,
-                     strlen(r->tool->name), p && p->done && p->content ? p->content : "Result not committed", p && p->done && p->content ? p->len : 20);
     for (pp = &a->runs; *pp; pp = &(*pp)->next)
         if (*pp == r) {
             *pp = r->next;

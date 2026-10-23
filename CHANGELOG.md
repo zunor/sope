@@ -2,6 +2,24 @@
 
 The version in `include/sope.h` is authoritative. The library, bindings, and `sope` executable are released together; see [docs/release.md](docs/release.md) for the policy.
 
+## 0.4.0 — 2026-10-23
+
+- Add a Go SDK with typed lifecycle, recovery, durable receipts, event replay,
+  terminal outcomes and context-aware waits; include shared/static pkg-config
+  metadata. SQLite remains private inside libsope.
+- Commit tool receipts with replayable completion events; preserve committed
+  cursors on rollback, filter stale live commands after suspension, and make
+  SDK handle contention interruptible by context cancellation and close.
+- Seal host execution contracts; provide tool allowlists, all-tool authorization,
+  external execution routing and isolated per-agent subprocess environments.
+- Add resumable suspension, stable session/open identities and atomic terminal
+  checkpoint/outcome/event commits. Session format 2 rejects older databases.
+- Support stateless Responses API requests, reasoning effort and encrypted
+  reasoning replay across tool rounds and recovery; retain Chat Completions.
+- Bump the event ABI to 80 bytes with a durable sequence field. Extend native and
+  Go tests for SIGKILL, concurrency, repeated recovery, output archives and
+  incomplete model responses.
+
 ## Unreleased
 
 Adds permission modes, a model picker, and slash-command suggestions, and improves the tab bar, status animation, and tool output interactions. Also strengthens context compaction and adds durable execution, isolated file mutations, and complete output archives. New C recovery functions are exported; the event layout is unchanged.

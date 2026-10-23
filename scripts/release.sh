@@ -81,6 +81,11 @@ else
   cp "$build/libsope.a" "$stage/lib/libsope.a" # SQLite inside; link with -lcurl
 fi
 cp include/sope.h "$stage/include/"
+mkdir -p "$stage/lib/pkgconfig" "$stage/bindings"
+cp "$build/install-pkgconfig/sope.pc" "$build/install-pkgconfig/sope-static.pc" "$stage/lib/pkgconfig/"
+# The release archive gives the complete static artifact the standard name.
+perl -pi -e 's/libsope-bundled\.a/libsope.a/g' "$stage/lib/pkgconfig/sope-static.pc"
+cp -R bindings/go "$stage/bindings/go"
 cp -R docs/. "$stage/docs/"
 cp README.md CHANGELOG.md "$stage/"
 cp scripts/install.sh "$stage/install.sh"

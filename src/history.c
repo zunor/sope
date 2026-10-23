@@ -33,6 +33,7 @@ void sope__message_free(sope_message *m)
 {
     if (!m) return;
     sope__images_free(m->images, m->n_images);
+    free(m->response_items);
     free(m->content);
     sope__tool_uses_free(m->tool_uses, m->n_tool_uses);
     free(m->tool_use_id);
@@ -140,6 +141,10 @@ static void append_message_json(sope_buf *b, const sope_message *m)
     size_t i;
     sope__buf_appendf(b, "{\"role\":\"%s\",\"content\":", ROLE_NAMES[m->role]);
     sope__buf_append_json_string(b, m->content, m->content_len);
+    if (m->response_items) {
+        sope__buf_appends(b, ",\"response_items\":");
+        sope__buf_appends(b, m->response_items);
+    }
     if (m->is_summary) sope__buf_appends(b, ",\"summary\":true");
     if (m->role == SOPE__MSG_ASSISTANT && m->n_tool_uses) {
         sope__buf_appends(b, ",\"tool_uses\":[");
@@ -232,6 +237,15 @@ static int message_from_json(const sope_json *v, size_t index, sope_message **ou
     }
     if (!m) return SOPE_ENOMEM;
 
+    const sope_json *items = sope__json_get(v, "response_items");
+    if (items) {
+        sope_buf raw = {0};
+        if (m->role != SOPE__MSG_ASSISTANT || items->type != SOPE_JSON_ARRAY || !sope__json_canonical(&raw, items, 0)) {
+            sope__buf_free(&raw); sope__message_free(m);
+            snprintf(err, cap, "invalid response_items"); return SOPE_EINVAL;
+        }
+        m->response_items = raw.ptr;
+    }
     flag = sope__json_get(v, "summary");
     m->is_summary = m->role == SOPE__MSG_USER && flag && flag->type == SOPE_JSON_BOOL && flag->boolean;
 

@@ -17,6 +17,7 @@ sope has two entry points: a terminal workspace for using agents, and a C librar
 
 | Reference | What you will find |
 |---|---|
+| [Go SDK](../bindings/go/README.md) | cgo linking, execution contracts, durable admission and recovery |
 | [C ABI](abi.md) | Threading, lifetimes, events, tools, subagents, and providers |
 | [Development](development.md) | Build commands, validation, and the source layout |
 | [Releases and versioning](release.md) | ABI compatibility, packaging, and release steps |

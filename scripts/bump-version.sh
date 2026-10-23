@@ -30,6 +30,17 @@ for pkg in package.json bindings/js/package.json tui/package.json; do
   perl -pi -e "s/^  \"version\": \"[^\"]*\",\$/  \"version\": \"$new\",/" "$pkg"
 done
 perl -pi -e "s/^export const ABI = \{ major: \d+, minor: \d+ \}/export const ABI = { major: $major, minor: $minor }/" bindings/js/src/ffi.ts
+# A version bump must update the Go SDK's compile-time and runtime ABI guard.
+python3 - "$major" "$minor" <<'PYGO'
+import pathlib, re, sys
+major, minor = map(int, sys.argv[1:])
+p = pathlib.Path('bindings/go/sope.go')
+s = p.read_text()
+s = re.sub(r'SOPE_VERSION_MAJOR != \d+ \|\| SOPE_VERSION_MINOR != \d+', f'SOPE_VERSION_MAJOR != {major} || SOPE_VERSION_MINOR != {minor}', s)
+s = re.sub(r'Go SDK requires sope ABI [0-9.]+', f'Go SDK requires sope ABI {major}.{minor}', s)
+s = re.sub(r'(uint32\(C.sope_version_number\(\)\)\s*>>\s*8 != )0x[0-9a-f]+', lambda m: m[1] + f'0x{major * 256 + minor:04x}', s)
+p.write_text(s)
+PYGO
 perl -pi -e "s/Current version: [0-9.]+ \(ABI [0-9.]+\)/Current version: ${new} (ABI ${major}.${minor})/" docs/abi.md
 perl -pi -e "s/sope-[0-9]+\.[0-9]+\.[0-9]+-/sope-$new-/g" README.md docs/guide/quickstart.md
 

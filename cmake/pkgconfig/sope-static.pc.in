@@ -1,0 +1,9 @@
+prefix=@SOPE_PC_PREFIX@
+libdir=@SOPE_PC_LIBDIR@
+includedir=@SOPE_PC_INCLUDEDIR@
+
+Name: sope-static
+Description: Embedded agent runtime (static archive with private SQLite)
+Version: @PROJECT_VERSION@
+Libs: ${libdir}/@SOPE_PC_ARCHIVE@ @SOPE_PC_DEPS@ -pthread -lm
+Cflags: -I${includedir}

@@ -173,6 +173,21 @@ static int literal(parser *p, const char *word)
     return 1;
 }
 
+static int cmp_member(const void *a, const void *b);
+static int unique_keys(const sope_json *v)
+{
+    if (v->type != SOPE_JSON_OBJECT || v->count < 2) return 1;
+    const sope_json **keys = malloc(v->count * sizeof *keys);
+    if (!keys) return 0;
+    size_t n = 0;
+    for (const sope_json *p = v->child; p; p = p->next) keys[n++] = p;
+    qsort(keys, n, sizeof *keys, cmp_member);
+    int ok = 1;
+    for (size_t i = 1; i < n; i++) if (!cmp_member(&keys[i-1], &keys[i])) { ok = 0; break; }
+    free(keys);
+    return ok;
+}
+
 static sope_json *parse_container(parser *p, int depth, int is_object)
 {
     sope_json *v = new_node(is_object ? SOPE_JSON_OBJECT : SOPE_JSON_ARRAY);
@@ -213,6 +228,9 @@ static sope_json *parse_container(parser *p, int depth, int is_object)
         }
         if (p->s[p->i] == close) {
             p->i++;
+            /* A host authorizer and native executor must not interpret the
+             * same object differently (first-key versus last-key wins). */
+            if (!unique_keys(v)) goto fail;
             return v;
         }
         goto fail;
@@ -302,4 +320,50 @@ const char *sope__json_string(const sope_json *v, size_t *len)
 double sope__json_number(const sope_json *v, double fallback)
 {
     return v && v->type == SOPE_JSON_NUMBER ? v->num : fallback;
+}
+
+static int cmp_member(const void *a, const void *b)
+{
+    const sope_json *const *x = a, *const *y = b;
+    size_t n = (*x)->key_len < (*y)->key_len ? (*x)->key_len : (*y)->key_len;
+    int rc = memcmp((*x)->key, (*y)->key, n);
+    return rc ? rc : (*x)->key_len < (*y)->key_len ? -1 : (*x)->key_len != (*y)->key_len;
+}
+/* Canonical objects, preserving array order. Refuse duplicate keys rather than
+ * allowing the binding and C parser to disagree about the effective policy. */
+int sope__json_canonical(sope_buf *b, const sope_json *v, int hide_env)
+{
+    if (!v) return 0;
+    switch (v->type) {
+    case SOPE_JSON_NULL: sope__buf_appends(b, "null"); break;
+    case SOPE_JSON_BOOL: sope__buf_appends(b, v->boolean ? "true" : "false"); break;
+    case SOPE_JSON_NUMBER: sope__buf_appendf(b, "%.17g", v->num); break;
+    case SOPE_JSON_STRING: sope__buf_append_json_string(b, v->str, v->len); break;
+    case SOPE_JSON_ARRAY:
+        sope__buf_appends(b, "[");
+        for (const sope_json *p = v->child; p; p = p->next) {
+            if (p != v->child) sope__buf_appends(b, ",");
+            if (!sope__json_canonical(b, p, 0)) return 0;
+        }
+        sope__buf_appends(b, "]"); break;
+    case SOPE_JSON_OBJECT: {
+        const sope_json **items = calloc(v->count + 1, sizeof *items);
+        if (!items) return 0;
+        size_t n = 0;
+        for (const sope_json *p = v->child; p; p = p->next) items[n++] = p;
+        qsort(items, n, sizeof *items, cmp_member);
+        sope__buf_appends(b, "{");
+        for (size_t i = 0; i < n; i++) {
+            const sope_json *p = items[i];
+            if (i && !cmp_member(&items[i], &items[i-1])) { free(items); return 0; }
+            if (i) sope__buf_appends(b, ",");
+            sope__buf_append_json_string(b, p->key, p->key_len);
+            sope__buf_appends(b, ":");
+            if (hide_env == 2) sope__buf_appends(b, "null");
+            else if (!sope__json_canonical(b, p, hide_env && !strcmp(p->key, "environment") ? 2 : 0)) { free(items); return 0; }
+        }
+        free(items); sope__buf_appends(b, "}"); break;
+    }
+    }
+    return !b->oom;
 }

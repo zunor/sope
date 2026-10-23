@@ -104,6 +104,7 @@ struct sope_json {
 /* Returns NULL on malformed input or out of memory. */
 sope_json *sope__json_parse(const char *s, size_t n);
 void sope__json_free(sope_json *v);
+int sope__json_canonical(sope_buf *b, const sope_json *v, int hide_env);
 const sope_json *sope__json_get(const sope_json *obj, const char *key);
 const sope_json *sope__json_at(const sope_json *arr, size_t index);
 const char *sope__json_string(const sope_json *v, size_t *len);
@@ -188,7 +189,7 @@ typedef struct sope_proc sope_proc;
  * /dev/null, stdout and stderr together. `wake` (may be NULL) is woken on
  * output and once the process is done. On failure returns NULL with a
  * message in err. */
-sope_proc *sope__proc_start(const char *command, const char *cwd, sope_task *wake, int archive_fd,
+sope_proc *sope__proc_start(const char *command, const char *cwd, char *const *environment, sope_task *wake, int archive_fd,
                            const char *archive_path, char *err, size_t errlen);
 /* 1 once the shell exited and its output is collected; *status is the exit
  * code (128+N after signal N, -1 if unknown). */
@@ -237,6 +238,7 @@ typedef struct sope_tool_use {
 typedef struct sope_message {
     struct sope_message *next;
     sope_msg_role role;
+    char *response_items; /* Responses API output array, including encrypted reasoning */
     char *content; /* text; may be empty, never NULL */
     size_t content_len;
     sope_tool_use *tool_uses; /* assistant only */

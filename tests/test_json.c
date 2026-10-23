@@ -199,6 +199,8 @@ int main(void)
     test_values();
     test_strings();
     test_malformed();
+    const char duplicate[] = "{\"path\":\"unsafe\",\"pa\\u0074h\":\"safe\"}";
+    CHECK(sope__json_parse(duplicate, sizeof duplicate - 1) == NULL);
     test_depth_limit();
     test_escape_roundtrip();
     if (failures) {

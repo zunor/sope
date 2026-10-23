@@ -20,7 +20,7 @@
 #include <unistd.h>
 
 /* Bindings hard-code this layout; keep docs/abi.md in sync when it changes. */
-_Static_assert(sizeof(void *) != 8 || sizeof(sope_event_t) == 72, "sope_event_t layout changed");
+_Static_assert(sizeof(void *) != 8 || sizeof(sope_event_t) == 80, "sope_event_t layout changed");
 
 /* ------------------------------------------------------------------------ */
 /* helpers                                                                   */
@@ -161,19 +161,20 @@ int sope__push_event_locked(sope_agent_t *a, uint32_t type, uint64_t turn_id, ui
 {
     ev_node *n = event_new(a, type, turn_id, call_id, code, name, name_len, data, data_len);
     if (!n) return SOPE_ENOMEM;
-    event_enqueue_locked(a->root, n);
+    sope_agent_t *root = a->root;
+    if (!sope__journal_event(a, n)) { ev_free(n); return SOPE_ERROR; }
+    if (!n->sequence) n->sequence = root->journal && !root->journal_failed ? root->event_sequence : 0;
+    event_enqueue_locked(root, n);
     return SOPE_OK;
 }
 
 int sope__push_event(sope_agent_t *a, uint32_t type, uint64_t turn_id, uint64_t call_id, int32_t code,
                      const char *name, size_t name_len, const char *data, size_t data_len)
 {
-    ev_node *n = event_new(a, type, turn_id, call_id, code, name, name_len, data, data_len);
-    if (!n) return SOPE_ENOMEM;
     pthread_mutex_lock(a->mu);
-    event_enqueue_locked(a->root, n);
+    int rc = sope__push_event_locked(a, type, turn_id, call_id, code, name, name_len, data, data_len);
     pthread_mutex_unlock(a->mu);
-    return SOPE_OK;
+    return rc;
 }
 
 void sope__agent_free_memory(sope_agent_t *a)
@@ -211,6 +212,8 @@ void sope__agent_free_memory(sope_agent_t *a)
     while (a->pending) { pending_call *p = a->pending; a->pending = p->next; sope__pending_free(p); }
     sope__journal_close(a);
     free(a->artifact_dir);
+    free(a->session_id); free(a->instance_id);
+    sope__policy_free(a);
     ev_free(a->delivered);
     while (a->ev_head) {
         ev_node *n = a->ev_head;
@@ -245,15 +248,17 @@ int sope_agent_new(sope_agent_t **out)
     a = calloc(1, sizeof *a);
     if (!a) return sope__set_error(SOPE_ENOMEM, "sope_agent_new: out of memory");
     a->root = a;
+    a->session_id = sope__identity(); a->instance_id = sope__identity();
+    if (!a->session_id || !a->instance_id) { free(a->session_id); free(a->instance_id); free(a); return SOPE_ERROR; }
     a->mu = &a->mu_storage;
     a->fd_read = a->fd_write = -1;
     if (pthread_mutex_init(&a->mu_storage, NULL) != 0) {
-        free(a);
+        free(a->session_id); free(a->instance_id); free(a);
         return sope__set_error(SOPE_ERROR, "sope_agent_new: pthread_mutex_init failed");
     }
     if (pthread_cond_init(&a->poll_cv, NULL) != 0) {
         pthread_mutex_destroy(&a->mu_storage);
-        free(a);
+        free(a->session_id); free(a->instance_id); free(a);
         return sope__set_error(SOPE_ERROR, "sope_agent_new: pthread_cond_init failed");
     }
 
@@ -263,7 +268,7 @@ int sope_agent_new(sope_agent_t **out)
         sope__subagent_free(gp);
         pthread_cond_destroy(&a->poll_cv);
         pthread_mutex_destroy(&a->mu_storage);
-        free(a);
+        free(a->session_id); free(a->instance_id); free(a);
         return rc;
     }
     a->subagents = gp;
@@ -278,9 +283,20 @@ int sope_agent_set_option(sope_agent_t *a, const char *key, const char *value)
     char *v = NULL;
 
     if (!a || !key || !*key) return sope__set_error(SOPE_EINVAL, "sope_agent_set_option: invalid argument");
+    if (value && !strcmp(key, "openai.wire_api") && strcmp(value, "chat") && strcmp(value, "responses"))
+        return sope__set_error(SOPE_EINVAL, "openai.wire_api must be chat or responses");
+    if (value && !strcmp(key, "reasoning.effort") && strcmp(value, "none") && strcmp(value, "minimal") &&
+        strcmp(value, "low") && strcmp(value, "medium") && strcmp(value, "high") && strcmp(value, "xhigh"))
+        return sope__set_error(SOPE_EINVAL, "invalid reasoning.effort");
+    if (value && !strcmp(key, "openai.api_key") && (strchr(value, '\r') || strchr(value, '\n')))
+        return sope__set_error(SOPE_EINVAL, "credential contains a line break");
     if (value && !(v = sope__strdup(value))) return sope__set_error(SOPE_ENOMEM, "sope_agent_set_option: out of memory");
 
     pthread_mutex_lock(a->mu);
+    if ((a->sealed && strcmp(key, "openai.api_key")) || (a->contract_required && !a->sealed && a->active_turn)) {
+        pthread_mutex_unlock(a->mu); free(v);
+        return sope__set_error(SOPE_EBUSY, "sealed execution configuration is immutable");
+    }
     slot = option_slot_locked(a, key);
     if (*slot) {
         option_kv *kv = *slot;
@@ -336,6 +352,7 @@ int sope_tool_register(sope_agent_t *a, const char *name, const char *descriptio
     }
 
     pthread_mutex_lock(a->mu);
+    if (a->sealed) { pthread_mutex_unlock(a->mu); tool_free(t); return sope__set_error(SOPE_EBUSY, "sealed tool definitions are immutable"); }
     slot = &a->tools;
     while (*slot && strcmp((*slot)->name, name) != 0) slot = &(*slot)->next;
     if (*slot) {
@@ -353,7 +370,11 @@ int sope_subagent_register(sope_agent_t *a, const char *definition_json, size_t 
     int rc;
     if (!a || !definition_json) return sope__set_error(SOPE_EINVAL, "sope_subagent_register: invalid argument");
     if (!(d = sope__subagent_parse(definition_json, len, &rc))) return rc;
+    pthread_mutex_lock(a->mu);
+    int sealed = a->sealed;
+    if (sealed) { pthread_mutex_unlock(a->mu); sope__subagent_free(d); return sope__set_error(SOPE_EBUSY, "sealed subagent definitions are immutable"); }
     sope__subagent_add(a, d);
+    pthread_mutex_unlock(a->mu);
     return SOPE_OK;
 }
 
@@ -363,11 +384,12 @@ void sope__msg_node_free(msg_node *m)
 {
     if (!m) return;
     free(m->text);
+    free(m->request_key);
     sope__images_free(m->images, m->n_images);
     free(m);
 }
 
-static int enqueue(sope_agent_t *a, const char *fn, int compact, const char *text, size_t len, uint64_t *turn_id_out)
+static int enqueue(sope_agent_t *a, const char *fn, int compact, const char *key, const char *text, size_t len, uint64_t *turn_id_out)
 {
     msg_node *m;
 
@@ -380,17 +402,21 @@ static int enqueue(sope_agent_t *a, const char *fn, int compact, const char *tex
     }
     m->len = len;
     m->compact = compact;
+    if (key && !(m->request_key = sope__strdup(key))) { sope__msg_node_free(m); return SOPE_ENOMEM; }
 
     pthread_mutex_lock(a->mu);
-    if (a->recovering || a->root->journal_failed) {
+    if (!sope__contract_ready_locked(a)) { pthread_mutex_unlock(a->mu); sope__msg_node_free(m); return sope__set_error(SOPE_ECONFLICT, "seal the original execution configuration first"); }
+    int duplicate = sope__journal_duplicate(a, m, turn_id_out);
+    if (duplicate > 0) { sope__images_free(a->attached, a->n_attached); a->attached = NULL; a->n_attached = 0; }
+    if (duplicate) { pthread_mutex_unlock(a->mu); sope__msg_node_free(m); return duplicate > 0 ? SOPE_OK : duplicate; }
+    if (a->recovering || a->suspending || a->suspended || a->root->journal_failed) {
         pthread_mutex_unlock(a->mu);
         sope__msg_node_free(m);
         return sope__set_error(SOPE_EBUSY, "session needs recovery before accepting input");
     }
     if (a->closing) {
         pthread_mutex_unlock(a->mu);
-        free(m->text);
-        free(m);
+        sope__msg_node_free(m);
         return sope__set_error(SOPE_ECLOSED, "%s: agent is closed", fn);
     }
     m->turn_id = ++a->next_turn_id;
@@ -459,12 +485,18 @@ int sope_attach_image(sope_agent_t *a, const char *media_type, const void *data,
 
 int sope_send(sope_agent_t *a, const char *text, size_t len, uint64_t *turn_id_out)
 {
-    return enqueue(a, "sope_send", 0, text, len, turn_id_out);
+    return enqueue(a, "sope_send", 0, NULL, text, len, turn_id_out);
+}
+
+int sope_submit(sope_agent_t *a, const char *key, const char *text, size_t len, uint64_t *id)
+{
+    if (!key || !*key || strlen(key) > 256) return sope__set_error(SOPE_EINVAL, "request key must be 1..256 bytes");
+    return enqueue(a, "sope_submit", 0, key, text, len, id);
 }
 
 int sope_compact(sope_agent_t *a, const char *instructions, size_t len, uint64_t *turn_id_out)
 {
-    return enqueue(a, "sope_compact", 1, instructions, len, turn_id_out);
+    return enqueue(a, "sope_compact", 1, NULL, instructions, len, turn_id_out);
 }
 
 int sope_tool_result(sope_agent_t *a, uint64_t call_id, int is_error, const char *content, size_t len)
@@ -486,7 +518,7 @@ int sope_tool_result(sope_agent_t *a, uint64_t call_id, int is_error, const char
 
     pthread_mutex_lock(a->mu);
     p = sope__pending_find_locked(a, call_id, PENDING_TOOL);
-    if (!p || p->done || a->root->recovering || a->root->journal_failed) {
+    if (!p || p->done || p->permission || a->root->recovering || a->root->suspended || a->root->journal_failed) {
         pthread_mutex_unlock(a->mu);
         free(copy);
         return sope__set_error(SOPE_ENOTFOUND, "sope_tool_result: no pending tool call %" PRIu64, call_id);
@@ -503,8 +535,6 @@ int sope_tool_result(sope_agent_t *a, uint64_t call_id, int is_error, const char
     p->done = 1;
     p->reported = 1;
     owner = p->owner;
-    sope__push_event_locked(owner, SOPE_EVENT_TOOL_END, p->turn_id, call_id, p->is_error, p->name, strlen(p->name),
-                            copy, len);
     /* Wake under the lock: the owner cannot be freed while its call is pending. */
     sope__task_wake(&owner->task);
     pthread_mutex_unlock(a->mu);
@@ -533,8 +563,23 @@ int sope_permit(sope_agent_t *a, uint64_t call_id, int allow, const char *messag
     }
 
     pthread_mutex_lock(a->mu);
+    for (p = a->root->pending; p; p = p->next) if (p->call_id == call_id && p->permission == 1 && !p->done) break;
+    if (p) {
+        if (a->root->suspending || a->root->recovering || a->root->journal_failed) {
+            pthread_mutex_unlock(a->mu); sope__buf_free(&why); return SOPE_EBUSY;
+        }
+        if (allow) p->permission = 2;
+        else {
+            p->content = why.ptr; p->len = why.len; p->is_error = 1; why.ptr = NULL;
+            p->done = sope__journal_result(p->owner, p);
+            p->reported = 1;
+        }
+        sope__task_wake(&p->owner->task);
+        int rc = a->root->journal_failed ? SOPE_ERROR : SOPE_OK;
+        pthread_mutex_unlock(a->mu); sope__buf_free(&why); return rc;
+    }
     p = sope__pending_find_locked(a, call_id, PENDING_BUILTIN);
-    if (!p || !p->run || p->done || a->root->journal_failed) {
+    if (!p || !p->run || p->done || a->root->suspending || a->root->recovering || a->root->suspended || a->root->journal_failed) {
         pthread_mutex_unlock(a->mu);
         sope__buf_free(&why);
         return sope__set_error(SOPE_ENOTFOUND, "sope_permit: no tool call %" PRIu64 " is waiting for permission",
@@ -552,15 +597,14 @@ int sope_permit(sope_agent_t *a, uint64_t call_id, int allow, const char *messag
         p->is_error = 1;
         p->done = sope__journal_result(p->owner, p);
         p->reported = 1;
-        sope__push_event_locked(p->owner, SOPE_EVENT_TOOL_END, p->turn_id, call_id, 1, p->name, strlen(p->name),
-                                why.ptr, why.len);
         why.ptr = NULL;
         sope__task_wake(&p->owner->task);
     }
+    int rc = a->root->journal_failed ? SOPE_ERROR : SOPE_OK;
     pthread_mutex_unlock(a->mu);
     sope__tool_run_discard(r);
     sope__buf_free(&why);
-    return SOPE_OK;
+    return rc;
 }
 
 int sope_cancel(sope_agent_t *a)
@@ -710,7 +754,26 @@ int sope_poll(sope_agent_t *a, sope_event_t *ev, int32_t timeout_ms)
     pthread_mutex_lock(a->mu);
     ev_free(a->delivered);
     a->delivered = NULL;
-    while (!a->ev_head) {
+    for (;;) {
+        /* Dispatch notifications are capabilities of the current running state,
+         * not commands to execute after suspension/cancellation. Retain their
+         * audit copies in stream, but never deliver a stale live command. */
+        n = a->ev_head;
+        if (n && (n->type == SOPE_EVENT_TOOL_CALL || n->type == SOPE_EVENT_PERMISSION)) {
+            pending_call *p = a->root->pending;
+            while (p && p->call_id != n->call_id) p = p->next;
+            int valid = p && !p->done && !p->owner->closing && !a->closing &&
+                !a->suspending && !a->suspended && !a->recovering && !a->journal_failed &&
+                (n->type == SOPE_EVENT_TOOL_CALL ? p->kind == PENDING_TOOL && !p->permission
+                                               : p->permission == 1 || p->run != NULL);
+            if (!valid) {
+                a->ev_head = n->next;
+                if (!a->ev_head) { a->ev_tail = NULL; if (!a->closed) fd_unsignal_locked(a); }
+                ev_free(n);
+                continue;
+            }
+        }
+        if (a->ev_head) break;
         if (a->closed) {
             pthread_mutex_unlock(a->mu);
             return sope__set_error(SOPE_ECLOSED, "sope_poll: agent is closed");
@@ -746,5 +809,6 @@ int sope_poll(sope_agent_t *a, sope_event_t *ev, int32_t timeout_ms)
     ev->data_len = n->data_len;
     ev->code = n->code;
     ev->reserved = 0;
+    ev->sequence = n->sequence;
     return 1;
 }

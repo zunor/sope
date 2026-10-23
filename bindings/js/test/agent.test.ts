@@ -55,9 +55,9 @@ test("streams a turn, including multi-byte text", () => {
   agent = Agent.create({ "mock.delay_ms": "0" });
   const turnId = agent.send("你好 sope");
   const events = drainTurn(agent);
-  expect(events[0]).toEqual({ type: "turn_start", turnId, agentId: 0 });
+  expect(events[0]).toEqual({ type: "turn_start", turnId, agentId: 0, sequence: 0 });
   expect(text(events)).toContain("You said: 你好 sope");
-  expect(events.at(-1)).toEqual({ type: "turn_end", turnId, agentId: 0, stopReason: "end_turn" });
+  expect(events.at(-1)).toEqual({ type: "turn_end", turnId, agentId: 0, sequence: 0, stopReason: "end_turn" });
 });
 
 test("round-trips a tool call", () => {

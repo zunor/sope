@@ -279,6 +279,30 @@ static void test_failed_intent_commit(void)
     sope_agent_free(a);
 }
 
+static void test_failed_start_commit(void)
+{
+    char dir[8192], dbpath[8192], target[8192], prompt[20000];
+    snprintf(dir, sizeof dir, "%s/startfailure", root);
+    sope_agent_t *a = open_agent(dir);
+    snprintf(dbpath, sizeof dbpath, "%s/execution.sqlite", dir);
+    sqlite3 *db; REQUIRE(sqlite3_open(dbpath, &db) == SQLITE_OK);
+    REQUIRE(sqlite3_exec(db, "CREATE TRIGGER fail_start BEFORE INSERT ON stream WHEN NEW.type=12 BEGIN SELECT RAISE(ABORT,'injected'); END", NULL, NULL, NULL) == SQLITE_OK);
+    snprintf(target, sizeof target, "%s/must-not-exist", dir);
+    snprintf(prompt, sizeof prompt, "!write {\"file_path\":\"%s\",\"content\":\"bad\"}", target);
+    send_text(a, prompt);
+    for (;;) {
+        sope_event_t ev = poll_event(a);
+        REQUIRE(ev.type != SOPE_EVENT_TOOL_START);
+        if (ev.type == SOPE_EVENT_TURN_END) { REQUIRE(ev.code == SOPE_STOP_ERROR); break; }
+    }
+    REQUIRE(access(target, F_OK) != 0);
+    sope_agent_free(a);
+    REQUIRE(sqlite3_exec(db, "DROP TRIGGER fail_start", NULL, NULL, NULL) == SQLITE_OK);
+    sqlite3_close(db);
+    a = open_agent(dir); REQUIRE(strstr(recovery(a), "write"));
+    REQUIRE(sope_agent_resume(a) == SOPE_EBUSY); sope_agent_free(a);
+}
+
 static void test_failed_result_commit(void)
 {
     char dir[8192], path[8192]; snprintf(dir, sizeof dir, "%s/resultfailure", root);
@@ -293,7 +317,7 @@ static void test_failed_result_commit(void)
         if (ev.type == SOPE_EVENT_TOOL_END) { ends++; REQUIRE(ev.code != 0); }
         if (ev.type == SOPE_EVENT_TURN_END) { REQUIRE(ev.code == SOPE_STOP_ERROR); break; }
     }
-    REQUIRE(ends == 1);
+    REQUIRE(ends == 0); /* A failed commit is unknown, not a completed tool. */
     sope_agent_free(a);
     REQUIRE(sqlite3_exec(db, "DROP TRIGGER fail_result", NULL, NULL, NULL) == SQLITE_OK);
     sqlite3_close(db);
@@ -414,6 +438,7 @@ int main(int argc, char **argv)
     test_admission();
     test_compaction_commit();
     test_failed_intent_commit();
+    test_failed_start_commit();
     test_failed_result_commit();
     test_atomic_kill();
     test_process_isolation();

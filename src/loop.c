@@ -85,6 +85,7 @@ static int add_agent_spec_locked(sope_agent_t *a)
 static int filter_allows(const sope_agent_t *a, const char *name)
 {
     size_t i;
+    if (!sope__policy_allows(a, name)) return 0;
     if (!a->tool_filter) return 1;
     for (i = 0; i < a->n_tool_filter; i++)
         if (!strcmp(a->tool_filter[i], name) || !strcmp(a->tool_filter[i], "*")) return 1;
@@ -103,7 +104,7 @@ static int add_builtin_specs_locked(sope_agent_t *a)
         for (td = a->tools; td; td = td->next)
             if (!strcmp(td->name, b->name)) replaced = 1;
         if (replaced || !filter_allows(a, b->name)) continue;
-        t->spec_builtin[t->n_specs] = b;
+        t->spec_builtin[t->n_specs] = sope__policy_external(a, b->name) ? NULL : b;
         if (!add_spec(t, b->name, b->description, b->schema)) return 0;
     }
     return 1;
@@ -162,13 +163,14 @@ static int begin_turn(sope_agent_t *a)
     permissions = sope__option_dup_locked(a, "permissions");
     t->system = sope__option_dup_locked(a, "system");
 
-    offer_agent = a->parent == NULL && a->root->subagents && !(subagents && !strcmp(subagents, "off"));
+    offer_agent = a->parent == NULL && filter_allows(a, SOPE__AGENT_TOOL) && a->root->subagents && !(subagents && !strcmp(subagents, "off"));
     for (td = a->tools; td; td = td->next) n_tools++;
     n_tools += sope__builtin_count() + 1; /* + agent */
     t->specs = calloc(n_tools, sizeof *t->specs);
     t->spec_builtin = calloc(n_tools, sizeof *t->spec_builtin);
     if (!t->specs || !t->spec_builtin) ok = 0;
-    for (td = a->tools; ok && td; td = td->next) ok = add_spec(t, td->name, td->description, td->input_schema);
+    for (td = a->tools; ok && td; td = td->next)
+        if (filter_allows(a, td->name)) ok = add_spec(t, td->name, td->description, td->input_schema);
     if (ok) ok = add_builtin_specs_locked(a);
     if (ok && offer_agent) ok = add_agent_spec_locked(a);
     pthread_mutex_unlock(a->mu);
@@ -274,8 +276,10 @@ static void finish_turn(sope_agent_t *a, int32_t stop)
         }
     }
     if (stop != SOPE_STOP_END_TURN) sope__history_repair(&a->history);
-    if (!sope__journal_checkpoint(a, "end", 1)) stop = SOPE_STOP_ERROR;
+    a->last_stop = stop;
+    if (!t->terminal_committed && !sope__journal_checkpoint(a, "end", 1)) stop = SOPE_STOP_ERROR;
     drop_pending_locked(a); /* late sope_tool_result calls now get ENOTFOUND */
+    sope__push_event_locked(a, SOPE_EVENT_TURN_END, id, 0, stop, NULL, 0, NULL, 0);
     a->active_turn = 0;
     a->cancel_requested = 0;
     pthread_mutex_unlock(a->mu);
@@ -287,7 +291,6 @@ static void finish_turn(sope_agent_t *a, int32_t stop)
     memset(t, 0, sizeof *t);
     a->last_stop = stop;
     a->turns_finished++;
-    sope__push_event(a, SOPE_EVENT_TURN_END, id, 0, stop, NULL, 0, NULL, 0);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -359,7 +362,7 @@ static sope_next start_call(sope_agent_t *a)
 static const char *start_builtin(sope_agent_t *a, pending_call *p, const sope_tool_use *u, const sope_builtin *b,
                                  char *why, size_t cap)
 {
-    permit_mode permit = a->turn.permit;
+    permit_mode permit = sope__policy_authorize(a) ? PERMIT_ALLOW : a->turn.permit;
     tool_run *r = sope__tool_run_new(a, b, u->call_id, u->input, u->input_len);
 
     if (!r) return "out of memory";
@@ -382,6 +385,56 @@ static const char *start_builtin(sope_agent_t *a, pending_call *p, const sope_to
     return NULL;
 }
 
+static int launch_pending(sope_agent_t *a, pending_call *p, sope_tool_use *u)
+{
+    const sope_builtin *builtin = NULL;
+    const char *err = NULL;
+    char why[256];
+    int offered = 0, is_agent;
+    for (size_t k = 0; k < a->turn.n_specs; k++) if (!strcmp(a->turn.specs[k].name, u->name)) {
+        offered = 1; builtin = a->turn.spec_builtin[k];
+    }
+    is_agent = offered && !strcmp(u->name, SOPE__AGENT_TOOL);
+    if (!*u->id) { /* some providers omit ids; they are needed to pair results */
+        char id[32];
+        snprintf(id, sizeof id, "call_%" PRIu64, u->call_id);
+        free(u->id);
+        u->id = sope__strdup(id);
+    }
+
+    sope_json *arguments = sope__json_parse(u->input, u->input_len);
+    int valid_input = arguments && arguments->type == SOPE_JSON_OBJECT;
+    sope__json_free(arguments);
+    if (!offered) {
+        err = "no such tool is available";
+    } else if (!valid_input) {
+        err = "invalid tool input: expected a JSON object with unique keys";
+    } else if (is_agent) {
+        err = sope__subagent_spawn(a, u);
+    } else if (builtin) {
+        if (sope__push_event(a, SOPE_EVENT_TOOL_START, sope__turn_id(a), u->call_id, 0, u->name, strlen(u->name),
+                            u->input, u->input_len) != SOPE_OK) {
+            pthread_mutex_lock(a->mu);
+            sope__storage_fail_locked(a, "Cannot publish tool start; execution stopped before dispatch.");
+            pthread_mutex_unlock(a->mu);
+            return 1;
+        }
+        err = start_builtin(a, p, u, builtin, why, sizeof why);
+    } else {
+        sope__push_event(a, SOPE_EVENT_TOOL_CALL, sope__turn_id(a), u->call_id, 0, u->name, strlen(u->name),
+                         u->input, u->input_len);
+    }
+    if (err) { /* answer the model directly: it can fix its input and retry */
+        pthread_mutex_lock(a->mu);
+        p->content = sope__strdup(err);
+        p->len = p->content ? strlen(err) : 0;
+        p->is_error = 1;
+        p->done = sope__journal_result(a, p);
+        pthread_mutex_unlock(a->mu);
+    }
+    return 1;
+}
+
 /* Sets one tool use of the model's response going, as a pending call the
  * turn waits for: a built-in runs as a task, `agent` spawns a subagent, a
  * host tool goes to the host (SOPE_EVENT_TOOL_CALL). Returns 0 on out of
@@ -391,8 +444,6 @@ static int dispatch(sope_agent_t *a, sope_tool_use *u)
     turn_state *t = &a->turn;
     pending_call *p = calloc(1, sizeof *p);
     const sope_builtin *builtin = NULL;
-    const char *err = NULL;
-    char why[256];
     int offered = 0, is_agent;
     size_t k;
 
@@ -420,41 +471,19 @@ static int dispatch(sope_agent_t *a, sope_tool_use *u)
     pthread_mutex_unlock(a->mu);
     if (!p) return 0;
 
-    if (!*u->id) { /* some providers omit ids; they are needed to pair results */
-        char id[32];
-        snprintf(id, sizeof id, "call_%" PRIu64, u->call_id);
-        free(u->id);
-        u->id = sope__strdup(id);
-    }
-
-    if (!offered) {
-        err = "no such tool is available";
-    } else if (is_agent) {
-        err = sope__subagent_spawn(a, u);
-    } else if (builtin) {
-        sope__push_event(a, SOPE_EVENT_TOOL_START, sope__turn_id(a), u->call_id, 0, u->name, strlen(u->name),
-                         u->input, u->input_len);
-        err = start_builtin(a, p, u, builtin, why, sizeof why);
-    } else {
-        sope__push_event(a, SOPE_EVENT_TOOL_CALL, sope__turn_id(a), u->call_id, 0, u->name, strlen(u->name),
-                         u->input, u->input_len);
-    }
-    if (err) { /* answer the model directly: it can fix its input and retry */
-        pthread_mutex_lock(a->mu);
-        p->content = sope__strdup(err);
-        p->len = p->content ? strlen(err) : 0;
-        p->is_error = 1;
-        p->done = sope__journal_result(a, p);
-        if (builtin) {
-            p->reported = 1;
-            const char *result = p->done ? err : "Result not committed";
-            sope__push_event_locked(a, SOPE_EVENT_TOOL_END, sope__turn_id(a), u->call_id, 1,
-                                   u->name, strlen(u->name), result, strlen(result));
-        }
+    pthread_mutex_lock(a->mu);
+    int suspended = a->root->suspending || a->root->journal_failed || a->closing;
+    if (offered && sope__policy_authorize(a) && !suspended) {
+        p->permission = 1;
+        sope__push_event_locked(a, SOPE_EVENT_PERMISSION, p->turn_id, p->call_id, 0, u->name, strlen(u->name), u->input, u->input_len);
         pthread_mutex_unlock(a->mu);
+        return 1;
     }
-    return 1;
+    pthread_mutex_unlock(a->mu);
+    if (suspended) return 1; /* committed intent remains unknown until reconciled */
+    return launch_pending(a, p, u);
 }
+
 
 /* The model call finished: record the assistant message and dispatch its tool uses. */
 static sope_next end_call(sope_agent_t *a, int32_t rc)
@@ -485,6 +514,7 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
         finish_turn(a, SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);
     }
+    asst->response_items = c->response_items; c->response_items = NULL;
     asst->tool_uses = c->uses;
     asst->n_tool_uses = c->n_uses;
     c->uses = NULL;
@@ -539,6 +569,15 @@ static sope_next collect_tools(sope_agent_t *a)
     size_t i;
 
     pthread_mutex_lock(a->mu);
+    for (p = a->root->pending; p; p = p->next) {
+        if (p->owner != a || p->done || p->permission != 2 || a->root->suspending) continue;
+        p->permission = 0;
+        for (i = 0; i < asst->n_tool_uses; i++) if (asst->tool_uses[i].call_id == p->call_id) {
+            pthread_mutex_unlock(a->mu);
+            launch_pending(a, p, &asst->tool_uses[i]);
+            return next(SOPE__NEXT_CONTINUE);
+        }
+    }
     for (i = 0; i < asst->n_tool_uses; i++) {
         for (p = a->root->pending; p; p = p->next)
             if (p->call_id == asst->tool_uses[i].call_id) break;
@@ -743,7 +782,9 @@ static sope_next end_compact(sope_agent_t *a, int32_t rc)
     if (ok) {
         a->context_tokens = 0;
         a->context_estimate = 0; /* new window: measure summary, retained messages and current input */
+        if (manual) a->last_stop = SOPE_STOP_END_TURN;
         ok = sope__journal_checkpoint(a, "compact", manual);
+        t->terminal_committed = manual && ok;
         if (ok) sope__push_event_locked(a, SOPE_EVENT_COMPACT, sope__turn_id(a), 0, 0, manual ? "manual" : "auto",
                          manual ? 6 : 4, c->text.ptr, c->text.len);
     }
@@ -819,7 +860,7 @@ static sope_next close_agent(sope_agent_t *a)
 
     pthread_mutex_lock(a->mu);
     /* Closing a recovered-but-not-resumed session must not consume its inbox. */
-    if (a->recovering || a->journal_failed) {
+    if (a->recovering || a->suspended || a->journal_failed) {
         a->closed = 1;
         if (a->root == a) sope__signal_closed_locked(a);
         pthread_mutex_unlock(a->mu);
@@ -833,6 +874,7 @@ static sope_next close_agent(sope_agent_t *a)
         msg_node *n = dropped->next;
         a->turn.active = 1; a->turn.msg = dropped;
         pthread_mutex_lock(a->mu);
+        a->last_stop = SOPE_STOP_CANCELLED;
         sope__journal_checkpoint(a, "cancel_queued", 1);
         pthread_mutex_unlock(a->mu);
         memset(&a->turn, 0, sizeof a->turn);
@@ -848,17 +890,55 @@ static sope_next close_agent(sope_agent_t *a)
     return next(SOPE__NEXT_CLOSED);
 }
 
+/* Drain admitted built-ins; host operations without a receipt remain unknown.
+ * Reload committed state instead of manufacturing cancellation tool results. */
+static sope_next suspend_agent(sope_agent_t *a)
+{
+    turn_state *t = &a->turn;
+    if (t->call) {
+        if (t->call->state) t->provider->finish(t->call->state);
+        sope__call_free(t->call); t->call = NULL;
+    }
+    pthread_mutex_lock(a->mu);
+    for (sope_agent_t *c = a->children; c; c = c->sibling) {
+        c->closing = 1;
+        sope__task_wake(&c->task);
+    }
+    if (a->children || a->runs) { pthread_mutex_unlock(a->mu); return next(SOPE__NEXT_WAIT); }
+    pthread_mutex_unlock(a->mu);
+    sope__shells_free(a);
+    free_specs(t); free(t->system); free(t->cwd);
+    if (t->held) sope__message_free(t->held);
+    sope__msg_node_free(t->msg);
+    memset(t, 0, sizeof *t);
+    pthread_mutex_lock(a->mu);
+    while (a->pending) { pending_call *p = a->pending; a->pending = p->next; sope__pending_free(p); }
+    while (a->in_head) { msg_node *m = a->in_head; a->in_head = m->next; sope__msg_node_free(m); }
+    a->in_tail = NULL;
+    sope__history_clear(&a->history);
+    sope__files_clear(a);
+    a->active_turn = 0;
+    if (!sope__journal_restore(a)) sope__storage_fail_locked(a, "Cannot reload suspended execution checkpoint");
+    a->suspending = 0; a->suspended = 1;
+    int closing = a->closing;
+    pthread_cond_broadcast(&a->poll_cv);
+    pthread_mutex_unlock(a->mu);
+    return next(closing ? SOPE__NEXT_CONTINUE : SOPE__NEXT_WAIT);
+}
+
 sope_next sope__agent_run(sope_task *task)
 {
     sope_agent_t *a = task->owner;
-    int closing, stopped, paused;
+    int closing, stopped, paused, suspend;
 
     pthread_mutex_lock(a->mu);
     closing = a->closing;
     stopped = closing || a->cancel_requested;
-    paused = a->recovering || a->root->journal_failed;
+    paused = a->recovering || a->suspended || a->root->journal_failed;
+    suspend = a->suspending;
     pthread_mutex_unlock(a->mu);
 
+    if (suspend) return suspend_agent(a);
     if (a->turn.active) return stopped ? abort_turn(a) : step_turn(a);
 
     if (!closing && paused) return next(SOPE__NEXT_WAIT);

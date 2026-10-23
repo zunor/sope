@@ -1,0 +1,9 @@
+prefix=@SOPE_PC_PREFIX@
+libdir=@SOPE_PC_LIBDIR@
+includedir=@SOPE_PC_INCLUDEDIR@
+
+Name: sope
+Description: Embedded agent runtime with private SQLite
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lsope -Wl,-rpath,${libdir}
+Cflags: -I${includedir}

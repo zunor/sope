@@ -29,6 +29,7 @@ uint64_t sope__message_tokens(const sope_message *m)
 {
     size_t i;
     uint64_t tokens = add(12, sope__text_tokens(m->content, m->content_len));
+    if (m->response_items) tokens = add(tokens, sope__text_tokens(m->response_items, strlen(m->response_items)));
     for (i = 0; i < m->n_tool_uses; i++) {
         const sope_tool_use *u = &m->tool_uses[i];
         tokens = add(tokens, add(16, sope__text_tokens(u->input, u->input_len)));

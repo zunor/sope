@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 /** ABI version these bindings were written against (sope.h SOPE_VERSION_MAJOR/MINOR). */
-export const ABI = { major: 0, minor: 3 } as const;
+export const ABI = { major: 0, minor: 4 } as const;
 
 const symbols = {
   sope_version: { args: [], returns: FFIType.cstring },

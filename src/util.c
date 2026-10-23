@@ -46,6 +46,8 @@ const char *sope_strerror(int code)
     case SOPE_ECLOSED: return "agent is closed";
     case SOPE_ECANCELLED: return "cancelled";
     case SOPE_EBUSY: return "busy";
+    case SOPE_ECONFLICT: return "conflict";
+    case SOPE_ETIMEOUT: return "timeout";
     default: return "unknown error";
     }
 }

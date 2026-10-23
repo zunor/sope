@@ -13,6 +13,8 @@ export const ErrorCode = {
   Closed: -5,
   Cancelled: -6,
   Busy: -7,
+  Conflict: -8,
+  Timeout: -9,
 } as const;
 
 export class SopeError extends Error {
@@ -29,7 +31,7 @@ export type StopReason = "end_turn" | "cancelled" | "error";
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 /** agentId is 0 for the agent itself, else the callId of the subagent_start that launched the subagent. */
-type Origin = { turnId: number; agentId: number };
+type Origin = { turnId: number; agentId: number; sequence: number };
 
 export type SopeEvent =
   | ({ type: "turn_start" } & Origin)
@@ -81,8 +83,8 @@ const STOP_REASONS: StopReason[] = ["end_turn", "cancelled", "error"];
 const LOG_LEVELS: LogLevel[] = ["debug", "info", "warn", "error"];
 
 // Offsets of sope_event_t on 64-bit targets (asserted in src/agent.c).
-const EVENT_SIZE = 72;
-const EV = { type: 4, turnId: 8, callId: 16, agentId: 24, name: 32, nameLen: 40, data: 48, dataLen: 56, code: 64 } as const;
+const EVENT_SIZE = 80;
+const EV = { type: 4, turnId: 8, callId: 16, agentId: 24, name: 32, nameLen: 40, data: 48, dataLen: 56, code: 64, sequence: 72 } as const;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -307,7 +309,7 @@ export class Agent {
     check(rc, "sope_poll");
 
     const u64 = (offset: number) => Number(v.getBigUint64(offset, true));
-    const origin = { turnId: u64(EV.turnId), agentId: u64(EV.agentId) };
+    const origin = { turnId: u64(EV.turnId), agentId: u64(EV.agentId), sequence: u64(EV.sequence) };
     const callId = u64(EV.callId);
     const code = v.getInt32(EV.code, true);
     const data = () => readString(u64(EV.data), u64(EV.dataLen));

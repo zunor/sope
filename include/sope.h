@@ -50,9 +50,9 @@ extern "C" {
 /* ------------------------------------------------------------------------ */
 
 #define SOPE_VERSION_MAJOR 0
-#define SOPE_VERSION_MINOR 3
+#define SOPE_VERSION_MINOR 4
 #define SOPE_VERSION_PATCH 0
-#define SOPE_VERSION_STRING "0.3.0"
+#define SOPE_VERSION_STRING "0.4.0"
 #define SOPE_VERSION_NUMBER \
     ((SOPE_VERSION_MAJOR << 16) | (SOPE_VERSION_MINOR << 8) | SOPE_VERSION_PATCH)
 
@@ -75,6 +75,8 @@ SOPE_API const char *sope_version(void);
 #define SOPE_ECLOSED    (-5) /* the agent is closed */
 #define SOPE_ECANCELLED (-6) /* the operation was cancelled */
 #define SOPE_EBUSY      (-7) /* not allowed in the current state */
+#define SOPE_ECONFLICT  (-8) /* request key or execution configuration differs */
+#define SOPE_ETIMEOUT   (-9) /* wait deadline expired; object remains owned */
 
 /* Static description of a result code. Never NULL. */
 SOPE_API const char *sope_strerror(int code);
@@ -126,6 +128,49 @@ SOPE_API int sope_agent_resolve(sope_agent_t *agent, uint64_t call_id, int is_er
                                 const char *content, size_t len);
 SOPE_API int sope_agent_resume(sope_agent_t *agent);
 
+/* Host execution contract. Configure before seal/send/resume. tools is a required
+ * array (empty = none); external routes named built-ins to TOOL_CALL so the host
+ * can execute them in its sandbox. authorize=true gates every offered tool,
+ * including host tools and subagents, through PERMISSION. environment is the
+ * complete bash environment, never merged with the process environment.
+ * Example: {"tools":["read","bash"],"external":["bash"],
+ *           "authorize":true,"environment":{"PATH":"/usr/bin:/bin"}}
+ * This policy controls capabilities, not an OS sandbox: unrestricted built-in
+ * file/shell tools retain the host user's filesystem access. */
+SOPE_API int sope_agent_policy(sope_agent_t *agent, const char *json, size_t len);
+/* Seal current options, tool/subagent definitions and policy against a durable
+ * configuration identity. revision covers host executors/instructions; env_revision
+ * covers environment values (which are not stored). Credentials are excluded.
+ * Reopen must seal with the same configuration before resume or new input.
+ * A sealed agent's configuration is immutable; credentials may be rotated. */
+SOPE_API int sope_agent_seal(sope_agent_t *agent, const char *revision, const char *env_revision);
+/* Durable idempotent admission. Same key + same payload returns the original ID;
+ * different payload is ECONFLICT, including after completion or process death. */
+SOPE_API int sope_submit(sope_agent_t *agent, const char *request_key, const char *text,
+                         size_t len, uint64_t *turn_id_out);
+/* JSON state includes session_id (persistent), instance_id (this open), state,
+ * active_turn, last_sequence. Returned JSON uses history()'s scratch storage. */
+SOPE_API int sope_agent_status(sope_agent_t *agent, const char **json, size_t *len);
+/* Durable event pages, after an exclusive sequence cursor, up to 256 records.
+ * IDs are decimal strings. No consumption/ack is implicit: the host persists its
+ * cursor atomically with its own projection. Terminal outcomes are independently
+ * queryable even when the host died before observing TURN_END. Build projections
+ * from these pages: Poll can omit stale execution commands, so a live event's
+ * sequence or status watermark is not an acknowledgement of earlier records.
+ * Tool receipts/resolve and completion events commit atomically. */
+SOPE_API int sope_agent_events(sope_agent_t *agent, uint64_t after, uint32_t limit,
+                               const char **json, size_t *len);
+SOPE_API int sope_agent_outcome(sope_agent_t *agent, uint64_t turn_id, const char **json, size_t *len);
+/* Suspend a durable root without completing its unfinished input. Stops model
+ * generation and new tool dispatch, drains already-running built-ins, preserves
+ * unknown host outcomes for resolve(). Reopen or resume only after reconciliation.
+ * Undelivered live execution commands are filtered by Poll; the host must stop
+ * its already-dispatched external executors before reconciliation.
+ * wait timeout does not cancel suspension and never frees memory; storage
+ * failures return SOPE_ERROR rather than reporting successful quiescence. */
+SOPE_API int sope_agent_suspend(sope_agent_t *agent);
+SOPE_API int sope_agent_wait(sope_agent_t *agent, int32_t timeout_ms);
+
 /* Sets (value != NULL) or removes (value == NULL) a string option. Options
  * are read when a turn starts, so changes apply from the next turn on.
  *   provider          "mock" (default, offline) or "openai" (any
@@ -150,7 +195,9 @@ SOPE_API int sope_agent_resume(sope_agent_t *agent);
  *   compact.input_tokens estimated summary request input budget (64000)
  *   compact.retain_tokens recent original-message budget (8000; 0: none)
  *   openai.base_url   default https://api.openai.com/v1
- *   openai.api_key    sent as a Bearer token
+ *   openai.wire_api   "chat" (default) or "responses" (stateless replay)
+ *   reasoning.effort  none, minimal, low, medium, high or xhigh (model-dependent)
+ *   openai.api_key    explicit Bearer token; rotatable after seal
  *   openai.max_tokens normal output limit (default context.reserve); also
  *                     raises the output reservation if larger
  *   tls.ca_file       PEM file of trusted CAs, for builds with bundled curl
@@ -330,6 +377,7 @@ typedef struct sope_event {
     size_t data_len;
     int32_t code;
     uint32_t reserved;
+    uint64_t sequence; /* durable public stream cursor, 0 for ephemeral events */
 } sope_event_t;
 
 /* Waits for the next event. timeout_ms < 0 waits forever, 0 never blocks.
