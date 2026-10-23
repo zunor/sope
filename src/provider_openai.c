@@ -360,7 +360,7 @@ done:
     return s;
 }
 
-static void accumulate_tool_call(oa_state *s, const sope_json *tc, size_t position)
+static int accumulate_tool_call(oa_state *s, const sope_json *tc, size_t position)
 {
     const sope_json *fn = sope__json_get(tc, "function");
     const char *str;
@@ -368,12 +368,13 @@ static void accumulate_tool_call(oa_state *s, const sope_json *tc, size_t positi
     double idx = sope__json_number(sope__json_get(tc, "index"), (double)position);
     tool_call_acc *acc;
 
-    if (idx < 0 || idx >= MAX_TOOL_CALLS) return;
+    if (!(idx >= 0 && idx < MAX_TOOL_CALLS) || (double)(size_t)idx != idx) return 0;
     acc = &s->calls[(size_t)idx];
     acc->used = 1;
     if ((str = sope__json_string(sope__json_get(tc, "id"), &n)) && n && !acc->id.len) sope__buf_append(&acc->id, str, n);
     if ((str = sope__json_string(sope__json_get(fn, "name"), &n))) sope__buf_append(&acc->name, str, n);
     if ((str = sope__json_string(sope__json_get(fn, "arguments"), &n))) sope__buf_append(&acc->args, str, n);
+    return 1;
 }
 
 /* Handles one `data:` payload. Returns 0 if the server reported an error. */
@@ -524,7 +525,13 @@ static int handle_chunk(sope_call *c, oa_state *s, const char *data, size_t n)
     }
     if ((calls = sope__json_get(delta, "tool_calls")) && calls->type == SOPE_JSON_ARRAY) {
         const sope_json *tc;
-        for (tc = calls->child, i = 0; tc; tc = tc->next, i++) accumulate_tool_call(s, tc, i);
+        for (tc = calls->child, i = 0; tc; tc = tc->next, i++) {
+            if (!accumulate_tool_call(s, tc, i)) {
+                sope__call_error(c, SOPE_ERROR, "openai: invalid tool call index");
+                sope__json_free(root);
+                return 0;
+            }
+        }
     }
     if ((usage = sope__json_get(root, "usage")) && usage->type == SOPE_JSON_OBJECT) {
         uint64_t input, output;
@@ -631,15 +638,38 @@ static sope_step oa_step(sope_call *c, void *state)
         sope__call_error(c, SOPE_ERROR, "openai: incomplete stream (missing finish_reason or [DONE])");
         return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
     }
+    size_t used = 0;
     for (i = 0; i < MAX_TOOL_CALLS; i++) {
         tool_call_acc *acc = &s->calls[i];
-        if (!acc->used || !acc->name.len) continue;
+        if (!acc->used) continue;
+        used++;
         if (sope__call_is_compaction(c)) {
             sope__call_error(c, SOPE_ERROR, "openai: compaction returned a tool call");
             return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
         }
-        if (acc->id.oom || acc->name.oom || acc->args.oom ||
-            sope__call_tool_use(c, acc->id.ptr, acc->name.ptr, acc->args.ptr, acc->args.len) != SOPE_OK) {
+        if (acc->id.oom || acc->name.oom || acc->args.oom) {
+            sope__call_error(c, SOPE_ENOMEM, "openai: out of memory");
+            return (sope_step){ SOPE__STEP_DONE, SOPE_ENOMEM };
+        }
+        sope_json *args = sope__json_parse(acc->args.len ? acc->args.ptr : "{}", acc->args.len ? acc->args.len : 2);
+        int valid = s->finish == 2 && sope__valid_name(acc->name.ptr, acc->name.len) &&
+                    (!acc->id.len || strlen(acc->id.ptr) == acc->id.len) && args && args->type == SOPE_JSON_OBJECT;
+        sope__json_free(args);
+        for (size_t j = 0; valid && j < i; j++)
+            if (acc->id.len && s->calls[j].id.len && !strcmp(acc->id.ptr, s->calls[j].id.ptr)) valid = 0;
+        if (!valid) {
+            sope__call_error(c, SOPE_ERROR, "openai: invalid or incomplete tool batch");
+            return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
+        }
+    }
+    if (!s->responses && s->finish == 2 && !used) {
+        sope__call_error(c, SOPE_ERROR, "openai: empty tool batch");
+        return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
+    }
+    /* Validate the entire batch before making any of it executable. */
+    for (i = 0; i < MAX_TOOL_CALLS; i++) {
+        tool_call_acc *acc = &s->calls[i];
+        if (acc->used && sope__call_tool_use(c, acc->id.ptr, acc->name.ptr, acc->args.ptr, acc->args.len) != SOPE_OK) {
             sope__call_error(c, SOPE_ENOMEM, "openai: out of memory");
             return (sope_step){ SOPE__STEP_DONE, SOPE_ENOMEM };
         }

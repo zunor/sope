@@ -16,6 +16,7 @@ const requests: Body[] = [];
 let flakyFailures = 0;
 let server: ReturnType<typeof Bun.serve>;
 let agent: Agent | null = null;
+let overrideStream: string | null = null;
 
 const sse = (chunks: unknown[]) =>
   chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
@@ -31,6 +32,7 @@ beforeAll(() => {
         return new Response("overloaded", { status: 503 });
       const body = (await req.json()) as Body;
       requests.push(body);
+      if (overrideStream !== null) return new Response(overrideStream, { headers: { "content-type": "text/event-stream" } });
       const last = body.messages.at(-1)!;
       const stream =
         last.role === "tool"
@@ -57,6 +59,7 @@ afterEach(() => {
   agent?.free();
   agent = null;
   requests.length = 0;
+  overrideStream = null;
 });
 
 // The server runs on this thread, so poll without blocking and yield in between.
@@ -142,3 +145,25 @@ test("retries transient failures before any output", async () => {
   expect(events.some((e) => e.type === "error")).toBe(false);
   expect(events.at(-1)).toMatchObject({ type: "turn_end", stopReason: "end_turn" });
 });
+
+const tool = (index: number, id = "call_a", name = "echo", args = "{}") =>
+  ({ index, id, type: "function", function: { name, arguments: args } });
+
+for (const [name, calls, finish] of [
+  ["fractional index", [tool(0.5)], "tool_calls"],
+  ["out of range index", [tool(0), tool(64, "call_b")], "tool_calls"],
+  ["stop with a tool batch", [tool(0)], "stop"],
+  ["missing tool name", [tool(0), tool(1, "call_b", "")], "tool_calls"],
+  ["duplicate call IDs", [tool(0), tool(1)], "tool_calls"],
+  ["incomplete arguments after a valid call", [tool(0), tool(1, "call_b", "echo", '{"input":')], "tool_calls"],
+  ["empty tool batch", [], "tool_calls"],
+] as const) {
+  test(`rejects the entire malformed tool batch: ${name}`, async () => {
+    overrideStream = sse([delta({ tool_calls: calls }), delta({}, finish)]);
+    agent = openaiAgent();
+    agent.send("test malformed batch");
+    const events = await drainTurn(agent, (call) => agent!.toolResult(call.callId, "must not run"));
+    expect(events.filter((e) => e.type === "tool_call" || e.type === "tool_start" || e.type === "permission")).toHaveLength(0);
+    expect(events.at(-1)).toMatchObject({ type: "turn_end", stopReason: "error" });
+  });
+}
