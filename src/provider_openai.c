@@ -49,11 +49,67 @@ static void put_string(sope_buf *b, const char *key, const char *s, size_t n)
     sope__buf_append_json_string(b, s, n);
 }
 
+/* "content" as an array: the text, then each image as a data URL. */
+static void put_parts(sope_buf *b, const char *text, size_t len, const sope_image *images, size_t n)
+{
+    size_t i;
+    put_key(b, "content");
+    sope__buf_appends(b, "[{\"type\":\"text\",");
+    put_string(b, "text", text, len);
+    sope__buf_appends(b, "}");
+    for (i = 0; i < n; i++) {
+        sope__buf_appendf(b, ",{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:%s;base64,", images[i].media_type);
+        sope__buf_append(b, images[i].data, images[i].len);
+        sope__buf_appends(b, "\"}}");
+    }
+    sope__buf_appends(b, "]");
+}
+
+/* Tool messages carry text only, so the images of a round's results
+ * [from, to] follow them in one user message, each after its tool's name. */
+static void append_tool_images(sope_buf *b, const sope_message *from, const sope_message *to)
+{
+    const sope_message *m;
+    size_t i;
+    int any = 0;
+    for (m = from; m && !any; m = m == to ? NULL : m->next) any = m->n_images != 0;
+    if (!any) return;
+    sope__buf_appends(b, ",{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":"
+                         "\"(Images returned by the tool calls above.)\"}");
+    for (m = from; m; m = m == to ? NULL : m->next) {
+        if (!m->n_images) continue;
+        sope__buf_appends(b, ",{\"type\":\"text\",");
+        put_key(b, "text");
+        {
+            sope_buf label = { 0 };
+            sope__buf_appendf(&label, "From %s (%s):", m->tool_name, m->tool_use_id);
+            sope__buf_append_json_string(b, label.ptr ? label.ptr : "", label.len);
+            sope__buf_free(&label);
+        }
+        sope__buf_appends(b, "}");
+        for (i = 0; i < m->n_images; i++) {
+            sope__buf_appendf(b, ",{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:%s;base64,", m->images[i].media_type);
+            sope__buf_append(b, m->images[i].data, m->images[i].len);
+            sope__buf_appends(b, "\"}}");
+        }
+    }
+    sope__buf_appends(b, "]}");
+}
+
+static int history_has_images(const sope_history *h)
+{
+    const sope_message *m;
+    for (m = h->head; m; m = m->next)
+        if (m->n_images) return 1;
+    return 0;
+}
+
 static void build_body(sope_call *c, sope_buf *b, const char *model, const char *max_tokens)
 {
     const sope_history *h = sope__call_history(c);
     const char *system = sope__call_system(c);
-    const sope_message *m;
+    const sope_message *m, *tools = NULL; /* first tool result of the current round */
+    sope_msg_role prev_role = SOPE__MSG_USER;
     size_t i, n = sope__call_tool_count(c);
     int first = 1;
 
@@ -72,10 +128,15 @@ static void build_body(sope_call *c, sope_buf *b, const char *model, const char 
     for (m = h->head; m; m = m->next) {
         if (!first) sope__buf_appends(b, ",");
         first = 0;
+        if (m->role == SOPE__MSG_TOOL && (!tools || prev_role != SOPE__MSG_TOOL)) tools = m;
+        prev_role = m->role;
         switch (m->role) {
         case SOPE__MSG_USER:
             sope__buf_appends(b, "{\"role\":\"user\",");
-            put_string(b, "content", m->content, m->content_len);
+            if (m->n_images)
+                put_parts(b, m->content, m->content_len, m->images, m->n_images);
+            else
+                put_string(b, "content", m->content, m->content_len);
             break;
         case SOPE__MSG_TOOL:
             sope__buf_appends(b, "{\"role\":\"tool\",");
@@ -107,6 +168,7 @@ static void build_body(sope_call *c, sope_buf *b, const char *model, const char 
             break;
         }
         sope__buf_appends(b, "}");
+        if (m->role == SOPE__MSG_TOOL && (!m->next || m->next->role != SOPE__MSG_TOOL)) append_tool_images(b, tools, m);
     }
     sope__buf_appends(b, "]");
 
@@ -161,6 +223,7 @@ static void *oa_start(sope_call *c)
     char *base = sope__call_option(c, "openai.base_url");
     char *key = sope__call_option(c, "openai.api_key");
     char *model = sope__call_option(c, "model");
+    char *image_model = sope__call_option(c, "image_model");
     char *max_tokens = sope__call_option(c, "openai.max_tokens");
     oa_state *s = NULL;
     size_t base_len;
@@ -182,7 +245,9 @@ static void *oa_start(sope_call *c)
     while (base_len && s->url.ptr[base_len - 1] == '/') base_len--;
     s->url.len = base_len;
     sope__buf_appends(&s->url, "/chat/completions");
-    build_body(c, &s->body, model, max_tokens);
+    /* A model that reads images takes over once the conversation has any. */
+    build_body(c, &s->body, image_model && *image_model && history_has_images(sope__call_history(c)) ? image_model : model,
+               max_tokens);
     if (key && *key) sope__buf_appendf(&s->auth, "Authorization: Bearer %s", key);
     s->ca_file = sope__call_option(c, "tls.ca_file");
     if (s->url.oom || s->body.oom || s->auth.oom) {
@@ -205,6 +270,7 @@ done:
     free(base);
     free(key);
     free(model);
+    free(image_model);
     free(max_tokens);
     return s;
 }

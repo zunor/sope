@@ -7,6 +7,7 @@
 // bindings/js finds build/libsope.* on its own.
 
 import { libraryPath, useLibrary, version } from "sope";
+import { readImageFile, type ImageFile } from "./agent/images";
 import { CliError, parseArgs, USAGE } from "./cli";
 import { loadConfig } from "./config";
 
@@ -42,6 +43,13 @@ async function main(): Promise<number> {
   }
 
   const config = loadConfig({ provider: opts.provider, model: opts.model, baseUrl: opts.baseUrl });
+  let images: ImageFile[];
+  try {
+    images = opts.images.map((path) => readImageFile(path));
+  } catch (err) {
+    console.error(`sope: ${(err as Error).message}`);
+    return 2;
+  }
 
   if (opts.print || !process.stdout.isTTY) {
     const prompt = [opts.prompt, await readStdin()].filter(Boolean).join("\n\n");
@@ -50,7 +58,7 @@ async function main(): Promise<number> {
       return 2;
     }
     const { runPrint } = await import("./print");
-    return runPrint(config, prompt, opts.allowAll);
+    return runPrint(config, prompt, opts.allowAll, images);
   }
 
   if (!process.stdin.isTTY) {
@@ -59,7 +67,11 @@ async function main(): Promise<number> {
   }
 
   const { App } = await import("./app");
-  const app = new App({ config, allowAll: opts.allowAll, prompt: opts.prompt });
+  if (images.length && !opts.prompt) {
+    console.error("sope: --image goes with a prompt: sope --image shot.png \"what is wrong here?\"");
+    return 2;
+  }
+  const app = new App({ config, allowAll: opts.allowAll, prompt: opts.prompt, images });
   const crash = (err: unknown) => {
     app.restoreTerminal();
     console.error(err);

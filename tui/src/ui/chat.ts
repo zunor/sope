@@ -207,6 +207,11 @@ export class ChatView {
   #lastLayout = { lines: 0, width: 0 };
   showThinking = false;
 
+  /** The transcript, oldest first. */
+  get messages(): readonly Message[] {
+    return this.#messages;
+  }
+
   add(m: Omit<Message, "id" | "version">): Message {
     const msg: Message = { ...m, id: this.#nextId++, version: 0 };
     this.#messages.push(msg);

@@ -4,7 +4,9 @@ import { InputParser, keyId, type InputEvent } from "../src/term/input";
 
 const enc = new TextEncoder();
 const ids = (events: InputEvent[]) =>
-  events.map((e) => (e.type === "key" ? keyId(e) : e.type === "mouse" ? `mouse:${e.action}` : `${e.type}:${e.text}`));
+  events.map((e) =>
+    e.type === "key" ? keyId(e) : e.type === "mouse" ? `mouse:${e.action}` : e.type === "osc" ? `osc:${e.data}` : `${e.type}:${e.text}`,
+  );
 
 function parse(...chunks: string[]): string[] {
   const p = new InputParser();
@@ -52,4 +54,15 @@ test("bracketed paste, including a split terminator", () => {
 test("SGR mouse wheel and drag", () => {
   expect(parse("\x1b[<64;10;5M\x1b[<65;10;5M")).toEqual(["mouse:wheel-up", "mouse:wheel-down"]);
   expect(parse("\x1b[<0;3;2M\x1b[<32;9;4M\x1b[<0;9;4m")).toEqual(["mouse:press", "mouse:drag", "mouse:release"]);
+});
+
+test("OSC replies (background color) are recognized, split or whole", () => {
+  expect(parse("\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\x")).toEqual(["osc:11;rgb:1e1e/1e1e/1e1e", "text:x"]);
+  expect(parse("\x1b]11;rgb:ffff/ffff/ffff\x07")).toEqual(["osc:11;rgb:ffff/ffff/ffff"]);
+  expect(parse("\x1b]11;rgb:00", "00/0000/0000\x07a")).toEqual(["osc:11;rgb:0000/0000/0000", "text:a"]);
+});
+
+test("pointer motion without a button is a move (hover)", () => {
+  expect(parse("\x1b[<35;10;1M")).toEqual(["mouse:move"]);
+  expect(parse("\x1b[<32;10;1M")).toEqual(["mouse:drag"]);
 });

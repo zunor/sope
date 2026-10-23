@@ -1,65 +1,70 @@
 // SPDX-License-Identifier: MIT
-// The sope TUI: wires the terminal, input decoding, the agent bridge and the
-// views together, and lays out each frame.
+// The sope TUI: wires the terminal, input decoding and the sessions together,
+// and lays out each frame. Each tab is a session (session.ts) with its own
+// agent; input and commands go to the one on screen. Sessions are saved
+// per directory (store.ts); the most recent few come back as tabs on start,
+// and ⋯ (or /sessions) lists them all.
 //
-//   ◆ sope 0.1.0                openai · glm-5.3 · ctx 8.1k · 1.2k tok · ● ready
+//   [ explain thread pools ▒][ fix grep × ▒] +              ~/src/app  ⋯
 //
 //   › user message
 //
 //   ✻ Thought for 2.1s
 //   ● assistant reply …
 //   ◆ agent · general-purpose  explain thread pools
-//     ● read_file  src/pool.c
+//     ● read  src/pool.c
 //     ⎿ report …
 //
-//   ─────────────────────────────────────── ⠋ thinking · 1.2s ─
+//   ──━━✦ Thinking… (1m 4s · 38 tok/s · tip: …)    (while a turn runs)
+//   ──────────────────────────────────────────────────────────────────────
 //   › input                         (or a permission prompt for
-//   ───────────────────────────────  write_file / edit_file / bash)
-//   enter send · ctrl+j newline · esc cancel · ctrl+t trace · ctrl+c quit
+//   ───────────────────────────────  write / edit / bash / web_fetch)
+//   enter send · ctrl+j newline · esc cancel …          glm-5.3 · ctx 8.1k
 
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { version, type SopeEvent } from "sope";
-import { AgentBridge } from "./agent/bridge";
-import { HostToolRunner } from "./agent/runner";
-import {
-  ASKING_TOOLS,
-  describeCall,
-  formatTodos,
-  hostToolsFor,
-  parseInput,
-  previewFor,
-  READ_TOOLS,
-  todosOf,
-  type HostTool,
-  type PreviewLine,
-} from "./agent/tools";
-import { agentOptions, configPath, type Config } from "./config";
+import { clipboardImage, describeImage, imageRefs, pastedImagePath, readImageFile, type ImageFile } from "./agent/images";
+import { ASKING_TOOLS, previewFor, READ_TOOLS, type HostTool, type PreviewLine } from "./agent/tools";
+import { configPath, type Config } from "./config";
 import type { CellBuffer } from "./render/buffer";
+import { parseOscColor } from "./render/color";
 import { Renderer } from "./render/renderer";
 import { InputParser, keyId, type InputEvent, type MouseEvent as MouseInput } from "./term/input";
 import { Terminal } from "./term/terminal";
-import { palette, SPINNER } from "./theme";
-import { ChatView, type Message, type Step } from "./ui/chat";
-import { Editor } from "./ui/editor";
-import { EventLog } from "./ui/eventlog";
+import { Session, type Approval, type Decision } from "./session";
+import { Store } from "./store";
+import { palette, SPINNER, SPINNER_MS, surfaces, type Surfaces } from "./theme";
+import { SessionList } from "./ui/sessions";
+import { Highlighter, type TokenKind } from "./ui/highlight";
+import type { Editor } from "./ui/editor";
 import { copyToClipboard, Selection } from "./ui/selection";
+import { drawStatus, tipAt } from "./ui/status";
+import { ALL_SESSIONS, drawTabs, NEW_TAB, type TabHit, type TabInfo } from "./ui/tabs";
 import { stringWidth, truncate } from "./unicode/width";
 
 const PAD = 1;
 const PROMPT = "› ";
 const MAX_INPUT_ROWS = 8;
 const ESC_TIMEOUT_MS = 25;
+const TICK_MS = 50; // animation frame rate while anything runs
+const MAX_TABS = 5; // sessions shown as tabs; the rest are a click on ⋯ away
 const HINTS: Array<[string, string]> = [
   ["enter", "send"],
   ["ctrl+j", "newline"],
   ["esc", "cancel"],
+  ["alt+n", "new session"],
+  ["ctrl+v", "paste image"],
   ["ctrl+t", "trace"],
   ["pgup/pgdn", "scroll"],
   ["ctrl+c", "quit"],
 ];
 const HELP = (hostTools: HostTool[]) => [
-  "Commands:",
+  `sope ${version()}. Commands:`,
   "  /help              show this help",
+  "  /new               open a new session in a tab (alt+n, or click +)",
+  "  /close             close this session (alt+w, or × on its tab); it is no longer listed",
+  "  /sessions          list every saved session of this directory (or click ⋯)",
   "  /clear             clear the transcript and the conversation history",
   "  /compact [focus]   summarize the conversation to free context (also automatic)",
   "  /model <name>      switch model (next turn)",
@@ -69,13 +74,24 @@ const HELP = (hostTools: HostTool[]) => [
   "  /set <key> [val]   sope_agent_set_option; omit val to unset",
   "  /permissions       show which tools run without asking",
   "  /quit              exit",
+  "Images: ctrl+v pastes one from the clipboard, dragging an image file into the terminal attaches it, and sope --image <file> attaches one to the first message. They go to the image model (SOPE_IMAGE_MODEL).",
+  "Sessions: alt+1 … alt+9 or a click switches tabs; each keeps running in the background. They are saved per directory and come back on the next start.",
   `Tools (built into libsope): ${[...READ_TOOLS, ...ASKING_TOOLS.map((t) => `${t}*`)].join(", ")}, plus \`agent\` for subagents (* asks first).`,
   ...(hostTools.length ? [`Host tools (this TUI): ${hostTools.map((t) => t.name).join(", ")}.`] : []),
   `Config: ${configPath()} or environment variables (SOPE_API_KEY, SOPE_MODEL, SOPE_BASE_URL, ...).`,
   "Mock provider: plain text streams a reply; !echo <x>, !clock, !sleep <s> call host tools; !read {\"file_path\":\"README.md\"} (any tool, JSON input); !agent t1 | t2 runs subagents; !panic fails.",
 ].join("\n");
 
-const MAX_PREVIEW_ROWS = 12;
+const MAX_PREVIEW_ROWS = 20;
+
+const SYNTAX: Record<TokenKind, number | undefined> = {
+  plain: undefined,
+  keyword: 0xc678dd,
+  string: 0x98c379,
+  number: 0xd19a66,
+  comment: 0x7f848e,
+  type: 0xe5c07b,
+};
 
 export interface AppOptions {
   config: Config;
@@ -83,25 +99,19 @@ export interface AppOptions {
   allowAll?: boolean;
   /** Sent as the first message. */
   prompt?: string;
+  /** Attached to the first message (--image). */
+  images?: ImageFile[];
 }
-
-/** "stop" denies the call and cancels the whole turn. */
-type Decision = "once" | "always" | "deny" | "stop";
-
-/** A built-in tool call waiting for the user (SOPE_EVENT_PERMISSION). */
-interface Approval {
-  callId: number;
-  turnId: number;
-  name: string;
-  input: Record<string, unknown>;
-  /** Who asks: undefined for the agent itself, else the subagent type. */
-  subagent?: string;
-}
-
-type ToolTarget = { msg: Message } | { sub: Message; step: Step };
 
 const previewColor = (kind: PreviewLine["kind"]) =>
   kind === "add" ? palette.ok : kind === "remove" ? palette.error : kind === "command" ? palette.tool : palette.muted;
+
+/** The background from $COLORFGBG ("fg;bg", set by some terminals) until the terminal answers the OSC 11 query. */
+function guessBackground(env = process.env): number | null {
+  const bg = Number(env.COLORFGBG?.split(";").at(-1));
+  if (!Number.isInteger(bg)) return null;
+  return bg === 7 || bg === 15 ? 0xffffff : 0x000000;
+}
 
 function formatTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
@@ -111,55 +121,55 @@ export class App {
   #term = new Terminal();
   #renderer = new Renderer((s) => this.#term.write(s), this.#term.truecolor);
   #parser = new InputParser();
-  #chat = new ChatView();
-  #editor = new Editor();
-  #trace = new EventLog();
   #selection = new Selection();
   #notice: string | null = null;
   #noticeTimer: ReturnType<typeof setTimeout> | null = null;
-  #bridge: AgentBridge;
-  #hostTools: HostTool[];
-  #runner: HostToolRunner;
-  #approvals: Approval[] = [];
+  #config: Config;
   #allowAll: boolean;
-  #alwaysAllowed = new Set<string>(); // "a" in the permission prompt
-  #provider: string;
-  #model: string;
-  #hasKey: boolean;
   #initialPrompt?: string;
+  #initialImages: ImageFile[];
+  #dir = process.cwd().replace(homedir(), "~");
+  #directory = realpathSync(process.cwd()); // the key sessions are saved under
+  #store: Store | null;
+  #list: SessionList | null = null; // the session list, while open
 
-  #openTurns = new Set<number>();
-  #assistant = new Map<number, Message>(); // turn id → reply being streamed
-  #thinking = new Map<number, Message>(); // turn id → reasoning being streamed
-  #toolCalls = new Map<number, ToolTarget>(); // call id → where its result goes
-  #subagents = new Map<number, Message>(); // spawning call id (= agent id) → subagent message
-  #turnStarted = 0;
-  #tokens = { in: 0, out: 0 };
-  #context = 0; // tokens the model saw on the last call: the conversation's size
-  #compacting = false;
+  #sessions: Session[] = [];
+  #active = 0;
+  #tabHits: TabHit[] = [];
+  #hover: number | null = null; // tab bar item under the pointer
+  #colors: Surfaces = surfaces(guessBackground());
 
+  #showThinking = false;
   #showTrace = false;
   #inputWidth = 40;
-  #spinner = 0;
-  #spinTimer: ReturnType<typeof setInterval> | null = null;
+  #ticker: ReturnType<typeof setInterval> | null = null;
   #escTimer: ReturnType<typeof setTimeout> | null = null;
   #renderQueued = false;
   #frame = { ms: 0, bytes: 0 };
   #quitting = false;
 
-  constructor({ config, allowAll = false, prompt }: AppOptions) {
-    this.#provider = config.provider;
-    this.#model = config.model;
-    this.#hasKey = !!config.apiKey;
-    this.#initialPrompt = prompt;
+  constructor({ config, allowAll = false, prompt, images = [] }: AppOptions) {
+    this.#config = config;
     this.#allowAll = allowAll;
-    this.#hostTools = hostToolsFor(config.provider);
-    this.#bridge = new AgentBridge(agentOptions(config, allowAll ? "allow" : "ask"), (events) => this.#onAgentEvents(events));
-    for (const tool of this.#hostTools) this.#bridge.agent.registerTool(tool);
-    this.#runner = new HostToolRunner(this.#bridge.agent, this.#hostTools, (fn, detail) =>
-      fn === "note" ? this.#trace.note(detail) : this.#trace.call(fn, detail),
-    );
+    this.#initialPrompt = prompt;
+    this.#initialImages = images;
     this.#term.setMouse(config.mouse);
+
+    const { store, error } = Store.open();
+    this.#store = store;
+    // The most recent few, in the order they were started; the newest is on screen.
+    const recent = (store?.summaries(this.#directory) ?? []).slice(0, prompt ? MAX_TABS - 1 : MAX_TABS);
+    for (const summary of [...recent].reverse()) {
+      const stored = store!.get(summary.id);
+      if (stored) this.#sessions.push(this.#restore(stored));
+    }
+    if (!this.#sessions.length || prompt) this.#newSession();
+    else this.#switchTo(this.#sessions.length - 1);
+    if (error) this.#session.chat.add({ role: "error", text: `sessions will not be saved: ${error}` });
+  }
+
+  get #session(): Session {
+    return this.#sessions[this.#active]!;
   }
 
   start(): void {
@@ -169,11 +179,10 @@ export class App {
       this.#renderer.invalidate();
       this.#render();
     });
-    const hint =
-      this.#provider === "mock" && !this.#hasKey ? " · set SOPE_API_KEY (or .env) to talk to a real model" : "";
-    const yolo = this.#allowAll ? " · --allow-all: edits and commands run without asking" : "";
-    this.#chat.add({ role: "info", text: `sope ${version()} · ${this.#provider}${this.#model ? ` · ${this.#model}` : ""} · ${process.cwd().replace(homedir(), "~")} · /help for commands${hint}${yolo}` });
-    if (this.#initialPrompt) this.#sendMessage(this.#initialPrompt);
+    if (this.#initialPrompt) {
+      const numbers = this.#initialImages.map((img) => this.#session.addImage(img));
+      this.#send([this.#initialPrompt, ...numbers.map((n) => `[Image #${n}]`)].join(" "));
+    }
     this.#render();
   }
 
@@ -185,10 +194,132 @@ export class App {
   async quit(): Promise<void> {
     if (this.#quitting) return;
     this.#quitting = true;
-    this.#setSpinning(false);
-    await this.#bridge.shutdown();
+    this.#tick(false);
+    await Promise.all(this.#sessions.map((s) => s.shutdown()));
+    this.#store?.close();
     this.#term.leave();
     process.exit(0);
+  }
+
+  // ---- sessions -------------------------------------------------------
+
+  #restore(stored: NonNullable<ReturnType<Store["get"]>>): Session {
+    const s = new Session(this.#config, this.#allowAll, (session, events) => this.#onSessionEvents(session, events), {
+      store: this.#store!,
+      directory: this.#directory,
+      stored,
+    });
+    s.chat.showThinking = this.#showThinking;
+    return s;
+  }
+
+  #newSession(): void {
+    this.#makeRoom();
+    const persist = this.#store ? { store: this.#store, directory: this.#directory } : undefined;
+    const s = new Session(this.#config, this.#allowAll, (session, events) => this.#onSessionEvents(session, events), persist);
+    s.chat.showThinking = this.#showThinking;
+    const c = this.#config;
+    const hint = c.provider === "mock" && !c.apiKey ? " · set SOPE_API_KEY (or .env) to talk to a real model" : "";
+    const yolo = this.#allowAll ? " · --allow-all: edits and commands run without asking" : "";
+    s.chat.add({ role: "info", text: `/help for commands${hint}${yolo}` });
+    this.#sessions.push(s);
+    this.#switchTo(this.#sessions.length - 1);
+  }
+
+  #switchTo(index: number): void {
+    if (index < 0 || index >= this.#sessions.length) return;
+    this.#active = index;
+    this.#session.unread = false;
+    this.#session.lastUsed = performance.now();
+    this.#selection.clear();
+  }
+
+  /**
+   * Keeps the tabs at MAX_TABS before one more opens: the least recently
+   * used idle tab is put away (saved and stopped, still in the list).
+   */
+  #makeRoom(): void {
+    if (this.#sessions.length < MAX_TABS) return;
+    const idle = this.#sessions.filter((s, i) => i !== this.#active && !s.busy && !s.approvals.length);
+    const victim = idle.sort((a, b) => a.lastUsed - b.lastUsed)[0];
+    if (!victim) return; // all busy: let the bar grow (it scrolls)
+    const index = this.#sessions.indexOf(victim);
+    void victim.shutdown();
+    this.#sessions.splice(index, 1);
+    if (index < this.#active) this.#active--;
+  }
+
+  /** Brings a saved session up in a tab: switches to it if it is open, else restores it. */
+  #openSession(id: string): void {
+    const open = this.#sessions.findIndex((s) => s.id === id);
+    if (open >= 0) return this.#switchTo(open);
+    const stored = this.#store?.get(id);
+    if (!stored) return this.#flash("that session is gone");
+    this.#makeRoom();
+    this.#sessions.push(this.#restore(stored));
+    this.#switchTo(this.#sessions.length - 1);
+  }
+
+  #openList(): void {
+    const open = new Set(this.#sessions.map((s) => s.id));
+    const all = (this.#store?.summaries(this.#directory) ?? []).map((s) => ({ ...s, open: open.has(s.id) }));
+    this.#list = new SessionList(all, this.#dir);
+  }
+
+  /** Keys while the session list is open. */
+  #handleListKey(id: string): void {
+    const list = this.#list!;
+    switch (id) {
+      case "escape":
+      case "ctrl+c":
+        this.#list = null;
+        return;
+      case "enter": {
+        const picked = list.selected;
+        this.#list = null;
+        if (picked) this.#openSession(picked.id);
+        return;
+      }
+      case "up":
+      case "ctrl+p":
+        return list.move(-1);
+      case "down":
+      case "ctrl+n":
+        return list.move(1);
+      case "pageup":
+        return list.move(-10);
+      case "pagedown":
+        return list.move(10);
+      case "home":
+        return list.move(-Infinity);
+      case "end":
+        return list.move(Infinity);
+      case "backspace":
+        return list.backspace();
+    }
+  }
+
+  /** Closes a tab: the session stops and is no longer listed, but stays in the store. */
+  #closeSession(index = this.#active): void {
+    const s = this.#sessions[index];
+    if (!s) return;
+    void s.shutdown().then(() => s.delete());
+    this.#sessions.splice(index, 1);
+    this.#hover = null;
+    if (!this.#sessions.length) return this.#newSession();
+    if (index < this.#active || this.#active >= this.#sessions.length) this.#active--;
+    this.#switchTo(Math.max(0, this.#active));
+  }
+
+  #onSessionEvents(session: Session, events: SopeEvent[]): void {
+    if (session !== this.#session) {
+      if (events.some((ev) => ev.type === "turn_end" && !ev.agentId)) session.unread = true;
+      if (events.some((ev) => ev.type === "permission") && session.approvals.length) {
+        this.#flash(`“${session.title}” is waiting for your approval (alt+${this.#sessions.indexOf(session) + 1})`, 4000);
+      }
+    }
+    this.#tick(this.#sessions.some((s) => s.busy));
+    this.#scheduleRender();
   }
 
   // ---- input ----------------------------------------------------------
@@ -208,36 +339,92 @@ export class App {
   }
 
   #handle(ev: InputEvent): void {
+    if (ev.type === "osc") return this.#handleOsc(ev.data);
     if (ev.type === "mouse") return this.#handleMouse(ev);
     this.#selection.clear();
-    if (this.#approvals.length && (ev.type === "text" || ev.type === "paste")) {
+    if (this.#list) {
+      if (ev.type === "key") return this.#handleListKey(keyId(ev));
+      return this.#list.type(ev.text);
+    }
+    if (this.#session.approvals.length && (ev.type === "text" || ev.type === "paste")) {
       if (ev.type === "text" && [...ev.text].length === 1) this.#handleApprovalKey(ev.text);
       return; // the input box is hidden while a permission prompt is up
     }
     switch (ev.type) {
       case "text":
-      case "paste":
-        this.#editor.insert(ev.text);
+        this.#session.editor.insert(ev.text);
         return;
+      case "paste": {
+        // A file dragged into the terminal arrives as its path.
+        const path = pastedImagePath(ev.text);
+        if (path) {
+          try {
+            return this.#insertImage(readImageFile(path));
+          } catch (err) {
+            this.#flash((err as Error).message, 4000);
+          }
+        }
+        this.#session.editor.insert(ev.text);
+        return;
+      }
       case "key":
         this.#handleKey(keyId(ev));
     }
   }
 
+  /** The terminal's answer to the background color query (terminal.ts). */
+  #handleOsc(data: string): void {
+    if (!data.startsWith("11;")) return;
+    const bg = parseOscColor(data);
+    if (bg !== null) this.#colors = surfaces(bg);
+  }
+
+  #tabAt(x: number, y: number): TabHit | undefined {
+    return y === 0 ? this.#tabHits.find((h) => x >= h.x0 && x < h.x1) : undefined;
+  }
+
   #handleMouse(ev: MouseInput): void {
     const p = { x: ev.x, y: ev.y };
+    if (ev.action === "move" || ev.action === "drag") this.#hover = this.#tabAt(ev.x, ev.y)?.index ?? null;
+    if (this.#list) return this.#handleListMouse(ev);
     switch (ev.action) {
+      case "move":
+        return;
       case "wheel-up":
       case "wheel-down":
         this.#selection.clear(); // it is in screen cells: the text under it is about to move
-        return this.#chat.scrollBy(ev.action === "wheel-up" ? 3 : -3);
-      case "press":
-        if (ev.button === 0) this.#selection.press(p);
+        return this.#session.chat.scrollBy(ev.action === "wheel-up" ? 3 : -3);
+      case "press": {
+        if (ev.button !== 0) return;
+        const hit = this.#tabAt(ev.x, ev.y);
+        if (hit) {
+          if (hit.index === NEW_TAB) return this.#newSession();
+          if (hit.index === ALL_SESSIONS) return this.#openList();
+          return hit.close ? this.#closeSession(hit.index) : this.#switchTo(hit.index);
+        }
+        this.#selection.press(p);
         return;
+      }
       case "drag":
         return this.#selection.drag(p);
       case "release":
         if (this.#selection.release(p)) this.#copySelection();
+    }
+  }
+
+  #handleListMouse(ev: MouseInput): void {
+    const list = this.#list!;
+    if (ev.action === "wheel-up" || ev.action === "wheel-down") return list.move(ev.action === "wheel-up" ? -3 : 3);
+    if (ev.action !== "press" || ev.button !== 0) return;
+    if (this.#tabAt(ev.x, ev.y)?.index === ALL_SESSIONS) {
+      this.#list = null; // ⋯ again closes it
+      return;
+    }
+    const hit = list.hit(ev.x, ev.y);
+    if (hit === "outside") this.#list = null;
+    else if (hit) {
+      this.#list = null;
+      this.#openSession(hit.id);
     }
   }
 
@@ -250,27 +437,41 @@ export class App {
   }
 
   /** Shows a short message in place of the key hints. */
-  #flash(text: string): void {
+  #flash(text: string, ms = 2000): void {
     this.#notice = text;
     if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
     this.#noticeTimer = setTimeout(() => {
       this.#notice = null;
       this.#scheduleRender();
-    }, 2000);
+    }, ms);
   }
 
   #handleKey(id: string): void {
-    if (this.#approvals.length && this.#handleApprovalKey(id)) return;
-    const e = this.#editor;
+    if (this.#session.approvals.length && this.#handleApprovalKey(id)) return;
+    const s = this.#session;
+    const e = s.editor;
+    const tab = /^alt\+([1-9])$/.exec(id);
+    if (tab) return this.#switchTo(Number(tab[1]) - 1);
     switch (id) {
+      case "alt+n":
+        return this.#newSession();
+      case "alt+w":
+        return this.#closeSession();
       case "enter":
         return this.#submit();
       case "ctrl+j":
       case "alt+enter":
       case "shift+enter":
         return e.insert("\n");
+      case "ctrl+v":
+        this.#flash("reading the clipboard…");
+        void clipboardImage()
+          .then((img) => (img ? this.#insertImage(img) : this.#flash("no image on the clipboard (paste text with your terminal's paste)", 4000)))
+          .catch((err: Error) => this.#flash(err.message, 4000))
+          .finally(() => this.#scheduleRender());
+        return;
       case "ctrl+c":
-        if (this.#busy) return this.#cancel();
+        if (s.busy) return s.cancel();
         if (e.text) return e.clear();
         void this.quit();
         return;
@@ -279,7 +480,7 @@ export class App {
         else e.deleteForward();
         return;
       case "escape":
-        if (this.#busy) this.#cancel();
+        if (s.busy) s.cancel();
         return;
       case "ctrl+t":
       case "f2":
@@ -288,9 +489,9 @@ export class App {
       case "ctrl+l":
         return this.#renderer.invalidate();
       case "pageup":
-        return this.#chat.scrollBy(this.#chat.pageSize);
+        return s.chat.scrollBy(s.chat.pageSize);
       case "pagedown":
-        return this.#chat.scrollBy(-this.#chat.pageSize);
+        return s.chat.scrollBy(-s.chat.pageSize);
       case "backspace":
         return e.backspace();
       case "delete":
@@ -333,58 +534,65 @@ export class App {
     }
   }
 
-  #submit(): void {
-    const text = this.#editor.text.trim();
-    if (!text) return;
-    this.#editor.submit();
-    this.#chat.scrollToBottom();
-    if (text.startsWith("/")) return this.#command(text);
-    this.#sendMessage(text);
-  }
-
-  #sendMessage(text: string): void {
-    this.#chat.add({ role: "user", text });
-    try {
-      const turnId = this.#bridge.agent.send(text);
-      this.#openTurns.add(turnId);
-      this.#trace.call("sope_send", `t${turnId} ${JSON.stringify(text)}`);
-    } catch (err) {
-      this.#chat.add({ role: "error", text: (err as Error).message });
+  #handleApprovalKey(id: string): boolean {
+    const decision: Decision | undefined = (
+      { y: "once", enter: "once", a: "always", n: "deny", escape: "stop", "ctrl+c": "stop" } as Record<string, Decision>
+    )[id.toLowerCase()];
+    if (!decision) {
+      // Switching tabs still works; everything else is swallowed.
+      return !["pageup", "pagedown", "ctrl+t", "f2", "ctrl+l", "alt+n", "alt+w"].includes(id) && !/^alt\+[1-9]$/.test(id);
     }
-    this.#setSpinning(this.#busy);
+    this.#session.decide(decision);
+    return true;
   }
 
-  #cancel(): void {
-    this.#bridge.agent.cancel();
-    this.#trace.call("sope_cancel", "");
+  #submit(): void {
+    const s = this.#session;
+    const text = s.editor.text.trim();
+    if (!text) return;
+    s.editor.submit();
+    s.chat.scrollToBottom();
+    if (text.startsWith("/")) return this.#command(text);
+    this.#send(text);
   }
 
-  #setOption(key: string, value: string | null): void {
-    this.#bridge.agent.setOption(key, value);
-    this.#trace.call("sope_agent_set_option", `${key}=${key.includes("key") ? "***" : (value ?? "(unset)")}`);
-    if (key === "provider") this.#provider = value ?? "mock";
-    if (key === "model") this.#model = value ?? "";
+  #send(text: string): void {
+    const s = this.#session;
+    s.send(text, imageRefs(text).filter((n) => s.images.has(n)));
+    this.#tick(s.busy);
+  }
+
+  /** Puts an image into the message being written, as an [Image #N] token. */
+  #insertImage(img: ImageFile): void {
+    const s = this.#session;
+    const n = s.addImage(img);
+    const e = s.editor;
+    const before = e.text.slice(0, e.cursor);
+    e.insert(`${before && !/\s$/.test(before) ? " " : ""}[Image #${n}] `);
+    this.#flash(`attached [Image #${n}] ${describeImage(img)}`);
   }
 
   #command(line: string): void {
     const [cmd = "", ...args] = line.slice(1).split(/\s+/);
-    const info = (text: string) => this.#chat.add({ role: "info", text });
+    const s = this.#session;
+    const info = (text: string) => s.chat.add({ role: "info", text });
     try {
       switch (cmd) {
         case "help":
-          return void info(HELP(this.#hostTools));
-        case "compact": {
-          const focus = args.join(" ");
-          const turnId = this.#bridge.agent.compact(focus);
-          this.#openTurns.add(turnId);
-          this.#compacting = true;
-          this.#trace.call("sope_compact", `t${turnId}${focus ? ` ${JSON.stringify(focus)}` : ""}`);
-          this.#setSpinning(true);
+          return void info(HELP(s.hostTools));
+        case "new":
+          return this.#newSession();
+        case "close":
+          return this.#closeSession();
+        case "sessions":
+          return this.#openList();
+        case "compact":
+          s.compact(args.join(" "));
+          this.#tick(true);
           return;
-        }
         case "permissions": {
           if (this.#allowAll) return void info("--allow-all: every tool runs without asking");
-          const allowed = [...this.#alwaysAllowed];
+          const allowed = [...s.alwaysAllowed];
           return void info(
             `Ask before: ${ASKING_TOOLS.filter((n) => !allowed.includes(n)).join(", ") || "(nothing)"}\n` +
               `Allowed for this session: ${allowed.join(", ") || "(nothing)"}\n` +
@@ -392,18 +600,15 @@ export class App {
           );
         }
         case "clear":
-          this.#chat.clear();
-          this.#context = 0;
-          this.#bridge.agent.reset();
-          this.#trace.call("sope_agent_reset", "");
-          return;
+          return s.reset();
         case "model":
-          if (!args[0]) return void info(`model: ${this.#model || "(provider default)"}`);
-          this.#setOption("model", args[0]);
+          if (!args[0]) return void info(`model: ${s.model || "(provider default)"}`);
+          s.setOption("model", args[0]);
           return void info(`model = ${args[0]} (from the next turn)`);
         case "thinking":
-          this.#chat.showThinking = !this.#chat.showThinking;
-          return void info(`full reasoning ${this.#chat.showThinking ? "shown" : "collapsed"}`);
+          this.#showThinking = !this.#showThinking;
+          for (const other of this.#sessions) other.chat.showThinking = this.#showThinking;
+          return void info(`full reasoning ${this.#showThinking ? "shown" : "collapsed"}`);
         case "trace":
           this.#showTrace = !this.#showTrace;
           return;
@@ -412,9 +617,9 @@ export class App {
           return void info(`mouse reporting ${this.#term.mouse ? "on" : "off"}`);
         case "set": {
           const [key, ...rest] = args;
-          if (!key) return void this.#chat.add({ role: "error", text: "usage: /set <key> [value]" });
+          if (!key) return void s.chat.add({ role: "error", text: "usage: /set <key> [value]" });
           const value = rest.length ? rest.join(" ") : null;
-          this.#setOption(key, value);
+          s.setOption(key, value);
           return void info(value === null ? `unset ${key}` : `${key} = ${key.includes("key") ? "***" : value}`);
         }
         case "quit":
@@ -422,274 +627,22 @@ export class App {
           void this.quit();
           return;
         default:
-          this.#chat.add({ role: "error", text: `unknown command /${cmd} (try /help)` });
+          s.chat.add({ role: "error", text: `unknown command /${cmd} (try /help)` });
       }
     } catch (err) {
-      this.#chat.add({ role: "error", text: (err as Error).message });
+      s.chat.add({ role: "error", text: (err as Error).message });
     }
-  }
-
-  // ---- agent events ---------------------------------------------------
-
-  get #busy(): boolean {
-    return this.#openTurns.size > 0;
-  }
-
-  #onAgentEvents(events: SopeEvent[]): void {
-    for (const ev of events) {
-      this.#trace.event(ev);
-      if (ev.type === "closed") continue;
-      if (ev.agentId) this.#onSubagentEvent(ev);
-      else this.#onRootEvent(ev);
-    }
-    this.#setSpinning(this.#busy);
-    this.#scheduleRender();
-  }
-
-  #onRootEvent(ev: Exclude<SopeEvent, { type: "closed" }>): void {
-    switch (ev.type) {
-      case "turn_start":
-        this.#turnStarted = performance.now();
-        return;
-      case "thinking_delta": {
-        let m = this.#thinking.get(ev.turnId);
-        if (!m) {
-          this.#endAssistant(ev.turnId); // a new round of reasoning starts a new block
-          m = this.#chat.add({ role: "thinking", text: "", streaming: true, turnId: ev.turnId, startedAt: performance.now() });
-          this.#thinking.set(ev.turnId, m);
-        }
-        this.#chat.append(m, ev.text);
-        return;
-      }
-      case "text_delta": {
-        this.#endThinking(ev.turnId);
-        let m = this.#assistant.get(ev.turnId);
-        if (!m) {
-          m = this.#chat.add({ role: "assistant", text: "", streaming: true, turnId: ev.turnId });
-          this.#assistant.set(ev.turnId, m);
-        }
-        this.#chat.append(m, ev.text);
-        return;
-      }
-      case "tool_call": // a host tool: we run it
-      case "tool_start": {
-        // a built-in: libsope runs it
-        this.#endRound(ev.turnId);
-        const input = parseInput(ev.input);
-        const todos = ev.name === "todo_write" ? todosOf(input) : null;
-        const msg = this.#chat.add({
-          role: "tool",
-          title: ev.name,
-          detail: describeCall(ev.name, input),
-          text: todos ? formatTodos(todos) : "",
-          streaming: true,
-          turnId: ev.turnId,
-        });
-        this.#toolCalls.set(ev.callId, { msg });
-        if (ev.type === "tool_call") this.#runner.run(ev.callId, ev.turnId, ev.name, ev.input);
-        return;
-      }
-      case "tool_end":
-        return this.#onToolEnd(ev.callId, ev.name, ev.result, ev.isError);
-      case "permission":
-        return this.#onPermission(ev.callId, ev.turnId, ev.name, ev.input);
-      case "subagent_start": {
-        this.#endRound(ev.turnId);
-        let description = "";
-        try {
-          description = String((JSON.parse(ev.input) as { description?: unknown }).description ?? "");
-        } catch {
-          // keep it empty
-        }
-        const msg = this.#chat.add({
-          role: "subagent",
-          title: ev.subagentType,
-          detail: description,
-          text: "",
-          streaming: true,
-          turnId: ev.turnId,
-          startedAt: performance.now(),
-          steps: [],
-          tail: "",
-        });
-        this.#subagents.set(ev.callId, msg);
-        return;
-      }
-      case "subagent_end": {
-        const m = this.#subagents.get(ev.callId);
-        if (m) this.#chat.update(m, { streaming: false, ok: ev.stopReason === "end_turn", text: ev.result, endedAt: performance.now() });
-        this.#subagents.delete(ev.callId);
-        return;
-      }
-      case "usage":
-        this.#tokens.in += ev.inputTokens;
-        this.#tokens.out += ev.outputTokens;
-        if (!this.#compacting) this.#context = ev.inputTokens + ev.outputTokens;
-        return;
-      case "compact": {
-        this.#compacting = false;
-        this.#context = Math.round(ev.summary.length / 4);
-        const words = ev.summary.split(/\s+/).filter(Boolean).length;
-        const why = ev.trigger === "auto" ? "the context grew past the compaction threshold, so " : "";
-        this.#chat.add({ role: "info", text: `✻ Conversation compacted: ${why}the model now works from a ${words}-word summary instead of the full history.` });
-        return;
-      }
-      case "turn_end":
-        this.#compacting = false;
-        this.#runner.endTurn(ev.turnId);
-        this.#dropApprovals(ev.turnId, 0);
-        this.#endRound(ev.turnId);
-        for (const [callId, target] of this.#toolCalls) {
-          const m = "msg" in target ? target.msg : target.sub;
-          if (m.turnId !== ev.turnId) continue;
-          if ("msg" in target) this.#chat.update(m, { streaming: false, ok: false, text: "cancelled" });
-          this.#toolCalls.delete(callId);
-        }
-        this.#openTurns.delete(ev.turnId);
-        if (ev.stopReason === "cancelled") this.#chat.add({ role: "info", text: "turn cancelled" });
-        return;
-      case "error":
-        this.#chat.add({ role: "error", text: ev.message });
-        return;
-      case "log":
-        if (ev.message.startsWith("compacting")) this.#compacting = true;
-        return;
-    }
-  }
-
-  /** Subagent events update the subagent's message instead of the transcript. */
-  #onSubagentEvent(ev: Exclude<SopeEvent, { type: "closed" }>): void {
-    const sub = this.#subagents.get(ev.agentId);
-    switch (ev.type) {
-      case "text_delta":
-        if (sub) this.#chat.update(sub, { tail: ((sub.tail ?? "") + ev.text).slice(-400) });
-        return;
-      case "tool_call":
-      case "tool_start": {
-        if (!sub) {
-          if (ev.type === "tool_call") this.#bridge.agent.toolResult(ev.callId, "subagent is gone", true);
-          return;
-        }
-        const step: Step = { name: ev.name, detail: describeCall(ev.name, parseInput(ev.input)), done: false };
-        this.#chat.update(sub, { steps: [...(sub.steps ?? []), step], tail: "" });
-        this.#toolCalls.set(ev.callId, { sub, step });
-        if (ev.type === "tool_call") this.#runner.run(ev.callId, sub.turnId ?? 0, ev.name, ev.input);
-        return;
-      }
-      case "tool_end":
-        return this.#onToolEnd(ev.callId, ev.name, ev.result, ev.isError);
-      case "permission":
-        return this.#onPermission(ev.callId, ev.turnId, ev.name, ev.input, ev.agentId, sub?.title ?? "subagent");
-      case "turn_end":
-        this.#runner.endTurn(ev.turnId);
-        this.#dropApprovals(ev.turnId, ev.agentId);
-        return;
-      case "usage":
-        this.#tokens.in += ev.inputTokens;
-        this.#tokens.out += ev.outputTokens;
-        return;
-      case "error":
-        this.#chat.add({ role: "error", text: `subagent ${sub?.title ?? ev.agentId}: ${ev.message}` });
-        return;
-      default:
-        return;
-    }
-  }
-
-  #endThinking(turnId: number): void {
-    const m = this.#thinking.get(turnId);
-    if (m) this.#chat.update(m, { streaming: false, endedAt: performance.now() });
-    this.#thinking.delete(turnId);
-  }
-
-  #endAssistant(turnId: number): void {
-    const m = this.#assistant.get(turnId);
-    if (m) this.#chat.update(m, { streaming: false });
-    this.#assistant.delete(turnId);
-  }
-
-  /** A model round ended (tool calls follow): later text starts new blocks. */
-  #endRound(turnId: number): void {
-    this.#endThinking(turnId);
-    this.#endAssistant(turnId);
-  }
-
-  #onToolEnd(callId: number, name: string, result: string, isError: boolean): void {
-    const target = this.#toolCalls.get(callId);
-    this.#dropApproval(callId);
-    if (!target) return;
-    this.#toolCalls.delete(callId);
-    if ("msg" in target) {
-      // todo_write keeps showing the list it set, not the confirmation the model gets
-      const keep = name === "todo_write" && !isError;
-      this.#chat.update(target.msg, keep ? { streaming: false, ok: true } : { streaming: false, ok: !isError, text: result });
-    } else {
-      target.step.done = true;
-      target.step.ok = !isError;
-      this.#chat.update(target.sub, {});
-    }
-    this.#scheduleRender();
-  }
-
-  // ---- permissions ----------------------------------------------------
-
-  #onPermission(callId: number, turnId: number, name: string, rawInput: string, agentId = 0, subagent?: string): void {
-    if (this.#alwaysAllowed.has(name)) return this.#permit(callId, true);
-    this.#approvals.push({ callId, turnId: agentId ? -agentId : turnId, name, input: parseInput(rawInput), subagent });
-    this.#chat.scrollToBottom();
-  }
-
-  #permit(callId: number, allow: boolean): void {
-    try {
-      this.#bridge.agent.permit(callId, allow);
-      this.#trace.call("sope_permit", `#${callId} ${allow ? "allow" : "deny"}`);
-    } catch (err) {
-      this.#trace.note((err as Error).message); // its turn ended meanwhile
-    }
-  }
-
-  #handleApprovalKey(id: string): boolean {
-    const decision: Decision | undefined = (
-      { y: "once", enter: "once", a: "always", n: "deny", escape: "stop", "ctrl+c": "stop" } as Record<string, Decision>
-    )[id.toLowerCase()];
-    if (!decision) return !["pageup", "pagedown", "ctrl+t", "f2", "ctrl+l"].includes(id); // swallow everything else
-    const approval = this.#approvals.shift()!;
-    this.#permit(approval.callId, decision === "once" || decision === "always");
-    if (decision === "always") {
-      // Later requests for the same tool are covered too.
-      this.#alwaysAllowed.add(approval.name);
-      for (const other of this.#approvals.filter((a) => a.name === approval.name)) this.#permit(other.callId, true);
-      this.#approvals = this.#approvals.filter((a) => a.name !== approval.name);
-    }
-    if (decision === "stop") {
-      for (const other of this.#approvals) this.#permit(other.callId, false);
-      this.#approvals = [];
-      this.#cancel();
-    }
-    return true;
-  }
-
-  #dropApproval(callId: number): void {
-    this.#approvals = this.#approvals.filter((a) => a.callId !== callId);
-  }
-
-  /** A turn ended: libsope dropped its pending requests. Subagent turns are keyed by -agentId. */
-  #dropApprovals(turnId: number, agentId: number): void {
-    const key = agentId ? -agentId : turnId;
-    this.#approvals = this.#approvals.filter((a) => a.turnId !== key);
   }
 
   // ---- rendering ------------------------------------------------------
 
-  #setSpinning(on: boolean): void {
-    if (on && !this.#spinTimer) {
-      this.#spinTimer = setInterval(() => {
-        this.#spinner = (this.#spinner + 1) % SPINNER.length;
-        this.#scheduleRender();
-      }, 80);
-    } else if (!on && this.#spinTimer) {
-      clearInterval(this.#spinTimer);
-      this.#spinTimer = null;
+  /** Redraws every animation frame while any session runs. */
+  #tick(on: boolean): void {
+    if (on && !this.#ticker) {
+      this.#ticker = setInterval(() => this.#scheduleRender(), TICK_MS);
+    } else if (!on && this.#ticker) {
+      clearInterval(this.#ticker);
+      this.#ticker = null;
     }
   }
 
@@ -707,9 +660,9 @@ export class App {
     const W = this.#term.cols;
     const H = this.#term.rows;
     const buf = this.#renderer.begin(W, H);
-    const spin = SPINNER[this.#spinner]!;
+    const s = this.#session;
 
-    if (W < 24 || H < 8) {
+    if (W < 24 || H < 10) {
       buf.text(0, 0, "terminal too small", { fg: palette.muted });
       this.#renderer.end();
       return;
@@ -718,49 +671,79 @@ export class App {
     const inner = W - PAD * 2;
     const promptWidth = stringWidth(PROMPT);
     this.#inputWidth = inner - promptWidth;
-    const layout = this.#editor.layout(this.#inputWidth);
-    const approval = this.#approvals[0];
-    const preview = approval ? this.#previewRows(approval, Math.min(MAX_PREVIEW_ROWS, H - 10)) : [];
+    const layout = s.editor.layout(this.#inputWidth);
+    const approval = s.approvals[0];
+    const preview = approval ? this.#previewRows(approval, Math.min(MAX_PREVIEW_ROWS, H - 11)) : [];
     const inputRows = approval ? preview.length + 2 : Math.min(MAX_INPUT_ROWS, layout.rows.length);
 
     const footerY = H - 1;
     const ruleBottomY = footerY - 1;
     const inputY = ruleBottomY - inputRows;
     const ruleTopY = inputY - 1;
-    const bodyY = 2;
-    const bodyH = Math.max(1, ruleTopY - 1 - bodyY);
+    const statusY = ruleTopY - 1;
+    const bodyY = 2; // below the tab bar and a blank row
+    const bodyH = Math.max(1, statusY - bodyY);
 
-    this.#drawHeader(buf, inner);
-    this.#drawBody(buf, { x: PAD, y: bodyY, w: inner, h: bodyH }, spin);
-    this.#drawStatusRule(buf, ruleTopY, inner, spin);
+    this.#tabHits = drawTabs(buf, PAD, 0, inner, this.#tabs(), this.#active, this.#dir, this.#hover, this.#colors);
+    this.#drawBody(buf, { x: PAD, y: bodyY, w: inner, h: bodyH }, t0);
+    if (s.busy) this.#drawStatus(buf, statusY, inner, t0);
+    buf.text(PAD, ruleTopY, "─".repeat(inner), { fg: palette.faint });
     if (approval) this.#drawApproval(buf, inputY, inner, approval, preview);
     else this.#drawInput(buf, inputY, inputRows, layout, promptWidth);
     buf.text(PAD, ruleBottomY, "─".repeat(inner), { fg: palette.faint });
     this.#drawHints(buf, footerY, inner);
+    if (this.#list) {
+      this.#list.render(buf, { x: PAD, y: bodyY, w: inner, h: H - bodyY - 1 }, this.#colors);
+      this.#renderer.cursor = { x: 0, y: 0, visible: false };
+    }
     this.#selection.highlight(buf);
 
     const bytes = this.#renderer.end();
     this.#frame = { ms: performance.now() - t0, bytes };
   }
 
+  #tabs(): TabInfo[] {
+    return this.#sessions.map((s) => ({
+      title: s.title,
+      state: s.approvals.length ? "waiting" : s.busy ? "busy" : s.unread ? "unread" : "idle",
+    }));
+  }
+
   #previewRows(a: Approval, max: number): PreviewLine[] {
     const rows = previewFor(a.name, a.input);
-    return rows.length > max ? [...rows.slice(0, max - 1), { text: `… ${rows.length - max + 1} more lines`, kind: "plain" }] : rows;
+    return rows.length > max ? [...rows.slice(0, max - 1), { text: `⋯ ${rows.length - max + 1} more lines`, kind: "gap" }] : rows;
   }
 
   #drawApproval(buf: CellBuffer, y: number, inner: number, a: Approval, preview: PreviewLine[]): void {
+    const waiting = this.#session.approvals.length;
     const who = a.subagent ? `subagent ${a.subagent} wants` : "sope wants";
     let x = buf.text(PAD, y, "? ", { fg: palette.tool, bold: true });
     x = buf.text(x, y, `${who} to run `, { fg: palette.muted });
     x = buf.text(x, y, a.name, { fg: palette.tool, bold: true });
-    if (this.#approvals.length > 1) buf.text(x, y, `  (+${this.#approvals.length - 1} more waiting)`, { fg: palette.faint });
+    if (waiting > 1) buf.text(x, y, `  (+${waiting - 1} more waiting)`, { fg: palette.faint });
 
-    const marks = { add: "+ ", remove: "- ", command: "$ ", plain: "  " } as const;
+    // Diff lines: line number, +/- on a tinted row, highlighted code.
+    const numWidth = Math.max(0, ...preview.map((l) => (l.no ? String(l.no).length : 0)));
+    const code = preview.find((l) => l.lang)?.lang;
+    const hl = code ? new Highlighter(code) : null;
+    const marks = { add: "+", remove: "-", context: " ", command: "$", gap: " ", plain: " " } as const;
     preview.forEach((line, i) => {
-      const mark = marks[line.kind ?? "plain"];
-      const style = { fg: previewColor(line.kind) };
-      buf.text(PAD + 2, y + 1 + i, mark, style);
-      buf.text(PAD + 4, y + 1 + i, truncate(line.text.replace(/\t/g, "  "), inner - 4), line.kind === "plain" ? { fg: palette.muted } : {});
+      const ry = y + 1 + i;
+      const kind = line.kind ?? "plain";
+      const tint = kind === "add" ? this.#colors.added : kind === "remove" ? this.#colors.removed : undefined;
+      if (tint !== undefined) buf.fill(PAD + 2, ry, inner - 2, 1, { bg: tint });
+      let x = PAD + 2;
+      if (numWidth) x = buf.text(x, ry, `${line.no ? String(line.no).padStart(numWidth) : " ".repeat(numWidth)} `, { fg: palette.faint, bg: tint });
+      x = buf.text(x, ry, `${marks[kind]} `, { fg: previewColor(line.kind), bg: tint, bold: kind === "add" || kind === "remove" });
+      const text = line.text.replace(/\t/g, "  ");
+      const end = PAD + inner;
+      if (kind === "gap" || kind === "plain") return void buf.text(x, ry, truncate(text, end - x), { fg: palette.muted });
+      if (!hl || !line.lang) return void buf.text(x, ry, truncate(text, end - x), { bg: tint });
+      // Removed and added lines are both highlighted by the same pass; good enough for a preview.
+      for (const tok of hl.line(text)) {
+        if (x >= end) break;
+        x = buf.text(x, ry, tok.text, { fg: SYNTAX[tok.kind], bg: tint, italic: tok.kind === "comment", dim: kind === "remove" && tok.kind === "plain" }, end);
+      }
     });
 
     const options: Array<[string, string]> = [
@@ -779,82 +762,46 @@ export class App {
     this.#renderer.cursor = { x: 0, y: 0, visible: false };
   }
 
-  #drawHeader(buf: CellBuffer, inner: number): void {
-    let x = buf.text(PAD, 0, "◆ sope", { fg: palette.accent, bold: true });
-    buf.text(x + 1, 0, version(), { fg: palette.faint });
+  #drawBody(buf: CellBuffer, r: { x: number; y: number; w: number; h: number }, now: number): void {
+    const { chat, trace } = this.#session;
+    const spin = SPINNER[Math.floor(now / SPINNER_MS) % SPINNER.length]!;
+    if (!this.#showTrace) return chat.render(buf, r, spin);
 
-    const busy = this.#busy;
-    const parts = [this.#provider, this.#model].filter(Boolean);
-    const total = this.#tokens.in + this.#tokens.out;
-    if (this.#context) parts.push(`ctx ${formatTokens(this.#context)}`);
-    if (total) parts.push(`${formatTokens(total)} tok`);
-    const right = parts.join(" · ");
-    const state = busy ? "running" : "ready";
-    x = PAD + inner - (stringWidth(right) + 3 + 2 + state.length);
-    x = buf.text(x, 0, right, { fg: palette.muted });
-    x = buf.text(x, 0, " · ", { fg: palette.faint });
-    x = buf.text(x, 0, "● ", { fg: busy ? palette.accent : palette.ok });
-    buf.text(x, 0, state, { fg: palette.muted });
-  }
-
-  #drawBody(buf: CellBuffer, r: { x: number; y: number; w: number; h: number }, spin: string): void {
-    if (!this.#showTrace) return this.#chat.render(buf, r, spin);
-
-    const stats = `${this.#trace.count} · ${this.#frame.ms.toFixed(1)}ms ${this.#frame.bytes}B`;
+    const stats = `${trace.count} · ${this.#frame.ms.toFixed(1)}ms ${this.#frame.bytes}B`;
     if (r.w >= 100) {
       const traceW = Math.min(64, Math.floor(r.w * 0.42));
       const chatW = r.w - traceW - 3;
-      this.#chat.render(buf, { ...r, w: chatW }, spin);
+      chat.render(buf, { ...r, w: chatW }, spin);
       for (let y = r.y; y < r.y + r.h; y++) buf.text(r.x + chatW + 1, y, "│", { fg: palette.faint });
-      this.#trace.render(buf, { x: r.x + chatW + 3, y: r.y, w: traceW, h: r.h }, stats);
+      trace.render(buf, { x: r.x + chatW + 3, y: r.y, w: traceW, h: r.h }, stats);
     } else {
       const traceH = Math.max(3, Math.floor(r.h * 0.45));
       const chatH = r.h - traceH - 1;
-      this.#chat.render(buf, { ...r, h: chatH }, spin);
+      chat.render(buf, { ...r, h: chatH }, spin);
       buf.text(r.x, r.y + chatH, "┄".repeat(r.w), { fg: palette.faint });
-      this.#trace.render(buf, { x: r.x, y: r.y + chatH + 1, w: r.w, h: traceH }, stats);
+      trace.render(buf, { x: r.x, y: r.y + chatH + 1, w: r.w, h: traceH }, stats);
     }
   }
 
-  #statusLabel(): { text: string; color: number } {
-    if (this.#approvals.length) return { text: "waiting for your approval", color: palette.tool };
-    if (this.#compacting) return { text: "compacting the conversation", color: palette.accent };
-    if (this.#subagents.size) return { text: `${this.#subagents.size} subagent${this.#subagents.size > 1 ? "s" : ""} working`, color: palette.accent };
-    if (this.#toolCalls.size) return { text: "running tools", color: palette.tool };
-    for (const m of this.#thinking.values()) if (m.streaming) return { text: "thinking", color: palette.accent };
-    if (this.#assistant.size) return { text: "writing", color: palette.accent };
-    return { text: "waiting for the model", color: palette.muted };
+  #drawStatus(buf: CellBuffer, y: number, inner: number, now: number): void {
+    const s = this.#session;
+    const elapsedMs = now - s.turnStarted;
+    drawStatus(buf, PAD, y, inner, { ...s.activity(), elapsedMs, rate: s.rate.rate(now), tip: tipAt(elapsedMs, s.turnCount) }, now);
   }
 
-  #drawStatusRule(buf: CellBuffer, y: number, inner: number, spin: string): void {
-    buf.text(PAD, y, "─".repeat(inner), { fg: palette.faint });
-    if (!this.#busy) return;
-    const status = this.#statusLabel();
-    const elapsed = ((performance.now() - this.#turnStarted) / 1000).toFixed(1);
-    const label = ` ${status.text} · ${elapsed}s `;
-    const x = PAD + inner - stringWidth(label) - 4;
-    buf.text(x, y, ` ${spin}`, { fg: status.color });
-    buf.text(x + 2, y, label, { fg: palette.muted });
-  }
-
-  #drawInput(
-    buf: CellBuffer,
-    y: number,
-    rows: number,
-    layout: ReturnType<Editor["layout"]>,
-    promptWidth: number,
-  ): void {
+  #drawInput(buf: CellBuffer, y: number, rows: number, layout: ReturnType<Editor["layout"]>, promptWidth: number): void {
+    const editor = this.#session.editor;
     const x = PAD + promptWidth;
     buf.text(PAD, y, PROMPT, { fg: palette.accent, bold: true });
 
-    if (!this.#editor.text) {
-      const placeholder = this.#provider === "mock" ? "Message sope…  try !echo hi, !agent a | b, or /help" : "Message sope…  /help for commands";
+    if (!editor.text) {
+      const placeholder = this.#session.provider === "mock" ? "Message sope…  try !echo hi, !agent a | b, or /help" : "Message sope…  /help for commands";
       buf.text(x, y, placeholder, { fg: palette.faint });
     } else {
       const scroll = Math.max(0, layout.cursorRow - rows + 1);
       for (let i = 0; i < rows; i++) {
         const row = layout.rows[scroll + i];
-        if (row) buf.text(x, y + i, this.#editor.text.slice(row.start, row.end), {}, x + this.#inputWidth);
+        if (row) buf.text(x, y + i, editor.text.slice(row.start, row.end), {}, x + this.#inputWidth);
       }
       layout.cursorRow -= scroll;
     }
@@ -862,21 +809,25 @@ export class App {
     this.#renderer.cursor = { x: x + layout.cursorCol, y: y + layout.cursorRow, visible: true };
   }
 
+  /** Key hints on the left, the model and context size on the right. */
   #drawHints(buf: CellBuffer, y: number, inner: number): void {
-    if (this.#notice) return void buf.text(PAD, y, truncate(this.#notice, inner), { fg: palette.ok });
+    const s = this.#session;
+    const parts = [s.provider === "mock" ? "mock provider" : s.model || s.provider];
+    const total = s.tokens.in + s.tokens.out;
+    if (s.context) parts.push(`ctx ${formatTokens(s.context)}`);
+    if (total) parts.push(`${formatTokens(total)} tok`);
+    const right = truncate(parts.join(" · "), Math.floor(inner / 2));
+    const rightX = PAD + inner - stringWidth(right);
+    buf.text(rightX, y, right, { fg: palette.muted });
+
+    const end = rightX - 2;
+    if (this.#notice) return void buf.text(PAD, y, truncate(this.#notice, end - PAD), { fg: palette.tool });
     let x = PAD;
-    const end = PAD + inner;
-    HINTS.forEach(([key, what], i) => {
-      if (x >= end) return;
-      if (i > 0) x = buf.text(x, y, "  ", {}, end);
-      const piece = `${key} ${what}`;
-      if (x + stringWidth(piece) > end) {
-        buf.text(x, y, truncate(piece, end - x), { fg: palette.faint }, end);
-        x = end;
-        return;
-      }
-      x = buf.text(x, y, key, { fg: palette.muted }, end);
+    for (const [i, [key, what]] of HINTS.entries()) {
+      const gap = i > 0 ? 2 : 0;
+      if (x + gap + stringWidth(`${key} ${what}`) > end) break; // drop hints that do not fit whole
+      x = buf.text(x + gap, y, key, { fg: palette.muted }, end);
       x = buf.text(x + 1, y, what, { fg: palette.faint }, end);
-    });
+    }
   }
 }

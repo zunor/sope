@@ -2,7 +2,7 @@
 
 `include/sope.h` 是 ABI 的唯一事实来源。本文解释头文件注释里放不下的东西：线程模型、生命周期、回合与子 agent 语义、所有权，以及给语言绑定作者的说明。
 
-> 当前版本 0.2.0（ABI 0.2）。兼容规则（`sope_version_number()` 返回运行时实际加载的版本）：
+> 当前版本 0.3.0（ABI 0.3）。兼容规则（`sope_version_number()` 返回运行时实际加载的版本）：
 > - 1.0 之后按语义化版本：针对 X.Y 编译的宿主，可以使用任何 X.Z（Z ≥ Y）的库；破坏性变更只出现在主版本号。
 > - 1.0 之前，次版本号变化就可能破坏 ABI：宿主要求主、次版本号都相同，修订号可以不同。
 >
@@ -85,6 +85,19 @@ sope_agent_close ─▶ 继续取事件直到 SOPE_ECLOSED ─▶ sope_agent_fre
 - `sope_agent_close` 幂等：取消运行中的回合（连同其子 agent），把排队中的回合以 `cancelled` 结束，之后 `sope_send` 返回 `SOPE_ECLOSED`。剩余事件取完后 `sope_poll` 返回 `SOPE_ECLOSED`。
 - `sope_agent_free` 会在需要时先 close，等线程池处理完该 agent **及其所有子 agent**，再释放内存。
 - `sope_agent_reset` 清空对话历史，在下一个回合开始时生效。
+- **保存与恢复会话**：`sope_agent_history(agent, &json, &len)` 把对话历史导出为 JSON 数组，`sope_agent_load_history(agent, json, len)` 把它装回（可以是另一个进程里的新 agent）。两者都只能在回合之间调用，回合运行或排队时返回 `SOPE_EBUSY`，所以在 `SOPE_EVENT_TURN_END` 时导出最合适。导出的指针在下一次 `sope_agent_history` 或 `sope_agent_free` 之前有效，不需要宿主释放。库不管存储，存在哪由宿主决定（sope TUI 用 SQLite）。
+
+  ```json
+  [{"role":"user","content":"修一下这个 bug"},
+   {"role":"assistant","content":"我先看看。",
+    "tool_uses":[{"id":"call_1","name":"read","input":"{\"file_path\":\"a.c\"}"}]},
+   {"role":"tool","tool_use_id":"call_1","name":"read","content":"…","is_error":false},
+   {"role":"assistant","content":"改好了。"}]
+  ```
+
+  `input` 是工具输入 JSON 的字符串形式。带图片的 user 和 tool 消息另有 `"images":[{"media_type":"image/png","data":"<base64>"}]`。压缩过的历史以摘要（一条 user 消息）开头；推理过程不保存。装回时，结尾没有回答的工具调用会补上“cancelled”结果；agent 会忘记读过哪些文件，所以恢复后修改文件前要先重新读。格式不对返回 `SOPE_EINVAL`，`sope_last_error()` 说明是哪条消息。
+
+- **图片**：`sope_attach_image(agent, media_type, data, len)` 把一张图片（PNG、JPEG、GIF、WebP 的原始字节，最多 10 MiB，库会复制）挂到下一次 `sope_send` 的消息上；一条消息带走此前附加的全部图片，`sope_compact` 不会带走。`media_type` 传 NULL 时按文件头识别。内置工具也会产生图片：`read` 读到图片文件、`web_fetch` 抓到图片 URL 时，结果附带图片给模型看。`openai` provider 把图片作为 `image_url`（data URL）内容块发送；tool 消息只能放文字，所以一轮工具结果里的图片紧跟着用一条 user 消息补发。模型要能看图：只认文字的模型（如 glm-5.3，服务端会返回 400）可以设置选项 `image_model`，对话里一出现图片，之后的请求就改用它。
 
 ## 5. 回合（turn）与 agent 循环
 
@@ -133,7 +146,7 @@ sope_agent_close ─▶ 继续取事件直到 SOPE_ECLOSED ─▶ sope_agent_fre
 
 | 工具 | 作用 | 需要许可 |
 |---|---|---|
-| `read` | 读文件，`cat -n` 格式带行号；`offset`/`limit` 分段，默认 2000 行；二进制文件和目录会报错 | 否 |
+| `read` | 读文件，`cat -n` 格式带行号；`offset`/`limit` 分段，默认 2000 行；图片文件（PNG、JPEG、GIF、WebP）直接交给模型看；其他二进制文件和目录会报错 | 否 |
 | `glob` | 按路径模式找文件（`**/*.ts`、`src/**/test_*.{c,h}`），按修改时间新→旧，最多 100 个 | 否 |
 | `grep` | 按正则搜索内容；`output_mode` = `files_with_matches`（默认）/ `content` / `count`，支持 `glob`、`case_insensitive`、`context`、`head_limit` | 否 |
 | `write` | 写文件（自动创建父目录） | 是 |
@@ -141,7 +154,7 @@ sope_agent_close ─▶ 继续取事件直到 SOPE_ECLOSED ─▶ sope_agent_fre
 | `bash` | `bash -c` 执行命令，返回合并的 stdout/stderr 和退出码；`timeout` 默认 2 分钟、最长 10 分钟；`run_in_background` 后台运行 | 是 |
 | `bash_output` | 读后台命令自上次以来的新输出，以及是否还在运行 | 否 |
 | `bash_kill` | 停止后台命令及其所有子进程 | 否 |
-| `web_fetch` | 抓取 http(s) URL：HTML 转成带标题、列表、链接的文本，文本和 JSON 原样返回；跟随重定向，长页面用 `offset` 分段（每段约 4 万字节） | 是 |
+| `web_fetch` | 抓取 http(s) URL：HTML 转成带标题、列表、链接的文本（页面里的图片写成 `![alt](url)`），文本和 JSON 原样返回，图片 URL 直接把图片给模型；跟随重定向，长页面用 `offset` 分段（每段约 4 万字节） | 是 |
 | `todo_write` | 维护任务清单：每次提交完整列表，每项有 `content`、`activeForm`、`status` | 否 |
 
 工具的完整描述和 JSON Schema 在 `src/tools.c`，模型看到的就是这些。
@@ -246,6 +259,7 @@ sope_subagent_register(agent, def, sizeof def - 1);
 |---|---|---|
 | `provider` | `mock`（离线）或 `openai`（任何 OpenAI 兼容服务） | `mock` |
 | `model` | 模型名，如 `glm-5.3`；`openai` 必填 | — |
+| `image_model` | 对话里出现图片后改用的模型（`model` 不能看图时用） | 用 `model` |
 | `system` | 系统提示词 | 内置的简短提示词 |
 | `max_rounds` | 每个回合最多调用模型的次数 | `32` |
 | `cwd` | 内置工具的工作目录 | 进程当前目录 |
@@ -327,7 +341,7 @@ CMake 选项 `SOPE_CURL` 决定 HTTP 实现：
 | `bundled` | 构建时下载 curl 8.23.0 + mbedTLS 3.6.7（固定 SHA-256），静态编进 libsope，只开启 HTTP(S) | Linux 发布版；任何不想依赖系统 libcurl 的场合 |
 | `off` | 不带网络，零依赖，只有 `mock` provider | 测试、离线嵌入 |
 
-- 共享库只导出公开的 `sope_*` 函数（20 个）。内部符号（`sope__*`）和打包进来的 curl、mbedTLS 都是隐藏的，不会和宿主自己的 curl 或 OpenSSL 冲突。
+- 共享库只导出公开的 `sope_*` 函数（23 个）。内部符号（`sope__*`）和打包进来的 curl、mbedTLS 都是隐藏的，不会和宿主自己的 curl 或 OpenSSL 冲突。
 - bundled 模式额外生成 `libsope-bundled.a`：sope、curl、mbedTLS 合并成一个目标文件，只有 `sope_*` 是全局符号，可以直接静态链接（macOS 还需 `-framework SystemConfiguration -framework CoreFoundation -framework CoreServices`）。`system` 模式下的 `libsope.a` 需要宿主自己链接 `-lcurl`。
 - 离线构建：把 `SOPE_CURL_URL` / `SOPE_MBEDTLS_URL` 指向本地的源码包。
 
@@ -344,8 +358,9 @@ CMake 选项 `SOPE_CURL` 决定 HTTP 实现：
 - 事件队列无上限：宿主长期不取事件时内存会持续增长，后续会加背压。
 - 定时器基于 `CLOCK_REALTIME`，系统时间跳变会影响 mock 的输出节奏和重试退避。
 - fd 与线程实现目前只有 POSIX（macOS/Linux）；Windows 计划用 event handle。
-- 对话历史只在内存中，不持久化；需要恢复会话的宿主目前只能自己保存消息并重新发送。
+- 库本身不持久化：保存什么、存在哪由宿主用 `sope_agent_history` / `sope_agent_load_history` 决定。回合进行中无法导出，进程在回合中途崩溃会丢掉这个回合。
 - 压缩用的 token 数来自 provider 报告的 usage；不报告 usage 的服务不会触发自动压缩。
 - 内置工具没有沙箱：许可是唯一的防线。需要隔离的宿主可以用同名宿主工具替换 `bash`，或设置 `permissions=deny`。
 - `grep` 用的是 POSIX 正则（加上常见写法的改写），不是 ripgrep：没有多行匹配，也不支持回溯引用以外的 Perl 扩展。
 - `web_fetch` 只返回页面文本，不执行脚本；靠脚本生成内容的页面会缺内容。
+- 图片原样以 base64 发送，不缩放也不压缩；一旦进入对话就留在历史里，之后每次请求都会带上（直到压缩），大图会明显增加请求体积。宿主工具（`sope_tool_result`）还不能返回图片。

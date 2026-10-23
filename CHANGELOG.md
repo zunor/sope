@@ -2,6 +2,32 @@
 
 版本号以 `include/sope.h` 为准，库、绑定和 `sope` 可执行文件同步发布，规则见 [docs/release.md](docs/release.md)。
 
+## 0.3.0 — 2026-10-23
+
+会话可以保存和恢复，消息可以带图片：库能导出、装回对话历史，TUI 按目录把会话存进 SQLite；截图和图表能发给模型。ABI 升到 0.3（新增函数，0.2 的宿主需要重新编译）。
+
+### libsope（C ABI 0.3）
+
+- `sope_agent_history` / `sope_agent_load_history`：导出、装回对话历史（JSON 数组），用于保存和恢复会话；只在回合之间可用（否则 `SOPE_EBUSY`）
+- `sope_attach_image`：给下一次 `sope_send` 附加图片（PNG/JPEG/GIF/WebP，≤10 MiB）
+- `read` 读到图片文件、`web_fetch` 抓到图片 URL 时把图片交给模型；网页里的图片写成 `![alt](url)`（原先只有 `[image: alt]`），模型可以再抓
+- `openai` provider 发送 `image_url` 内容块（data URL）；工具结果里的图片紧跟着用一条 user 消息补发
+- 新选项 `image_model`：对话里出现图片后改用的模型
+- 历史 JSON 里带图片（`images`），压缩时图片记为 `[N images attached]`；导出共 23 个符号
+
+### 绑定
+
+- `Agent.history()`、`Agent.loadHistory(json)`、`Agent.attachImage(bytes, mediaType?)`
+
+### TUI
+
+- 会话标签：一行、紧挨着，每个标签是一块颜色，右边缘渐暗成柔和的阴影（颜色按终端背景色取，通过 OSC 11 查询）；悬停出现 `×` 关闭（逻辑删除）。默认只显示最近 5 个会话，最右侧 `⋯` 或 `/sessions` 打开全部会话列表（可筛选）
+- 会话保存在 SQLite（`~/.local/share/sope/sope.db`，`SOPE_DB` 可改），启动时恢复界面记录和模型记忆
+- 图片输入：`ctrl+v` 粘贴剪贴板图片，拖入图片文件自动附加，`--image <file>`；默认端点上图片交给 `kimi-k3`（`SOPE_IMAGE_MODEL`，glm-5.3 不能看图）
+- `write` / `edit` 审批预览改为和当前文件的 diff：行号、增删底色、语法高亮
+- 运行状态改为输入框上方单独一行：流星划过 `──━━✦ Thinking… (1m 4s · 38 tok/s · tip: …)`，动词带流动高光，时间按秒递增，速率按最近 3 秒流式输出估算，提示每 30 秒出现 10 秒
+- 去掉顶部版本信息行；模型、上下文大小和累计 token 移到底部提示行右侧
+
 ## 0.2.0 — 2026-10-23
 
 工具从 TUI 搬进了库：任何语言嵌入 libsope 都直接拥有读写文件、搜索、执行命令和抓网页的能力。ABI 升到 0.2（新增函数和事件，0.1 的宿主需要重新编译）。

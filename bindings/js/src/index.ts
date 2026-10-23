@@ -215,6 +215,33 @@ export class Agent {
     check(C().sope_agent_reset(this.#ptr()), "sope_agent_reset");
   }
 
+  /**
+   * The conversation history as JSON, for saving it (format: sope.h,
+   * sope_agent_history). Between turns only: throws (SOPE_EBUSY) while a
+   * turn runs or is queued, so call it on "turn_end".
+   */
+  history(): string {
+    const ptr = new BigUint64Array(1);
+    const len = new BigUint64Array(1);
+    check(C().sope_agent_history(this.#ptr(), ptr, len), "sope_agent_history");
+    return readString(Number(ptr[0]), Number(len[0]));
+  }
+
+  /**
+   * Attaches an image (PNG, JPEG, GIF or WebP bytes, at most 10 MiB) to the
+   * next send(). mediaType ("image/png", ...) is detected from the bytes when
+   * omitted. The model has to read images: see the option image_model.
+   */
+  attachImage(data: Uint8Array, mediaType?: string): void {
+    check(C().sope_attach_image(this.#ptr(), mediaType ? cstr(mediaType) : null, data, data.length), "sope_attach_image");
+  }
+
+  /** Resumes a saved conversation: replaces the history with one from history(). Between turns only. */
+  loadHistory(json: string): void {
+    const bytes = encoder.encode(json);
+    check(C().sope_agent_load_history(this.#ptr(), bytes.length ? bytes : EMPTY, bytes.length), "sope_agent_load_history");
+  }
+
   /** A file descriptor readable while events are pending (for poll/epoll/kqueue loops). Owned by the agent. */
   fd(): number {
     return check(C().sope_agent_fd(this.#ptr()), "sope_agent_fd");

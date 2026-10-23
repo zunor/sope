@@ -74,6 +74,7 @@ static void plan_tool_results(sope_call *c, mock_state *s)
         if (s->text.len) sope__buf_appends(&s->text, "\n");
         sope__buf_appendf(&s->text, "`%s` %s: ", m->tool_name, m->is_error ? "failed" : "returned");
         sope__buf_append(&s->text, m->content, m->content_len);
+        if (m->n_images) sope__buf_appendf(&s->text, " [%zu image%s]", m->n_images, m->n_images > 1 ? "s" : "");
     }
 }
 
@@ -191,6 +192,7 @@ static void *mock_start(sope_call *c)
     if (len == 0 || in[0] != '!') {
         sope__buf_appends(&s->text, "You said: ");
         sope__buf_append(&s->text, in, len);
+        if (last && last->n_images) sope__buf_appendf(&s->text, " (with %zu image%s)", last->n_images, last->n_images > 1 ? "s" : "");
         sope__buf_append(&s->text, tail, sizeof tail - 1);
     } else if (len == 6 && !memcmp(in, "!panic", 6)) {
         sope__call_error(c, SOPE_ERROR, "mock: simulated provider failure");

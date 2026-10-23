@@ -5,11 +5,12 @@
 // change things are refused unless --allow-all.
 
 import { AgentBridge } from "./agent/bridge";
+import type { ImageFile } from "./agent/images";
 import { HostToolRunner } from "./agent/runner";
 import { describeCall, hostToolsFor, parseInput } from "./agent/tools";
 import { agentOptions, type Config } from "./config";
 
-export async function runPrint(config: Config, prompt: string, allowAll: boolean): Promise<number> {
+export async function runPrint(config: Config, prompt: string, allowAll: boolean, images: ImageFile[] = []): Promise<number> {
   const err = (line: string) => process.stderr.write(`${line}\n`);
   const tools = hostToolsFor(config.provider);
   let exitCode = 1;
@@ -57,6 +58,7 @@ export async function runPrint(config: Config, prompt: string, allowAll: boolean
     else process.exit(130);
   });
 
+  for (const img of images) bridge.agent.attachImage(img.bytes, img.mediaType);
   bridge.agent.send(prompt);
   await finished;
   await bridge.shutdown();

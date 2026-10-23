@@ -85,6 +85,7 @@ static void tool_uses_free(sope_tool_use *uses, size_t n)
 static void message_free(sope_message *m)
 {
     if (!m) return;
+    sope__images_free(m->images, m->n_images);
     free(m->content);
     tool_uses_free(m->tool_uses, m->n_tool_uses);
     free(m->tool_use_id);
@@ -154,6 +155,186 @@ static void history_repair(sope_history *h)
             if (m->role == SOPE__MSG_TOOL && !strcmp(m->tool_use_id, u->id)) answered = 1;
         if (!answered && (m = tool_message(u, "cancelled", 9, 1))) history_append(h, m);
     }
+}
+
+/* ---- the history as JSON (sope_agent_history, sope_agent_load_history) ---- */
+
+static const char *const ROLE_NAMES[] = { "user", "assistant", "tool" };
+
+static void append_message_json(sope_buf *b, const sope_message *m)
+{
+    size_t i;
+    sope__buf_appendf(b, "{\"role\":\"%s\",\"content\":", ROLE_NAMES[m->role]);
+    sope__buf_append_json_string(b, m->content, m->content_len);
+    if (m->role == SOPE__MSG_ASSISTANT && m->n_tool_uses) {
+        sope__buf_appends(b, ",\"tool_uses\":[");
+        for (i = 0; i < m->n_tool_uses; i++) {
+            const sope_tool_use *u = &m->tool_uses[i];
+            sope__buf_appends(b, i ? ",{\"id\":" : "{\"id\":");
+            sope__buf_append_json_string(b, u->id, strlen(u->id));
+            sope__buf_appends(b, ",\"name\":");
+            sope__buf_append_json_string(b, u->name, strlen(u->name));
+            sope__buf_appends(b, ",\"input\":");
+            sope__buf_append_json_string(b, u->input, u->input_len);
+            sope__buf_appends(b, "}");
+        }
+        sope__buf_appends(b, "]");
+    }
+    if (m->role == SOPE__MSG_TOOL) {
+        sope__buf_appends(b, ",\"tool_use_id\":");
+        sope__buf_append_json_string(b, m->tool_use_id, strlen(m->tool_use_id));
+        sope__buf_appends(b, ",\"name\":");
+        sope__buf_append_json_string(b, m->tool_name, strlen(m->tool_name));
+        sope__buf_appends(b, m->is_error ? ",\"is_error\":true" : ",\"is_error\":false");
+    }
+    if (m->n_images) {
+        sope__buf_appends(b, ",\"images\":[");
+        for (i = 0; i < m->n_images; i++) {
+            sope__buf_appends(b, i ? ",{\"media_type\":" : "{\"media_type\":");
+            sope__buf_append_json_string(b, m->images[i].media_type, strlen(m->images[i].media_type));
+            sope__buf_appends(b, ",\"data\":\"");
+            sope__buf_append(b, m->images[i].data, m->images[i].len); /* base64 needs no escaping */
+            sope__buf_appends(b, "\"}");
+        }
+        sope__buf_appends(b, "]");
+    }
+    sope__buf_appends(b, "}");
+}
+
+char *sope__history_json(const sope_history *h, size_t *len)
+{
+    sope_buf b = { 0 };
+    const sope_message *m;
+    sope__buf_appends(&b, "[");
+    for (m = h->head; m; m = m->next) {
+        if (m != h->head) sope__buf_appends(&b, ",");
+        append_message_json(&b, m);
+    }
+    sope__buf_appends(&b, "]");
+    if (b.oom) {
+        sope__buf_free(&b);
+        return NULL;
+    }
+    *len = b.len;
+    return b.ptr;
+}
+
+/* A string member, copied; NULL if missing or not a string. */
+static char *dup_member(const sope_json *obj, const char *key, size_t *len)
+{
+    size_t n;
+    const char *v = sope__json_string(sope__json_get(obj, key), &n);
+    if (len) *len = v ? n : 0;
+    return v ? sope__strndup(v, n) : NULL;
+}
+
+/* One message of a history array; SOPE_EINVAL with err filled when it is
+ * not one. */
+static int message_from_json(const sope_json *v, size_t index, sope_message **out, char *err, size_t cap)
+{
+    const sope_json *uses, *u, *flag;
+    const char *role, *content;
+    size_t content_len = 0, i;
+    sope_message *m;
+
+    *out = NULL;
+    role = v->type == SOPE_JSON_OBJECT ? sope__json_string(sope__json_get(v, "role"), NULL) : NULL;
+    content = role ? sope__json_string(sope__json_get(v, "content"), &content_len) : NULL;
+    if (!role) {
+        snprintf(err, cap, "message %zu: expected an object with a \"role\"", index);
+        return SOPE_EINVAL;
+    }
+    if (!strcmp(role, "user"))
+        m = message_new(SOPE__MSG_USER, content, content_len);
+    else if (!strcmp(role, "assistant"))
+        m = message_new(SOPE__MSG_ASSISTANT, content, content_len);
+    else if (!strcmp(role, "tool"))
+        m = message_new(SOPE__MSG_TOOL, content, content_len);
+    else {
+        snprintf(err, cap, "message %zu: unknown role \"%s\"", index, role);
+        return SOPE_EINVAL;
+    }
+    if (!m) return SOPE_ENOMEM;
+
+    if (m->role == SOPE__MSG_ASSISTANT && (uses = sope__json_get(v, "tool_uses")) && uses->count) {
+        if (uses->type != SOPE_JSON_ARRAY || !(m->tool_uses = calloc(uses->count, sizeof *m->tool_uses))) {
+            message_free(m);
+            if (uses->type == SOPE_JSON_ARRAY) return SOPE_ENOMEM;
+            snprintf(err, cap, "message %zu: \"tool_uses\" must be an array", index);
+            return SOPE_EINVAL;
+        }
+        for (u = uses->child, i = 0; u; u = u->next, i++) {
+            sope_tool_use *t = &m->tool_uses[i];
+            m->n_tool_uses = i + 1;
+            t->id = dup_member(u, "id", NULL);
+            t->name = dup_member(u, "name", NULL);
+            t->input = dup_member(u, "input", &t->input_len);
+            if (!t->id || !t->name || !t->input) {
+                message_free(m);
+                snprintf(err, cap, "message %zu: tool use %zu needs string \"id\", \"name\" and \"input\"", index, i);
+                return SOPE_EINVAL;
+            }
+        }
+    }
+    if ((uses = sope__json_get(v, "images")) && uses->count && m->role != SOPE__MSG_ASSISTANT) {
+        if (uses->type != SOPE_JSON_ARRAY || !(m->images = calloc(uses->count, sizeof *m->images))) {
+            message_free(m);
+            if (uses->type == SOPE_JSON_ARRAY) return SOPE_ENOMEM;
+            snprintf(err, cap, "message %zu: \"images\" must be an array", index);
+            return SOPE_EINVAL;
+        }
+        for (u = uses->child, i = 0; u; u = u->next, i++) {
+            sope_image *img = &m->images[i];
+            m->n_images = i + 1;
+            img->media_type = dup_member(u, "media_type", NULL);
+            img->data = dup_member(u, "data", &img->len);
+            if (!img->media_type || !img->data) {
+                message_free(m);
+                snprintf(err, cap, "message %zu: image %zu needs string \"media_type\" and \"data\" (base64)", index, i);
+                return SOPE_EINVAL;
+            }
+        }
+    }
+    if (m->role == SOPE__MSG_TOOL) {
+        m->tool_use_id = dup_member(v, "tool_use_id", NULL);
+        m->tool_name = dup_member(v, "name", NULL);
+        flag = sope__json_get(v, "is_error");
+        m->is_error = flag && flag->type == SOPE_JSON_BOOL && flag->boolean;
+        if (!m->tool_use_id || !m->tool_name) {
+            message_free(m);
+            snprintf(err, cap, "message %zu: a tool result needs string \"tool_use_id\" and \"name\"", index);
+            return SOPE_EINVAL;
+        }
+    }
+    *out = m;
+    return SOPE_OK;
+}
+
+int sope__history_parse(sope_history *out, const char *json, size_t len, char *err, size_t cap)
+{
+    sope_json *root = sope__json_parse(json, len);
+    const sope_json *v;
+    size_t i = 0;
+    int rc = SOPE_OK;
+
+    memset(out, 0, sizeof *out);
+    if (!root || root->type != SOPE_JSON_ARRAY) {
+        snprintf(err, cap, "expected a JSON array of messages");
+        sope__json_free(root);
+        return SOPE_EINVAL;
+    }
+    for (v = root->child; v && rc == SOPE_OK; v = v->next, i++) {
+        sope_message *m;
+        if ((rc = message_from_json(v, i, &m, err, cap)) == SOPE_OK) history_append(out, m);
+    }
+    sope__json_free(root);
+    if (rc != SOPE_OK) {
+        if (rc == SOPE_ENOMEM) snprintf(err, cap, "out of memory");
+        sope__history_clear(out);
+        return rc;
+    }
+    history_repair(out); /* a history saved mid-turn may end in unanswered tool uses */
+    return SOPE_OK;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -334,6 +515,12 @@ static int begin_turn(sope_agent_t *a)
     if (!t->system && ok) ok = (t->system = sope__strdup(DEFAULT_SYSTEM)) != NULL;
 
     user = ok && !m->compact ? message_new(SOPE__MSG_USER, m->text, m->len) : NULL;
+    if (user) { /* the attached images move into the message */
+        user->images = m->images;
+        user->n_images = m->n_images;
+        m->images = NULL;
+        m->n_images = 0;
+    }
     if (!ok || (!m->compact && !user)) {
         sope__push_event(a, SOPE_EVENT_ERROR, m->turn_id, 0, SOPE_ENOMEM, NULL, 0, "out of memory", 13);
         finish_turn(a, SOPE_STOP_ERROR);
@@ -367,6 +554,7 @@ static void call_free(sope_call *c)
 static void pending_free(pending_call *p)
 {
     sope__tool_run_discard(p->run); /* still waiting for sope_permit */
+    sope__images_free(p->images, p->n_images);
     free(p->name);
     free(p->content);
     free(p);
@@ -412,8 +600,7 @@ static void finish_turn(sope_agent_t *a, int32_t stop)
     free_specs(t);
     free(t->system);
     free(t->cwd);
-    free(t->msg->text);
-    free(t->msg);
+    sope__msg_node_free(t->msg);
     memset(t, 0, sizeof *t);
     a->last_stop = stop;
     a->turns_finished++;
@@ -809,6 +996,12 @@ static sope_next collect_tools(sope_agent_t *a)
         if (p) *pp = p->next;
         m = p ? tool_message(u, p->content ? p->content : "", p->len, p->is_error)
               : tool_message(u, "(no result)", 11, 1);
+        if (m && p && p->n_images) {
+            m->images = p->images;
+            m->n_images = p->n_images;
+            p->images = NULL;
+            p->n_images = 0;
+        }
         if (m) history_append(&a->history, m);
         if (p) pending_free(p);
     }
@@ -993,8 +1186,7 @@ static sope_next close_agent(sope_agent_t *a)
     while (dropped) {
         msg_node *n = dropped->next;
         sope__push_event(a, SOPE_EVENT_TURN_END, dropped->turn_id, 0, SOPE_STOP_CANCELLED, NULL, 0, NULL, 0);
-        free(dropped->text);
-        free(dropped);
+        sope__msg_node_free(dropped);
         dropped = n;
     }
 

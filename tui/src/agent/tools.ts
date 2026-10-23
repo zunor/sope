@@ -6,6 +6,11 @@
 // the mock provider to exercise the host side of the ABI (!echo, !clock,
 // !sleep).
 
+import { readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+import { diffLines, hunks, splitLines } from "../ui/diff";
+import { langFor } from "../ui/highlight";
+
 /** Built-in tools that wait for the user's permission (sope.h: "ask"). */
 export const ASKING_TOOLS = ["write", "edit", "bash", "web_fetch"];
 
@@ -15,7 +20,12 @@ export const READ_TOOLS = ["read", "glob", "grep", "bash_output", "bash_kill", "
 /** One line of a permission preview. */
 export interface PreviewLine {
   text: string;
-  kind?: "command" | "add" | "remove" | "plain";
+  /** add / remove / context are diff lines; gap stands for unchanged lines left out. */
+  kind?: "command" | "add" | "remove" | "context" | "gap" | "plain";
+  /** Diff lines: the line number in the file. */
+  no?: number;
+  /** Diff lines: the language to highlight (highlight.ts). */
+  lang?: string;
 }
 
 /** A tool the host implements itself; results go back through sope_tool_result. */
@@ -33,6 +43,7 @@ export interface Todo {
 }
 
 const PREVIEW_LINES = 8;
+const DIFF_CONTEXT = 2;
 
 const str = (v: unknown): string => (typeof v === "string" ? v : v === undefined ? "" : String(v));
 
@@ -52,17 +63,54 @@ function lines(text: string, kind: PreviewLine["kind"], max = PREVIEW_LINES): Pr
   return shown;
 }
 
-/** What the user sees before allowing a call. */
-export function previewFor(name: string, input: Record<string, unknown>): PreviewLine[] {
+/** The file as it is now, or null; relative paths are against the working directory. */
+export function readCurrent(path: string): string | null {
+  try {
+    const file = resolve(process.cwd(), path);
+    return statSync(file).size > 4 << 20 ? null : readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function diffPreview(before: string, after: string, lang: string): PreviewLine[] {
+  return hunks(diffLines(splitLines(before), splitLines(after)), DIFF_CONTEXT).map((l) =>
+    l.kind === "gap" ? { text: `⋯ ${l.skipped} unchanged line${l.skipped > 1 ? "s" : ""}`, kind: "gap" } : { text: l.text, kind: l.kind, no: l.no, lang },
+  );
+}
+
+/**
+ * What the user sees before allowing a call. write and edit show a diff
+ * against the file as it is now (`read` reads it), with line numbers.
+ */
+export function previewFor(name: string, input: Record<string, unknown>, read = readCurrent): PreviewLine[] {
   switch (name) {
-    case "write":
-      return [{ text: str(input.file_path), kind: "plain" }, ...lines(str(input.content), "add")];
-    case "edit":
-      return [
-        { text: `${str(input.file_path)}${input.replace_all ? "  (every occurrence)" : ""}`, kind: "plain" },
-        ...(str(input.old_string) ? lines(str(input.old_string), "remove", PREVIEW_LINES / 2) : []),
-        ...lines(str(input.new_string), "add", PREVIEW_LINES / 2),
-      ];
+    case "write": {
+      const path = str(input.file_path);
+      const lang = langFor(path);
+      const content = str(input.content);
+      const now = read(path);
+      if (now === null) {
+        const n = splitLines(content).length;
+        return [{ text: `${path}  (new file, ${n} line${n === 1 ? "" : "s"})`, kind: "plain" }, ...diffPreview("", content, lang)];
+      }
+      const diff = diffPreview(now, content, lang);
+      return [{ text: `${path}${diff.length ? "" : "  (no change)"}`, kind: "plain" }, ...diff];
+    }
+    case "edit": {
+      const path = str(input.file_path);
+      const lang = langFor(path);
+      const [oldS, newS] = [str(input.old_string), str(input.new_string)];
+      const header: PreviewLine = { text: `${path}${input.replace_all ? "  (every occurrence)" : ""}`, kind: "plain" };
+      const now = read(path);
+      if (now !== null && oldS && now.includes(oldS)) {
+        const after = input.replace_all ? now.split(oldS).join(newS) : now.replace(oldS, () => newS);
+        return [header, ...diffPreview(now, after, lang)];
+      }
+      // The file is unreadable or the text is not in it (the edit will fail): show the strings.
+      if (now !== null) header.text += "  (the old text is not in the file)";
+      return [header, ...diffPreview(oldS, newS, lang).map((l) => ({ ...l, no: undefined }))];
+    }
     case "bash": {
       const rows = lines(str(input.command), "command", 12);
       if (input.description) rows.unshift({ text: str(input.description), kind: "plain" });

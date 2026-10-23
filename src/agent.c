@@ -184,12 +184,13 @@ void sope__agent_free_memory(sope_agent_t *a)
     sope__files_clear(a);
     for (i = 0; i < a->n_tool_filter; i++) free(a->tool_filter[i]);
     free(a->tool_filter);
+    free(a->history_json);
     while (a->in_head) {
         msg_node *m = a->in_head;
         a->in_head = m->next;
-        free(m->text);
-        free(m);
+        sope__msg_node_free(m);
     }
+    sope__images_free(a->attached, a->n_attached);
     while (a->tools) {
         tool_def *t = a->tools;
         a->tools = t->next;
@@ -442,6 +443,14 @@ int sope_subagent_register(sope_agent_t *a, const char *definition_json, size_t 
 
 /* Queues one turn: a user message, or a compaction request with optional
  * instructions. */
+void sope__msg_node_free(msg_node *m)
+{
+    if (!m) return;
+    free(m->text);
+    sope__images_free(m->images, m->n_images);
+    free(m);
+}
+
 static int enqueue(sope_agent_t *a, const char *fn, int compact, const char *text, size_t len, uint64_t *turn_id_out)
 {
     msg_node *m;
@@ -464,6 +473,12 @@ static int enqueue(sope_agent_t *a, const char *fn, int compact, const char *tex
         return sope__set_error(SOPE_ECLOSED, "%s: agent is closed", fn);
     }
     m->turn_id = ++a->next_turn_id;
+    if (!compact) { /* the message carries the images attached since the last one */
+        m->images = a->attached;
+        m->n_images = a->n_attached;
+        a->attached = NULL;
+        a->n_attached = 0;
+    }
     if (a->in_tail)
         a->in_tail->next = m;
     else
@@ -473,6 +488,43 @@ static int enqueue(sope_agent_t *a, const char *fn, int compact, const char *tex
     pthread_mutex_unlock(a->mu);
 
     sope__task_wake(&a->task);
+    return SOPE_OK;
+}
+
+int sope_attach_image(sope_agent_t *a, const char *media_type, const void *data, size_t len)
+{
+    static const char *const types[] = { "image/png", "image/jpeg", "image/gif", "image/webp" };
+    sope_image img, *grown;
+    const char *type = NULL;
+    size_t i;
+
+    if (!a || !data || !len) return sope__set_error(SOPE_EINVAL, "sope_attach_image: no image data");
+    if (len > SOPE__MAX_IMAGE_BYTES)
+        return sope__set_error(SOPE_EINVAL, "sope_attach_image: %zu bytes is over the %u byte limit", len, SOPE__MAX_IMAGE_BYTES);
+    if (!media_type || !*media_type) media_type = sope__image_type(data, len);
+    for (i = 0; media_type && i < sizeof types / sizeof *types; i++)
+        if (!strcmp(media_type, types[i])) type = types[i];
+    if (!type)
+        return sope__set_error(SOPE_EINVAL, "sope_attach_image: unsupported media type %s (png, jpeg, gif or webp)",
+                               media_type ? media_type : "(unknown)");
+    if (!sope__image_init(&img, type, data, len)) return sope__set_error(SOPE_ENOMEM, "sope_attach_image: out of memory");
+
+    pthread_mutex_lock(a->mu);
+    if (a->closing) {
+        pthread_mutex_unlock(a->mu);
+        free(img.media_type);
+        free(img.data);
+        return sope__set_error(SOPE_ECLOSED, "sope_attach_image: agent is closed");
+    }
+    if (!(grown = realloc(a->attached, (a->n_attached + 1) * sizeof *grown))) {
+        pthread_mutex_unlock(a->mu);
+        free(img.media_type);
+        free(img.data);
+        return sope__set_error(SOPE_ENOMEM, "sope_attach_image: out of memory");
+    }
+    grown[a->n_attached++] = img;
+    a->attached = grown;
+    pthread_mutex_unlock(a->mu);
     return SOPE_OK;
 }
 
@@ -585,6 +637,61 @@ int sope_agent_reset(sope_agent_t *a)
     if (!a) return sope__set_error(SOPE_EINVAL, "sope_agent_reset: agent is NULL");
     pthread_mutex_lock(a->mu);
     a->reset_requested = 1;
+    pthread_mutex_unlock(a->mu);
+    return SOPE_OK;
+}
+
+/* History belongs to the agent's task while a turn runs or waits to run;
+ * between turns nothing touches it, and holding *mu keeps the next turn
+ * from starting. */
+static int between_turns_locked(const sope_agent_t *a)
+{
+    return !a->active_turn && !a->in_head;
+}
+
+int sope_agent_history(sope_agent_t *a, const char **json, size_t *len)
+{
+    char *s;
+    size_t n = 2;
+
+    if (!a || !json) return sope__set_error(SOPE_EINVAL, "sope_agent_history: agent or json is NULL");
+    pthread_mutex_lock(a->mu);
+    if (!between_turns_locked(a)) {
+        pthread_mutex_unlock(a->mu);
+        return sope__set_error(SOPE_EBUSY, "sope_agent_history: a turn is running or queued");
+    }
+    s = a->reset_requested ? sope__strdup("[]") : sope__history_json(&a->history, &n);
+    if (s) {
+        free(a->history_json);
+        a->history_json = s;
+    }
+    pthread_mutex_unlock(a->mu);
+    if (!s) return sope__set_error(SOPE_ENOMEM, "sope_agent_history: out of memory");
+    *json = s;
+    if (len) *len = n;
+    return SOPE_OK;
+}
+
+int sope_agent_load_history(sope_agent_t *a, const char *json, size_t len)
+{
+    sope_history h;
+    char err[160];
+    int rc;
+
+    if (!a || (!json && len)) return sope__set_error(SOPE_EINVAL, "sope_agent_load_history: agent or json is NULL");
+    if ((rc = sope__history_parse(&h, json ? json : "", len, err, sizeof err)) != SOPE_OK)
+        return sope__set_error(rc, "sope_agent_load_history: %s", err);
+    pthread_mutex_lock(a->mu);
+    if (!between_turns_locked(a)) {
+        pthread_mutex_unlock(a->mu);
+        sope__history_clear(&h);
+        return sope__set_error(SOPE_EBUSY, "sope_agent_load_history: a turn is running or queued");
+    }
+    sope__history_clear(&a->history);
+    a->history = h;
+    a->reset_requested = 0;
+    a->context_tokens = 0;
+    sope__files_clear(a); /* edits need fresh reads in this process */
     pthread_mutex_unlock(a->mu);
     return SOPE_OK;
 }

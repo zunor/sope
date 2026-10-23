@@ -5,7 +5,8 @@ import { CliError, parseArgs } from "../src/cli";
 import { agentOptions, loadConfig, parseEnvFile } from "../src/config";
 
 test("parses flags and the prompt", () => {
-  expect(parseArgs([])).toEqual({ print: false, allowAll: false, version: false, help: false });
+  expect(parseArgs([])).toEqual({ print: false, allowAll: false, images: [], version: false, help: false });
+  expect(parseArgs(["-i", "a.png", "--image=b.jpg", "why?"])).toMatchObject({ images: ["a.png", "b.jpg"], prompt: "why?" });
   const o = parseArgs(["-p", "--model=glm-4", "--allow-all", "fix", "the", "bug"]);
   expect(o).toMatchObject({ print: true, model: "glm-4", allowAll: true, prompt: "fix the bug" });
   expect(parseArgs(["--", "-p", "is", "text"]).prompt).toBe("-p is text");
@@ -37,19 +38,48 @@ test("describes calls and previews the ones that ask", () => {
   expect(describeCall("grep", { pattern: "TODO", path: "src", glob: "*.c" })).toBe("TODO in src (*.c)");
   expect(describeCall("bash", { command: "make", run_in_background: true })).toBe("[background] make");
   expect(describeCall("echo", { input: "hi" })).toBe("hi");
-  expect(previewFor("edit", { file_path: "a.c", old_string: "x", new_string: "y" })).toEqual([
+  const none = () => null;
+  expect(previewFor("edit", { file_path: "a.c", old_string: "x", new_string: "y" }, none)).toEqual([
     { text: "a.c", kind: "plain" },
-    { text: "x", kind: "remove" },
-    { text: "y", kind: "add" },
+    { text: "x", kind: "remove", no: undefined, lang: "c" },
+    { text: "y", kind: "add", no: undefined, lang: "c" },
   ]);
   expect(previewFor("bash", { command: "rm -rf build", description: "Clean" })).toEqual([
     { text: "Clean", kind: "plain" },
     { text: "rm -rf build", kind: "command" },
   ]);
-  expect(previewFor("write", { file_path: "f", content: "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n" }).at(-1)).toEqual({
-    text: "… 2 more lines",
-    kind: "plain",
-  });
+});
+
+test("write and edit previews are diffs against the file, with line numbers", () => {
+  const file = "int a;\nint b;\nint c;\nint d;\nint e;\nint f;\nint g;\n";
+  const read = (p: string) => (p === "x.c" ? file : null);
+  const rows = (name: string, input: Record<string, unknown>) =>
+    previewFor(name, input, read).map((l) => `${l.kind}:${l.no ?? ""}:${l.text}`);
+
+  expect(rows("edit", { file_path: "x.c", old_string: "int e;", new_string: "long e;\nlong e2;" })).toEqual([
+    "plain::x.c",
+    "gap::⋯ 2 unchanged lines",
+    "context:3:int c;",
+    "context:4:int d;",
+    "remove:5:int e;",
+    "add:5:long e;",
+    "add:6:long e2;",
+    "context:6:int f;",
+    "context:7:int g;",
+  ]);
+  expect(rows("edit", { file_path: "x.c", old_string: "nope", new_string: "y" })[0]).toBe("plain::x.c  (the old text is not in the file)");
+  expect(rows("write", { file_path: "new.py", content: "a = 1\nb = 2\n" })).toEqual([
+    "plain::new.py  (new file, 2 lines)",
+    "add:1:a = 1",
+    "add:2:b = 2",
+  ]);
+  expect(rows("write", { file_path: "x.c", content: file.replace("int a;", "int A;") }).slice(0, 4)).toEqual([
+    "plain::x.c",
+    "remove:1:int a;",
+    "add:1:int A;",
+    "context:2:int b;",
+  ]);
+  expect(rows("write", { file_path: "x.c", content: file })).toEqual(["plain::x.c  (no change)"]);
 });
 
 test("shows todo lists", () => {

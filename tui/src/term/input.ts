@@ -2,7 +2,8 @@
 // Decodes raw terminal input bytes into key, text, paste and mouse events.
 //
 // Handles UTF-8 split across reads, CSI/SS3 escape sequences with xterm
-// modifiers, kitty's CSI-u keys, bracketed paste and SGR mouse reports. A
+// modifiers, kitty's CSI-u keys, bracketed paste, SGR mouse reports and OSC
+// replies (such as the background color, OSC 11). A
 // lone ESC is ambiguous (Escape key, or the start of a sequence still in
 // flight), so it stays pending until more input arrives or flush() is called.
 
@@ -17,12 +18,15 @@ export type TextEvent = { type: "text"; text: string };
 export type PasteEvent = { type: "paste"; text: string };
 export type MouseEvent = {
   type: "mouse";
-  action: "press" | "release" | "drag" | "wheel-up" | "wheel-down";
+  /** "move": the pointer moved with no button held (hover). */
+  action: "press" | "release" | "drag" | "move" | "wheel-up" | "wheel-down";
   button: number;
   x: number;
   y: number;
 } & Mods;
-export type InputEvent = KeyEvent | TextEvent | PasteEvent | MouseEvent;
+/** A reply to an OSC query, without the ESC ] and the terminator, e.g. "11;rgb:1e1e/1e1e/1e1e". */
+export type OscEvent = { type: "osc"; data: string };
+export type InputEvent = KeyEvent | TextEvent | PasteEvent | MouseEvent | OscEvent;
 
 const PASTE_END = "\x1b[201~";
 
@@ -92,7 +96,11 @@ function parseCsi(s: string, i: number, final: boolean): Parsed {
     const mods = { shift: (b & 4) !== 0, alt: (b & 8) !== 0, ctrl: (b & 16) !== 0 };
     const button = b & 3;
     const action =
-      b & 64 ? (button === 0 ? "wheel-up" : "wheel-down") : b & 32 ? "drag" : fin === "m" ? "release" : "press";
+      b & 64
+        ? button === 0 ? "wheel-up" : "wheel-down"
+        : b & 32
+          ? button === 3 ? "move" : "drag"
+          : fin === "m" ? "release" : "press";
     return { event: { type: "mouse", action, button, x: x - 1, y: y - 1, ...mods }, end };
   }
 
@@ -117,6 +125,14 @@ function parseEscape(s: string, i: number, final: boolean): Parsed {
   if (i + 1 >= s.length) return final ? { event: key("escape"), end: i + 1 } : null;
   const next = s[i + 1]!;
   if (next === "[") return parseCsi(s, i, final);
+  if (next === "]") {
+    // OSC reply, ended by BEL or ST (ESC \). Unterminated at flush: dropped.
+    const bel = s.indexOf("\x07", i + 2);
+    const st = s.indexOf("\x1b\\", i + 2);
+    const end = bel < 0 ? st : st < 0 ? bel : Math.min(bel, st);
+    if (end < 0) return final ? { end: s.length } : null;
+    return { event: { type: "osc", data: s.slice(i + 2, end) }, end: end + (end === bel ? 1 : 2) };
+  }
   if (next === "O") {
     if (i + 2 >= s.length) return final ? { event: key("o", { alt: true, shift: true }), end: i + 2 } : null;
     const name = LETTER_KEYS[s[i + 2]!];

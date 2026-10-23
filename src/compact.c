@@ -59,6 +59,7 @@ char *sope__compact_request(const sope_history *h, const char *extra, size_t ext
         case SOPE__MSG_USER:
             sope__buf_appends(&b, "\n[user]\n");
             sope__buf_append(&b, m->content, m->content_len);
+            if (m->n_images) sope__buf_appendf(&b, "\n[%zu image%s attached]", m->n_images, m->n_images > 1 ? "s" : "");
             sope__buf_appends(&b, "\n");
             break;
         case SOPE__MSG_ASSISTANT:
@@ -76,6 +77,7 @@ char *sope__compact_request(const sope_history *h, const char *extra, size_t ext
         case SOPE__MSG_TOOL:
             sope__buf_appendf(&b, "\n[%s %s]\n", m->tool_name, m->is_error ? "failed" : "returned");
             append_clipped(&b, m->content, m->content_len, MAX_TOOL_RESULT);
+            if (m->n_images) sope__buf_appendf(&b, "\n[%zu image%s shown to the assistant]", m->n_images, m->n_images > 1 ? "s" : "");
             sope__buf_appends(&b, "\n");
             break;
         }

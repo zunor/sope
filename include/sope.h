@@ -50,9 +50,9 @@ extern "C" {
 /* ------------------------------------------------------------------------ */
 
 #define SOPE_VERSION_MAJOR 0
-#define SOPE_VERSION_MINOR 2
+#define SOPE_VERSION_MINOR 3
 #define SOPE_VERSION_PATCH 0
-#define SOPE_VERSION_STRING "0.2.0"
+#define SOPE_VERSION_STRING "0.3.0"
 #define SOPE_VERSION_NUMBER \
     ((SOPE_VERSION_MAJOR << 16) | (SOPE_VERSION_MINOR << 8) | SOPE_VERSION_PATCH)
 
@@ -115,6 +115,9 @@ SOPE_API int sope_agent_new(sope_agent_t **out);
  *   provider          "mock" (default, offline) or "openai" (any
  *                     OpenAI-compatible Chat Completions server)
  *   model             model name, e.g. "glm-5.3"; required by "openai"
+ *   image_model       model used instead once the conversation holds an
+ *                     image (sope_attach_image, or read/web_fetch of one),
+ *                     for when `model` reads text only; unset: `model`
  *   system            system prompt (a built-in default is used if unset)
  *   max_rounds        model calls allowed per turn (default 32)
  *   cwd               working directory of the built-in tools (default:
@@ -169,6 +172,14 @@ SOPE_API int sope_tool_register(sope_agent_t *agent, const char *name,
  * message to the parent as the tool result. */
 SOPE_API int sope_subagent_register(sope_agent_t *agent, const char *definition_json, size_t len);
 
+/* Attaches an image to the next sope_send: the message carries every image
+ * attached since the previous one. data is the raw file content (PNG, JPEG,
+ * GIF or WebP, at most 10 MiB) and is copied; media_type is "image/png",
+ * "image/jpeg", "image/gif" or "image/webp", or NULL to tell from the bytes.
+ * The model must read images (see the option image_model). SOPE_EINVAL for
+ * other content, SOPE_ECLOSED once the agent is closed. */
+SOPE_API int sope_attach_image(sope_agent_t *agent, const char *media_type, const void *data, size_t len);
+
 /* Queues a user message. Each accepted message becomes one turn; turns run
  * one at a time in order. The turn id is written to *turn_id_out if non-NULL.
  * Within a turn the agent may call the model several times, executing tool
@@ -201,6 +212,31 @@ SOPE_API int sope_compact(sope_agent_t *agent, const char *instructions, size_t 
 
 /* Forgets the conversation history. Takes effect when the next turn starts. */
 SOPE_API int sope_agent_reset(sope_agent_t *agent);
+
+/* The conversation history as JSON, for saving it. *json stays valid until
+ * the next sope_agent_history or sope_agent_free on the same agent; *len
+ * (may be NULL) is its length. Works between turns only: SOPE_EBUSY while a
+ * turn runs or is queued (call it on SOPE_EVENT_TURN_END). The format is an
+ * array of messages, oldest first:
+ *
+ *   [{"role":"user","content":"fix the bug"},
+ *    {"role":"assistant","content":"Let me look.",
+ *     "tool_uses":[{"id":"call_1","name":"read","input":"{\"file_path\":\"a.c\"}"}]},
+ *    {"role":"tool","tool_use_id":"call_1","name":"read","content":"…","is_error":false},
+ *    {"role":"assistant","content":"Fixed."}]
+ *
+ * "input" is the tool's JSON input as a string. User and tool messages with
+ * images also have "images":[{"media_type":"image/png","data":"<base64>"}].
+ * After a compaction the history starts with the summary as a user message.
+ * Reasoning is not kept. */
+SOPE_API int sope_agent_history(sope_agent_t *agent, const char **json, size_t *len);
+
+/* Replaces the conversation history with one from sope_agent_history, to
+ * resume a saved conversation. Between turns only (SOPE_EBUSY otherwise);
+ * SOPE_EINVAL if json is not such an array. Unanswered tool uses at the end
+ * are answered as cancelled. The agent forgets which files it has read, so
+ * edits need a fresh read first. */
+SOPE_API int sope_agent_load_history(sope_agent_t *agent, const char *json, size_t len);
 
 /* Stops the agent: cancels the running turn, ends queued turns as cancelled
  * and rejects further sends. Once the remaining events are drained,

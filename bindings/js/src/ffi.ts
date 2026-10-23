@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 /** ABI version these bindings were written against (sope.h SOPE_VERSION_MAJOR/MINOR). */
-export const ABI = { major: 0, minor: 2 } as const;
+export const ABI = { major: 0, minor: 3 } as const;
 
 const symbols = {
   sope_version: { args: [], returns: FFIType.cstring },
@@ -22,6 +22,7 @@ const symbols = {
   sope_agent_set_option: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
   sope_tool_register: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
   sope_send: { args: [FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
+  sope_attach_image: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
   sope_compact: { args: [FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
   sope_tool_result: {
     args: [FFIType.ptr, FFIType.u64, FFIType.i32, FFIType.ptr, FFIType.u64],
@@ -35,6 +36,8 @@ const symbols = {
   sope_agent_close: { args: [FFIType.ptr], returns: FFIType.i32 },
   sope_agent_free: { args: [FFIType.ptr], returns: FFIType.void },
   sope_agent_reset: { args: [FFIType.ptr], returns: FFIType.i32 },
+  sope_agent_history: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+  sope_agent_load_history: { args: [FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
   sope_agent_fd: { args: [FFIType.ptr], returns: FFIType.i32 },
   sope_subagent_register: { args: [FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
   sope_poll: { args: [FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },

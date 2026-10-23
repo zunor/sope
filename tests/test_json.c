@@ -4,6 +4,7 @@
 #include "../src/tools.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int failures;
@@ -162,9 +163,36 @@ static void test_html(void)
                       "caf\xc3\xa9 \xe4\xb8\xad end"));
 }
 
+static void test_base64_and_images(void)
+{
+    static const char *const vectors[][2] = { { "", "" }, { "f", "Zg==" }, { "fo", "Zm8=" }, { "foo", "Zm9v" },
+                                              { "foob", "Zm9vYg==" }, { "foobar", "Zm9vYmFy" } };
+    static const unsigned char png[] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0 };
+    static const unsigned char jpeg[] = { 0xff, 0xd8, 0xff, 0xe0 };
+    sope_buf b = { 0 };
+    const char *page = "<p>See <img alt=\"the chart\" src=\"https://e.com/c.png\"> and <img src=\"data:x\"></p>";
+    size_t i, n;
+    for (i = 0; i < sizeof vectors / sizeof *vectors; i++) {
+        char *out = sope__base64(vectors[i][0], strlen(vectors[i][0]), &n);
+        CHECK(out && !strcmp(out, vectors[i][1]) && n == strlen(vectors[i][1]));
+        free(out);
+    }
+    CHECK(!strcmp(sope__image_type(png, sizeof png), "image/png"));
+    CHECK(!strcmp(sope__image_type(jpeg, sizeof jpeg), "image/jpeg"));
+    CHECK(!strcmp(sope__image_type("GIF89a..", 8), "image/gif"));
+    CHECK(!strcmp(sope__image_type("RIFF\0\0\0\0WEBPVP8 ", 16), "image/webp"));
+    CHECK(sope__image_type("hello", 5) == NULL);
+    CHECK(sope__image_type(png, 4) == NULL);
+
+    /* Images on a page become ![alt](url) the model can fetch; inline data: images are dropped. */
+    sope__html_to_text(page, strlen(page), &b);
+    CHECK(text_is(&b, "See ![the chart](https://e.com/c.png) and"));
+}
+
 int main(void)
 {
     test_sanitize();
+    test_base64_and_images();
     test_clip();
     test_glob();
     test_html();

@@ -17,9 +17,9 @@
 从发布包安装：
 
 ```sh
-tar xzf sope-0.2.0-darwin-arm64.tar.gz
-sope-0.2.0-darwin-arm64/install.sh         # 安装 sope 到 ~/.local/bin
-sope-0.2.0-darwin-arm64/install.sh --lib   # 同时安装 libsope 和 sope.h
+tar xzf sope-0.3.0-darwin-arm64.tar.gz
+sope-0.3.0-darwin-arm64/install.sh         # 安装 sope 到 ~/.local/bin
+sope-0.3.0-darwin-arm64/install.sh --lib   # 同时安装 libsope 和 sope.h
 ```
 
 从源码构建并安装：
@@ -54,6 +54,20 @@ sope --version
 
 TUI 是全屏的（终端的备用屏幕，和 vim、htop 一样）：退出后终端恢复原样，对话内容不会留在滚动历史里。用滚轮或 `pgup`/`pgdn` 翻看对话；往上翻时新输出不会把视图拉回底部。
 
+### 图片
+
+截图、图表可以直接发给模型：`ctrl+v` 粘贴剪贴板里的图片（macOS 用 osascript，Linux 用 wl-paste 或 xclip），把图片文件拖进终端也会自动变成附件；输入框里显示为 `[Image #1]`，发送时一起带上。命令行用 `sope --image shot.png "这里哪里不对？"`（`-p` 模式同样可用）。模型自己也能看图：`read` 读到图片文件、`web_fetch` 抓到图片 URL 时会把图片交给模型。默认的 glm-5.3 只认文字，对话里一出现图片，sope 自动改用 `SOPE_IMAGE_MODEL`（默认 `kimi-k3`）。
+
+### 审批预览
+
+`write` / `edit` 的确认框显示和当前文件的 diff：行号、增删行的底色，以及按文件类型的语法高亮（C/C++、JS/TS、Python、Go、Rust、Java、Shell、JSON）。
+
+### 会话
+
+顶部一行是最近用过的几个会话（最多 5 个），最右侧的 `⋯`（或 `/sessions`）列出当前目录保存过的全部会话，可以输入文字筛选、回车打开。每个标签是一个独立的 agent，切走后照常在后台运行。会话存在 SQLite 里（`~/.local/share/sope/sope.db`，可用 `SOPE_DB` 改位置），下次在同一目录打开 sope 时原样恢复：界面上的对话记录，以及模型记得的内容（库的 `sope_agent_history` / `sope_agent_load_history`）。
+
+点 `+`、`alt+n` 或 `/new` 新建会话；点击标签或 `alt+1…9` 切换；鼠标悬停在标签上会出现 `×`，点击（或 `alt+w`、`/close`）关闭。关闭只是不再列出，数据仍留在数据库里。标签上的 `?` 表示那个会话在等你批准，`•` 表示它在后台跑完了。
+
 鼠标由 TUI 接管：拖动选中文字，松开即复制到剪贴板（底栏会提示“copied N characters”）。想用终端自己的选择，按住 Shift（iTerm2 是 Option）再拖，或者 `/mouse` 关掉接管；`SOPE_MOUSE=0` 默认关闭。
 
 ### 工具与权限
@@ -78,15 +92,17 @@ TUI 是全屏的（终端的备用屏幕，和 vim、htop 一样）：退出后�
 | `enter` | 发送 |
 | `ctrl+j` / `alt+enter` | 换行 |
 | `esc` | 取消当前回合（连同子 agent） |
+| `alt+n` / `alt+w` | 新建 / 关闭会话 |
+| `alt+1` … `alt+9` | 切换到第 N 个会话 |
 | `ctrl+t` / `F2` | 打开/关闭 ABI trace 面板：`→` 是 TUI 调进库的调用，`←` 是 `sope_poll` 返回的事件 |
 | `pgup` / `pgdn` | 滚动对话 |
 | `↑` / `↓` | 在多行输入里移动；到达边界后翻历史记录 |
 | `ctrl+a/e`、`alt+b/f`、`ctrl+w/u/k` | Emacs 风格编辑（按词移动支持中文分词） |
 | `ctrl+c` | 有回合在跑时取消，输入框非空时清空，否则退出 |
 
-命令：`/help`、`/clear`（同时清空对话历史）、`/compact [重点]`、`/model <name>`、`/thinking`（展开/折叠推理过程）、`/permissions`、`/trace`、`/mouse`、`/set <key> [value]`、`/quit`。
+命令：`/help`、`/new`、`/close`、`/clear`（同时清空对话历史）、`/compact [重点]`、`/model <name>`、`/thinking`（展开/折叠推理过程）、`/permissions`、`/trace`、`/mouse`、`/set <key> [value]`、`/quit`。
 
-顶栏的 `ctx` 是模型最近一次看到的上下文大小。超过 `SOPE_COMPACT_THRESHOLD`（默认 100000 token）时，历史会自动压缩成摘要；`/compact` 可以随时手动压缩。界面上的对话记录保持不变，只是模型之后看到的是摘要。
+底栏右侧的 `ctx` 是模型最近一次看到的上下文大小。超过 `SOPE_COMPACT_THRESHOLD`（默认 100000 token）时，历史会自动压缩成摘要；`/compact` 可以随时手动压缩。界面上的对话记录保持不变，只是模型之后看到的是摘要。
 
 ### 配置
 
@@ -96,6 +112,8 @@ TUI 是全屏的（终端的备用屏幕，和 vim、htop 一样）：退出后�
 |---|---|---|
 | `SOPE_API_KEY` | | 设置后默认使用 `openai` provider |
 | `SOPE_MODEL` | `-m`, `--model` | `glm-5.3` |
+| `SOPE_IMAGE_MODEL` | | 默认端点上为 `kimi-k3`（glm-5.3 不能看图）；`off` 表示图片也发给 `SOPE_MODEL` |
+| `SOPE_DB` | | `~/.local/share/sope/sope.db`（会话数据库） |
 | `SOPE_BASE_URL` | `--base-url` | `https://api-taas.moi.matrixorigin.cn/v1` |
 | `SOPE_PROVIDER` | `--provider` | 有 key 时为 `openai`，否则 `mock` |
 | `SOPE_COMPACT_THRESHOLD` | | `100000`（`0` 关闭自动压缩） |
@@ -179,8 +197,9 @@ bindings/js/          bun:ffi 绑定（类型化 API + 测试，含离线的 Ope
 tui/src/
   main.ts, cli.ts     sope 可执行文件入口与参数解析
   app.ts, print.ts    全屏 TUI 与 -p 模式
+  session.ts store.ts 一个会话（标签）的状态；SQLite 保存与恢复
   agent/              Worker 轮询线程、bridge、工具的显示与预览、mock 用的宿主工具
   term/ render/       raw mode、输入解码、cell 缓冲区、diff 渲染器
-  unicode/ ui/        字素与列宽、换行、Markdown、编辑器、对话视图、trace 面板
+  unicode/ ui/        字素与列宽、换行、Markdown、编辑器、对话视图、标签栏、状态行、trace 面板
 scripts/              release.sh（构建并打包）、install.sh
 ```

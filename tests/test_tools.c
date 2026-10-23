@@ -172,6 +172,29 @@ static void mkdir_in(const char *rel)
 
 /* ---- files ------------------------------------------------------------- */
 
+static void test_read_image(void)
+{
+    static const unsigned char png[] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0 };
+    sope_agent_t *a = new_agent("allow");
+    static run_log log;
+    const char *json;
+    char path[512];
+    FILE *f;
+
+    snprintf(path, sizeof path, "%s/shot.png", dir);
+    CHECK((f = fopen(path, "wb")) != NULL);
+    if (f) {
+        fwrite(png, 1, sizeof png, f);
+        fclose(f);
+    }
+    run(a, "!read {\"file_path\":\"shot.png\"}", &log, NO_ANSWER, NULL);
+    CHECK(log.n == 1 && !log.is_error[0] && !strcmp(log.result[0], "Image shot.png (png, 1 KB), attached for you to look at."));
+    CHECK(strstr(log.text, "[1 image]") != NULL); /* the next round saw it */
+    CHECK(sope_agent_history(a, &json, NULL) == SOPE_OK);
+    CHECK(strstr(json, "\"role\":\"tool\"") && strstr(json, "\"images\":[{\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgoAAAAA\"}]"));
+    sope_agent_free(a);
+}
+
 static void test_read_write_edit(void)
 {
     sope_agent_t *a = new_agent("allow");
@@ -490,6 +513,7 @@ int main(void)
     snprintf(dir, sizeof dir, "%s", realpath(made, resolved) ? resolved : made);
     CHECK(sope_set_threads(2) == SOPE_OK);
 
+    test_read_image();
     test_read_write_edit();
     test_permissions();
     test_host_tool_replaces_builtin();

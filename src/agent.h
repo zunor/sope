@@ -32,6 +32,8 @@ typedef struct msg_node { /* queued input, one per turn */
     int compact; /* sope_compact: text holds optional instructions */
     char *text;
     size_t len;
+    sope_image *images; /* sope_attach_image calls before the sope_send */
+    size_t n_images;
 } msg_node;
 
 typedef struct tool_def {
@@ -74,6 +76,8 @@ typedef struct pending_call {
     int is_error;
     char *content;
     size_t len;
+    sope_image *images; /* a built-in's result images (read, web_fetch) */
+    size_t n_images;
 } pending_call;
 
 typedef enum { PHASE_START, PHASE_CALL, PHASE_TOOLS, PHASE_COMPACT } turn_phase;
@@ -151,6 +155,9 @@ struct sope_agent {
     tool_run *runs;      /* built-in tool calls running for the current turn */
     file_state *files;   /* what read/write/edit have seen; edits require a fresh read */
     char **tool_filter;  /* subagents: tools their type allows; NULL: all */
+    char *history_json;  /* the last sope_agent_history result */
+    sope_image *attached; /* sope_attach_image, waiting for the next sope_send */
+    size_t n_attached;
     size_t n_tool_filter;
 
     /* ---- owned by the running task, no lock ---- */
@@ -170,9 +177,14 @@ int sope__push_event(sope_agent_t *a, uint32_t type, uint64_t turn_id, uint64_t 
 void sope__signal_closed_locked(sope_agent_t *root);
 char *sope__option_dup_locked(sope_agent_t *a, const char *key);
 void sope__agent_free_memory(sope_agent_t *a);
+void sope__msg_node_free(msg_node *m);
 
 /* loop.c */
 sope_next sope__agent_run(sope_task *task);
 void sope__history_clear(sope_history *h);
+/* The history as a JSON array (sope.h: sope_agent_history); malloc'd, NULL on OOM. */
+char *sope__history_json(const sope_history *h, size_t *len);
+/* Parses such an array into *out; SOPE_EINVAL (err says why) or SOPE_ENOMEM. */
+int sope__history_parse(sope_history *out, const char *json, size_t len, char *err, size_t cap);
 
 #endif /* SOPE_AGENT_H */

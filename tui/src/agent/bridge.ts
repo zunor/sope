@@ -31,11 +31,16 @@ export class AgentBridge {
     this.#worker.postMessage({ handle: this.agent.handle, library: libraryPath() });
   }
 
-  /** Closes the agent, waits for the poller to drain it, then frees it. */
-  async shutdown(timeoutMs = 1500): Promise<void> {
+  /**
+   * Closes the agent, waits for the poller to drain it, then frees it.
+   * `beforeFree` runs once the turns have ended, while the agent is still
+   * there to ask (e.g. for its history).
+   */
+  async shutdown(beforeFree?: () => void, timeoutMs = 1500): Promise<void> {
     this.agent.close();
     const drained = await Promise.race([this.#closed.then(() => true), Bun.sleep(timeoutMs).then(() => false)]);
     this.#worker.terminate();
+    beforeFree?.();
     // If the poller never saw "closed" it may still be inside sope_poll; leaking beats a use-after-free.
     if (drained) this.agent.free();
   }

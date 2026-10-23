@@ -21,11 +21,15 @@ import { join } from "node:path";
 
 export const DEFAULT_BASE_URL = "https://api-taas.moi.matrixorigin.cn/v1";
 export const DEFAULT_MODEL = "glm-5.3";
+/** glm-5.3 reads text only; on the default endpoint kimi-k3 takes over for images. */
+export const DEFAULT_IMAGE_MODEL = "kimi-k3";
 export const DEFAULT_COMPACT_THRESHOLD = 100_000;
 
 export interface Config {
   provider: string;
   model: string;
+  /** Used once a conversation holds an image (option image_model); "" for the main model. */
+  imageModel: string;
   baseUrl: string;
   apiKey?: string;
   compactThreshold: number;
@@ -71,10 +75,13 @@ export function loadConfig(
   const apiKey = get("SOPE_API_KEY");
   const provider = overrides.provider || get("SOPE_PROVIDER") || (apiKey ? "openai" : "mock");
   const threshold = Number(get("SOPE_COMPACT_THRESHOLD") ?? DEFAULT_COMPACT_THRESHOLD);
+  const baseUrl = overrides.baseUrl || get("SOPE_BASE_URL") || DEFAULT_BASE_URL;
+  const imageModel = get("SOPE_IMAGE_MODEL") ?? (provider === "openai" && baseUrl === DEFAULT_BASE_URL ? DEFAULT_IMAGE_MODEL : "");
   return {
     provider,
     model: overrides.model || get("SOPE_MODEL") || (provider === "mock" ? "" : DEFAULT_MODEL),
-    baseUrl: overrides.baseUrl || get("SOPE_BASE_URL") || DEFAULT_BASE_URL,
+    imageModel: /^(off|none|0)$/i.test(imageModel) ? "" : imageModel,
+    baseUrl,
     apiKey,
     compactThreshold: Number.isFinite(threshold) && threshold >= 0 ? threshold : DEFAULT_COMPACT_THRESHOLD,
     mouse: !/^(0|false|off|no)$/i.test(get("SOPE_MOUSE") ?? ""),
@@ -104,6 +111,7 @@ export function systemPrompt(cwd = process.cwd(), now = new Date()): string {
 export function agentOptions(c: Config, permissions: "ask" | "allow" | "deny" = "ask"): Record<string, string> {
   const options: Record<string, string> = { provider: c.provider, system: systemPrompt(), permissions };
   if (c.model) options.model = c.model;
+  if (c.imageModel && c.imageModel !== c.model) options.image_model = c.imageModel;
   if (c.compactThreshold) options["compact.threshold"] = String(c.compactThreshold);
   if (c.provider === "openai") {
     options["openai.base_url"] = c.baseUrl;

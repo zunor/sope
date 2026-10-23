@@ -260,13 +260,22 @@ static void open_tag(html_state *h, const char *name, const char *attrs, size_t 
             sope__buf_append(h->out, "[", 1);
         }
     } else if (!strcmp(name, "img")) {
-        char *alt = attr_value(attrs, alen, "alt");
-        if (alt && *alt) {
-            text_str(h, "[image: ");
-            text_str(h, alt);
+        /* ![alt](url): the model can web_fetch the image to see it. */
+        char *alt = attr_value(attrs, alen, "alt"), *src = attr_value(attrs, alen, "src");
+        char *abs = src && *src && strncmp(src, "data:", 5) ? resolve_url(h->base_url, src) : NULL;
+        if ((alt && *alt) || abs) {
+            text_str(h, "![");
+            text_str(h, alt && *alt ? alt : "image");
             text_str(h, "]");
+            if (abs) {
+                text_str(h, "(");
+                text_str(h, abs);
+                text_str(h, ")");
+            }
         }
         free(alt);
+        free(src);
+        free(abs);
     } else if (tag_is(name, para)) {
         breaks(h, 2);
     } else if (tag_is(name, line)) {
@@ -480,6 +489,7 @@ sope_next sope__tool_web_fetch(tool_run *r)
     char err[256], ctype[256], final_url[2048];
     sope_buf text = { 0 };
     long status = 0;
+    const char *image;
     int done, html;
     size_t start, end;
 
@@ -506,6 +516,15 @@ sope_next sope__tool_web_fetch(tool_run *r)
            (!ctype[0] && r->body.len && memchr(r->body.ptr, '<', r->body.len < 512 ? r->body.len : 512));
     if (html) {
         html_to_text(r->body.ptr ? r->body.ptr : "", r->body.len, final_url[0] ? final_url : url, &text);
+    } else if (!strncasecmp(ctype, "image/", 6) && (image = sope__image_type(r->body.ptr, r->body.len))) {
+        if (r->body.len > SOPE__MAX_IMAGE_BYTES)
+            return sope__run_fail(r, "%s is an image of %zu bytes, over the %u byte limit for images", url, r->body.len,
+                                  SOPE__MAX_IMAGE_BYTES);
+        if (!sope__run_add_image(r, image, r->body.ptr, r->body.len)) return sope__run_fail(r, "out of memory");
+        sope__buf_free(&text);
+        sope__buf_appendf(&r->out, "Fetched an image from %s (%s, %zu KB), attached for you to look at.",
+                          final_url[0] ? final_url : url, image + 6, (r->body.len + 1023) / 1024);
+        return sope__run_done(r);
     } else if (!ctype[0] || !strncasecmp(ctype, "text/", 5) || contains_ci(ctype, "json") ||
                contains_ci(ctype, "xml") || contains_ci(ctype, "javascript")) {
         sope__buf_append(&text, r->body.ptr ? r->body.ptr : "", r->body.len);

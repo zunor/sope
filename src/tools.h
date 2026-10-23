@@ -37,6 +37,8 @@ struct tool_run {
 
     sope_buf out; /* the result the model sees */
     int is_error;
+    sope_image *images; /* shown to the model with the result */
+    size_t n_images;
 
     /* bash */
     sope_proc *proc;
@@ -86,6 +88,8 @@ int64_t sope__arg_int(tool_run *r, const char *key, int64_t fallback);
 int sope__arg_bool(tool_run *r, const char *key);
 sope_next sope__run_fail(tool_run *r, const char *fmt, ...) SOPE_PRINTF(2, 3);
 sope_next sope__run_done(tool_run *r);
+/* Attaches image bytes to the result; 0 on OOM. */
+int sope__run_add_image(tool_run *r, const char *media_type, const void *data, size_t n);
 /* Absolute, lexically normalized path: relative paths start at r->cwd, and
  * a leading ~/ at $HOME. malloc'd; NULL on out of memory. */
 char *sope__run_path(tool_run *r, const char *path);

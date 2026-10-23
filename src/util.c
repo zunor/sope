@@ -271,3 +271,59 @@ void sope__buf_clip_middle(sope_buf *b, size_t max)
     sope__buf_free(b);
     *b = out;
 }
+
+char *sope__base64(const void *data, size_t n, size_t *out_len)
+{
+    static const char abc[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const unsigned char *p = data;
+    size_t len = (n + 2) / 3 * 4, i, o = 0;
+    char *out = malloc(len + 1);
+    if (!out) return NULL;
+    for (i = 0; i + 2 < n; i += 3) {
+        uint32_t v = (uint32_t)p[i] << 16 | (uint32_t)p[i + 1] << 8 | p[i + 2];
+        out[o++] = abc[v >> 18];
+        out[o++] = abc[(v >> 12) & 63];
+        out[o++] = abc[(v >> 6) & 63];
+        out[o++] = abc[v & 63];
+    }
+    if (i < n) {
+        uint32_t v = (uint32_t)p[i] << 16 | (i + 1 < n ? (uint32_t)p[i + 1] << 8 : 0);
+        out[o++] = abc[v >> 18];
+        out[o++] = abc[(v >> 12) & 63];
+        out[o++] = i + 1 < n ? abc[(v >> 6) & 63] : '=';
+        out[o++] = '=';
+    }
+    out[o] = '\0';
+    if (out_len) *out_len = o;
+    return out;
+}
+
+const char *sope__image_type(const void *data, size_t n)
+{
+    const unsigned char *p = data;
+    if (n >= 8 && !memcmp(p, "\x89PNG\r\n\x1a\n", 8)) return "image/png";
+    if (n >= 3 && p[0] == 0xff && p[1] == 0xd8 && p[2] == 0xff) return "image/jpeg";
+    if (n >= 6 && (!memcmp(p, "GIF87a", 6) || !memcmp(p, "GIF89a", 6))) return "image/gif";
+    if (n >= 12 && !memcmp(p, "RIFF", 4) && !memcmp(p + 8, "WEBP", 4)) return "image/webp";
+    return NULL;
+}
+
+void sope__images_free(sope_image *v, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) {
+        free(v[i].media_type);
+        free(v[i].data);
+    }
+    free(v);
+}
+
+int sope__image_init(sope_image *img, const char *media_type, const void *data, size_t n)
+{
+    img->media_type = sope__strdup(media_type);
+    img->data = img->media_type ? sope__base64(data, n, &img->len) : NULL;
+    if (img->data) return 1;
+    free(img->media_type);
+    img->media_type = NULL;
+    return 0;
+}

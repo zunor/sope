@@ -56,6 +56,7 @@ static const char READ_DESC[] =
     "- Output uses `cat -n` format: the line number, a tab, then the line. Lines longer than 2000 characters "
     "are truncated.\n"
     "- It reads files, not directories: use glob, or ls through bash, for those.\n"
+    "- Images (PNG, JPEG, GIF, WebP) are shown to you as images, so you can read screenshots and diagrams.\n"
     "- You must read a file before changing it with edit or write.\n"
     "- Read several files at once with parallel calls when you need several.";
 static const char READ_SCHEMA[] =
@@ -180,6 +181,8 @@ static const char WEB_FETCH_DESC[] =
     "Markdown-style headings, lists and links; plain text and JSON come back as they are.\n\n"
     "Usage:\n"
     "- url must be a complete http:// or https:// URL. Redirects are followed.\n"
+    "- An image URL (PNG, JPEG, GIF, WebP) comes back as the image itself. Images on HTML pages appear as "
+    "![alt](url); fetch one to see it.\n"
     "- Long pages come back in parts of about 40000 characters; pass offset to read further.\n"
     "- Use it for documentation and pages the user points you to. For GitHub, prefer the gh CLI through "
     "bash.\n"
@@ -470,6 +473,7 @@ static sope_next tool_read(tool_run *r)
     sope_buf data = { 0 };
     struct stat st;
     char *path;
+    const char *image;
     size_t pos = 0, line_no = 0, shown_from = 0, shown_to = 0, total;
     int stopped = 0;
 
@@ -489,6 +493,19 @@ static sope_next tool_read(tool_run *r)
     }
     if (!read_all(path, &data)) {
         sope__run_fail(r, "Cannot read %s: %s", shown, strerror(errno));
+        free(path);
+        sope__buf_free(&data);
+        return sope__run_done(r);
+    }
+    if ((image = sope__image_type(data.ptr, data.len))) {
+        if (data.len > SOPE__MAX_IMAGE_BYTES)
+            sope__run_fail(r, "%s is an image of %zu bytes, over the %u byte limit for images.", shown, data.len,
+                           SOPE__MAX_IMAGE_BYTES);
+        else if (!sope__run_add_image(r, image, data.ptr, data.len))
+            sope__run_fail(r, "out of memory");
+        else
+            sope__buf_appendf(&r->out, "Image %s (%s, %zu KB), attached for you to look at.", shown, image + 6,
+                              (data.len + 1023) / 1024);
         free(path);
         sope__buf_free(&data);
         return sope__run_done(r);
@@ -940,8 +957,19 @@ const sope_builtin *sope__builtin_find(const char *name)
 /* the run task                                                              */
 /* ------------------------------------------------------------------------ */
 
+int sope__run_add_image(tool_run *r, const char *media_type, const void *data, size_t n)
+{
+    sope_image *grown = realloc(r->images, (r->n_images + 1) * sizeof *grown);
+    if (!grown) return 0;
+    r->images = grown;
+    if (!sope__image_init(&r->images[r->n_images], media_type, data, n)) return 0;
+    r->n_images++;
+    return 1;
+}
+
 static void run_free(tool_run *r)
 {
+    sope__images_free(r->images, r->n_images);
     sope__json_free(r->input);
     free(r->cwd);
     free(r->ca_file);
@@ -997,6 +1025,10 @@ static void run_closed(sope_task *task)
         p->content = r->out.ptr; /* ownership moves to the pending call */
         p->len = r->out.len;
         p->is_error = r->is_error;
+        p->images = r->images;
+        p->n_images = r->n_images;
+        r->images = NULL;
+        r->n_images = 0;
         p->done = 1;
         r->out.ptr = NULL;
         r->out.len = r->out.cap = 0;

@@ -185,6 +185,120 @@ static void test_history_and_reset(void)
     sope_agent_free(a);
 }
 
+static void send_and_drain(sope_agent_t *a, const char *text, turn_log *log);
+
+static void test_save_and_resume(void)
+{
+    sope_agent_t *a = new_agent("0"), *b = new_agent("0");
+    turn_log log = { 0 };
+    const char *json = NULL, *again = NULL;
+    char saved[4096];
+    size_t len = 0, len2 = 0;
+
+    CHECK(sope_agent_history(a, &json, &len) == SOPE_OK);
+    CHECK(len == 2 && !memcmp(json, "[]", 2));
+
+    CHECK(sope_send(a, "!echo hi", 8, NULL) == SOPE_OK);
+    CHECK(drain_turn(a, &log, 1) == 0);
+    CHECK(sope_agent_history(a, &json, &len) == SOPE_OK);
+    CHECK(len < sizeof saved);
+    memcpy(saved, json, len);
+    saved[len] = '\0';
+    CHECK(strstr(saved, "{\"role\":\"user\",\"content\":\"!echo hi\"}") != NULL);
+    CHECK(strstr(saved, "\"tool_uses\":[{\"id\":") != NULL);
+    CHECK(strstr(saved, "\"role\":\"tool\"") != NULL && strstr(saved, "\"is_error\":false") != NULL);
+
+    /* Another agent picks the conversation up where it was. */
+    CHECK(sope_agent_load_history(b, saved, len) == SOPE_OK);
+    CHECK(sope_agent_history(b, &again, &len2) == SOPE_OK);
+    CHECK(len2 == len && !memcmp(again, saved, len));
+    send_and_drain(b, "!history", &log);
+    CHECK(strstr(log.text, "history: 5 messages") != NULL); /* user, assistant+tool use, tool, assistant, user */
+
+    /* Not while a turn runs or waits. */
+    CHECK(sope_agent_set_option(b, "mock.delay_ms", "20") == SOPE_OK);
+    CHECK(sope_send(b, "slow", 4, NULL) == SOPE_OK);
+    CHECK(sope_agent_history(b, &json, &len) == SOPE_EBUSY);
+    CHECK(sope_agent_load_history(b, "[]", 2) == SOPE_EBUSY);
+    CHECK(drain_turn(b, &log, 0) == 0);
+
+    /* A pending reset counts; a load supersedes it. */
+    CHECK(sope_agent_reset(b) == SOPE_OK);
+    CHECK(sope_agent_history(b, &json, &len) == SOPE_OK && len == 2);
+    CHECK(sope_agent_load_history(b, saved, strlen(saved)) == SOPE_OK);
+    send_and_drain(b, "!history", &log);
+    CHECK(strstr(log.text, "history: 5 messages") != NULL);
+
+    /* Malformed input is rejected and leaves the history alone. */
+    CHECK(sope_agent_load_history(b, "{}", 2) == SOPE_EINVAL);
+    CHECK(strstr(sope_last_error(), "array") != NULL);
+    CHECK(sope_agent_load_history(b, "[{\"role\":\"robot\"}]", 18) == SOPE_EINVAL);
+    CHECK(strstr(sope_last_error(), "robot") != NULL);
+    CHECK(sope_agent_load_history(b, "[{\"role\":\"tool\",\"content\":\"x\"}]", 31) == SOPE_EINVAL);
+    CHECK(sope_agent_load_history(b, NULL, 1) == SOPE_EINVAL);
+    send_and_drain(b, "!history", &log);
+    CHECK(strstr(log.text, "history: 7 messages") != NULL);
+
+    /* A history saved with tool uses still open gets them answered. */
+    {
+        static const char open[] = "[{\"role\":\"user\",\"content\":\"go\"},"
+                                   "{\"role\":\"assistant\",\"content\":\"\",\"tool_uses\":"
+                                   "[{\"id\":\"t1\",\"name\":\"bash\",\"input\":\"{}\"}]}]";
+        CHECK(sope_agent_load_history(b, open, sizeof open - 1) == SOPE_OK);
+        CHECK(sope_agent_history(b, &json, &len) == SOPE_OK);
+        CHECK(strstr(json, "{\"role\":\"tool\",\"content\":\"cancelled\",\"tool_use_id\":\"t1\",\"name\":\"bash\",\"is_error\":true}") != NULL);
+    }
+    sope_agent_free(a);
+    sope_agent_free(b);
+}
+
+static const unsigned char PNG[] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 13, 'I', 'H', 'D', 'R' };
+
+static void test_images(void)
+{
+    sope_agent_t *a = new_agent("0"), *b = new_agent("0");
+    turn_log log = { 0 };
+    const char *json = NULL, *again = NULL;
+    char saved[4096];
+    size_t len = 0;
+    unsigned char *big;
+
+    CHECK(sope_attach_image(a, NULL, "hello", 5) == SOPE_EINVAL);
+    CHECK(strstr(sope_last_error(), "unsupported") != NULL);
+    CHECK(sope_attach_image(a, "image/bmp", PNG, sizeof PNG) == SOPE_EINVAL);
+    CHECK(sope_attach_image(a, NULL, NULL, 0) == SOPE_EINVAL);
+    big = calloc(1, (10u << 20) + 1);
+    CHECK(big && sope_attach_image(a, "image/png", big, (10u << 20) + 1) == SOPE_EINVAL);
+    free(big);
+
+    /* Every image attached before a send goes with it; compaction leaves them waiting. */
+    send_and_drain(a, "hi", &log);
+    CHECK(sope_attach_image(a, NULL, PNG, sizeof PNG) == SOPE_OK);
+    CHECK(sope_compact(a, NULL, 0, NULL) == SOPE_OK);
+    CHECK(drain_turn(a, &log, 0) == 0);
+    CHECK(sope_attach_image(a, "image/jpeg", PNG, sizeof PNG) == SOPE_OK); /* the host's type wins */
+    send_and_drain(a, "look", &log);
+    CHECK(strstr(log.text, "You said: look (with 2 images)") != NULL);
+    CHECK(sope_attach_image(a, NULL, PNG, sizeof PNG) == SOPE_OK);
+    send_and_drain(a, "and this", &log);
+    CHECK(strstr(log.text, "You said: and this (with 1 image)") != NULL); /* the earlier ones went with "look" */
+
+    CHECK(sope_agent_history(a, &json, &len) == SOPE_OK && len < sizeof saved);
+    memcpy(saved, json, len);
+    saved[len] = '\0';
+    CHECK(strstr(saved, "\"content\":\"look\",\"images\":[{\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgoAAAANSUhEUg==\"},"
+                        "{\"media_type\":\"image/jpeg\"") != NULL);
+    CHECK(sope_agent_load_history(b, saved, len) == SOPE_OK);
+    CHECK(sope_agent_history(b, &again, NULL) == SOPE_OK && !strcmp(again, saved));
+    CHECK(sope_agent_load_history(b, "[{\"role\":\"user\",\"content\":\"x\",\"images\":[{\"data\":\"AA==\"}]}]", 63) ==
+          SOPE_EINVAL);
+
+    sope_agent_close(a);
+    CHECK(sope_attach_image(a, NULL, PNG, sizeof PNG) == SOPE_ECLOSED);
+    sope_agent_free(a);
+    sope_agent_free(b);
+}
+
 static void test_unknown_call_id(void)
 {
     sope_agent_t *a = new_agent("0");
@@ -648,6 +762,8 @@ int main(void)
     test_basic_turn();
     test_tool_roundtrip();
     test_history_and_reset();
+    test_save_and_resume();
+    test_images();
     test_unknown_call_id();
     test_cancel_while_streaming();
     test_cancel_while_waiting_for_tool();

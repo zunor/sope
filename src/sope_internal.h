@@ -61,6 +61,11 @@ void sope__buf_clip_middle(sope_buf *b, size_t max);
 void sope__buf_append_json_string(sope_buf *b, const char *s, size_t n);
 /* Drops the first n bytes. */
 void sope__buf_consume(sope_buf *b, size_t n);
+/* Standard base64 (RFC 4648, padded), NUL-terminated; NULL on OOM. */
+char *sope__base64(const void *data, size_t n, size_t *out_len);
+/* The media type of image bytes by their signature: "image/png", "image/jpeg",
+ * "image/gif", "image/webp", or NULL for anything else. */
+const char *sope__image_type(const void *data, size_t n);
 void sope__buf_free(sope_buf *b);
 
 /* ======================================================================== */
@@ -199,6 +204,19 @@ void sope__proc_shutdown(void);
 
 typedef enum { SOPE__MSG_USER, SOPE__MSG_ASSISTANT, SOPE__MSG_TOOL } sope_msg_role;
 
+/* Largest image accepted, before encoding (sope_attach_image, read, web_fetch). */
+#define SOPE__MAX_IMAGE_BYTES (10u << 20)
+
+typedef struct sope_image {
+    char *media_type; /* image/png, image/jpeg, image/gif or image/webp */
+    char *data;       /* base64, NUL-terminated */
+    size_t len;       /* of data */
+} sope_image;
+
+void sope__images_free(sope_image *v, size_t n);
+/* A copy of image bytes, encoded; 0 on OOM. */
+int sope__image_init(sope_image *img, const char *media_type, const void *data, size_t n);
+
 typedef struct sope_tool_use {
     char *id;   /* provider-assigned id, echoed back with the result */
     char *name;
@@ -217,6 +235,8 @@ typedef struct sope_message {
     char *tool_use_id; /* tool only: sope_tool_use.id this answers */
     char *tool_name;   /* tool only */
     int is_error;      /* tool only */
+    sope_image *images; /* user and tool messages */
+    size_t n_images;
 } sope_message;
 
 typedef struct sope_history {
