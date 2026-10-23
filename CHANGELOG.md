@@ -1,97 +1,97 @@
 # Changelog
 
-版本号以 `include/sope.h` 为准，库、绑定和 `sope` 可执行文件同步发布，规则见 [docs/release.md](docs/release.md)。
+The version in `include/sope.h` is authoritative. The library, bindings, and `sope` executable are released together; see [docs/release.md](docs/release.md) for the policy.
 
-## 未发布
+## Unreleased
 
-新增权限模式、模型选择框和斜杠命令提示，改进标签栏、状态动画和工具输出交互。只改 TUI，库的 ABI 不变。
+Adds permission modes, a model picker, and slash-command suggestions, and improves the tab bar, status animation, and tool output interactions. TUI changes only; the library ABI is unchanged.
 
 ### TUI
 
-- 三种权限模式：Ask for approval、Approve for me（默认）、Full access；底栏显示当前模式，`shift+tab` 轮换，`/permissions` 打开选择框，`--permissions ask|auto|full` / `SOPE_PERMISSIONS` 设置启动模式（`--allow-all` 等于 `full`）
-- Approve for me 拆解 shell 命令（管道、`$( )`、`sh -c`、`find -exec`、`xargs`、heredoc），只拦删除或改动工作目录以外的文件、删除整个目录或 `.git`、`git push` 等发布、丢弃未提交的 git 改动、`sudo`、全局安装、`ssh`、`curl` 上传、`curl | sh`；弹窗说明为什么要问
-- 确认框改成方框弹窗：`↑`/`↓` 选择、回车确认，也能按 `1`–`4`、点击或用 `y`/`a`/`n`/`esc`；切到更宽松的模式时，等待中的请求自动放行
-- `-p` 按权限模式自动判断（原来一律拒绝，除非 `--allow-all`）
-- 模型选择框（`/model` 或 `alt+m`）：列出端点提供的对话模型，最近用过的在前，输入即搜索，也可以直接用输入的名字；最近用过的模型存在数据库里
-- 标签栏使用一行高的浅底色标签，固定 24 列宽、间隔一列；长标题截断，悬浮时缓慢往返滚动，当前会话加粗并加亮底色
-- 状态栏使用一行高、两列宽的正方形像素流星，每 3 秒绕行一圈，流星头加粗加亮；探测到 Kitty 图片协议支持才启用，其他终端及 tmux/screen/Zellij 回退到盲文点阵，`SOPE_GRAPHICS=0` 可关闭像素效果；状态栏上方保留一行间距
-- 输入 `/` 弹出命令列表，支持筛选、键盘和鼠标选择、Tab 补全、Esc 收起
-- 工具及子 agent 的长输出默认显示六行；悬浮连接符或 `… N more lines` 时联动高亮，点击展开，再次点击连接符或 `show fewer lines` 收起，长内容末尾也有收起入口
-- 底栏只保留权限模式和临时提示，使用不同菱形图标，仅 Full access 为红色，其他模式为浅灰色；去掉按键提示和模型、上下文、token 统计，弹窗的按键提示移到弹窗下边框里
+- Three permission modes: Ask for approval, Approve for me (default), and Full access. The bottom bar shows the current mode; `shift+tab` cycles modes; `/permissions` opens the picker; `--permissions ask|auto|full` / `SOPE_PERMISSIONS` sets the initial mode (`--allow-all` is equivalent to `full`).
+- Approve for me parses shell commands (pipelines, `$( )`, `sh -c`, `find -exec`, `xargs`, and heredocs), prompting only for deleting or changing files outside the working directory, deleting the entire directory or `.git`, publishing such as `git push`, discarding uncommitted Git changes, `sudo`, global installs, `ssh`, `curl` uploads, and `curl | sh`. The dialog explains why approval is needed.
+- Approval prompts now use a bordered dialog: select with `↑`/`↓` and confirm with Enter, or use `1`–`4`, mouse clicks, or `y`/`a`/`n`/`esc`. Switching to a more permissive mode automatically approves pending requests.
+- `-p` evaluates actions according to the permission mode (previously all were denied unless `--allow-all` was set).
+- Model picker (`/model` or `alt+m`): lists chat models from the endpoint, with recently used models first; type to search or use a model name directly. Recently used models are stored in the database.
+- Tabs have a light background, are one row high and 24 columns wide, and are separated by one column. Long titles are truncated and slowly scroll back and forth on hover. The active session uses bold text and a brighter background.
+- The status bar uses a square pixel meteor, one row high and two columns wide, that completes a lap every 3 seconds with a thicker, brighter head. Enabled only after detecting Kitty graphics protocol support; other terminals and tmux/screen/Zellij fall back to Braille. `SOPE_GRAPHICS=0` disables the pixel effect. One blank row is kept above the status bar.
+- Typing `/` opens a command list with filtering, keyboard and mouse selection, Tab completion, and Esc dismissal.
+- Long tool and subagent outputs show six lines by default. Hovering over the connector or `… N more lines` highlights both; click to expand, then click the connector or `show fewer lines` to collapse. Long output also has a collapse control at the end.
+- The bottom bar now shows only the permission mode and temporary hints, with distinct diamond icons. Only Full access is red; other modes are light gray. Key hints, model, context, and token statistics have been removed. Dialog key hints have moved into the dialog's bottom border.
 
 ## 0.3.0 — 2026-10-23
 
-会话可以保存和恢复，消息可以带图片：库能导出、装回对话历史，TUI 按目录把会话存进 SQLite；截图和图表能发给模型。ABI 升到 0.3（新增函数，0.2 的宿主需要重新编译）。
+Sessions can be saved and restored, and messages can include images. The library exports and reloads conversation history; the TUI stores sessions by directory in SQLite, and screenshots and diagrams can be sent to the model. The ABI advances to 0.3 with new functions; hosts built for 0.2 must recompile.
 
-### libsope（C ABI 0.3）
+### libsope (C ABI 0.3)
 
-- `sope_agent_history` / `sope_agent_load_history`：导出、装回对话历史（JSON 数组），用于保存和恢复会话；只在回合之间可用（否则 `SOPE_EBUSY`）
-- `sope_attach_image`：给下一次 `sope_send` 附加图片（PNG/JPEG/GIF/WebP，≤10 MiB）
-- `read` 读到图片文件、`web_fetch` 抓到图片 URL 时把图片交给模型；网页里的图片写成 `![alt](url)`（原先只有 `[image: alt]`），模型可以再抓
-- `openai` provider 发送 `image_url` 内容块（data URL）；工具结果里的图片紧跟着用一条 user 消息补发
-- 新选项 `image_model`：对话里出现图片后改用的模型
-- 历史 JSON 里带图片（`images`），压缩时图片记为 `[N images attached]`；导出共 23 个符号
+- `sope_agent_history` / `sope_agent_load_history`: export and restore conversation history as a JSON array to save and restore sessions; available only between turns (otherwise `SOPE_EBUSY`).
+- `sope_attach_image`: attach images to the next `sope_send` (PNG/JPEG/GIF/WebP, ≤10 MiB).
+- `read` passes image files to the model, and `web_fetch` does the same for image URLs. Images within web pages are represented as `![alt](url)` (previously just `[image: alt]`) so the model can fetch them separately.
+- The `openai` provider sends `image_url` content blocks with data URLs; images from tool results are sent immediately afterward in a separate user message.
+- New `image_model` option: the model to switch to when the conversation contains images.
+- History JSON includes images (`images`); compaction represents them as `[N images attached]`. The library exports 23 symbols in total.
 
-### 绑定
+### Bindings
 
-- `Agent.history()`、`Agent.loadHistory(json)`、`Agent.attachImage(bytes, mediaType?)`
+- `Agent.history()`, `Agent.loadHistory(json)`, and `Agent.attachImage(bytes, mediaType?)`.
 
 ### TUI
 
-- 会话标签：一行、紧挨着，每个标签是一块颜色，右边缘渐暗成柔和的阴影（颜色按终端背景色取，通过 OSC 11 查询）；悬停出现 `×` 关闭（逻辑删除）。默认只显示最近 5 个会话，最右侧 `⋯` 或 `/sessions` 打开全部会话列表（可筛选）
-- 会话保存在 SQLite（`~/.local/share/sope/sope.db`，`SOPE_DB` 可改），启动时恢复界面记录和模型记忆
-- 图片输入：`ctrl+v` 粘贴剪贴板图片，拖入图片文件自动附加，`--image <file>`；默认端点上图片交给 `kimi-k3`（`SOPE_IMAGE_MODEL`，glm-5.3 不能看图）
-- `write` / `edit` 审批预览改为和当前文件的 diff：行号、增删底色、语法高亮
-- 运行状态改为输入框上方单独一行：流星划过 `──━━✦ Thinking… (1m 4s · 38 tok/s · tip: …)`，动词带流动高光，时间按秒递增，速率按最近 3 秒流式输出估算，提示每 30 秒出现 10 秒
-- 去掉顶部版本信息行；模型、上下文大小和累计 token 移到底部提示行右侧
+- Session tabs: a single row of adjacent colored tabs, with each right edge fading into a soft shadow (colors are based on the terminal background queried through OSC 11). Hover to reveal `×` for closing (soft deletion). Only the 5 most recent sessions appear by default; `⋯` on the right or `/sessions` opens a filterable list of all sessions.
+- Sessions are stored in SQLite (`~/.local/share/sope/sope.db`, configurable with `SOPE_DB`); displayed history and model memory are restored at startup.
+- Image input: `ctrl+v` pastes clipboard images, dragging in an image file attaches it automatically, and `--image <file>` works from the command line. On the default endpoint, images are sent to `kimi-k3` (`SOPE_IMAGE_MODEL`, since glm-5.3 cannot process images).
+- `write` / `edit` approval previews now show a diff against the current file, with line numbers, addition/deletion backgrounds, and syntax highlighting.
+- Running status moves to a separate row above the input box: a meteor crosses `──━━✦ Thinking… (1m 4s · 38 tok/s · tip: …)`, with an animated highlight on the verb. Elapsed time updates every second, speed is estimated from the last 3 seconds of streaming output, and tips appear for 10 seconds every 30 seconds.
+- Removes the top version information row; the model, context size, and total tokens move to the right side of the bottom hint row.
 
 ## 0.2.0 — 2026-10-23
 
-工具从 TUI 搬进了库：任何语言嵌入 libsope 都直接拥有读写文件、搜索、执行命令和抓网页的能力。ABI 升到 0.2（新增函数和事件，0.1 的宿主需要重新编译）。
+Tools move from the TUI into the library: embedding libsope from any language now provides file reading and writing, search, command execution, and web fetching directly. The ABI advances to 0.2 with new functions and events; hosts built for 0.1 must recompile.
 
-### libsope（C ABI 0.2）
+### libsope (C ABI 0.2)
 
-- 内置工具：`read`、`write`、`edit`、`glob`、`grep`、`bash`（`run_in_background` + `bash_output` / `bash_kill`）、`web_fetch`、`todo_write`，参考 soren 的同名工具设计
-- 每次工具调用是线程池上的一个独立任务：并行的工具调用真正并行，等命令和下载不占线程；新增进程回收线程（`src/proc.c`）
-- 新事件 `SOPE_EVENT_TOOL_START`（12）、`SOPE_EVENT_TOOL_END`（13，所有工具调用都有，包括宿主工具）、`SOPE_EVENT_PERMISSION`（14）
-- 新函数 `sope_permit`：批准或拒绝需要许可的工具调用，拒绝时可以附一句话给模型
-- 新选项 `cwd`（工具的工作目录）、`permissions`（`ask` / `allow` / `deny`）
-- `write` / `edit` 要求先读过文件，且读过之后文件没被改过
-- 取消回合会杀掉正在运行的命令（整个进程组）、中止下载，每个打开的工具调用都以 `TOOL_END` 收尾
-- 宿主可以注册同名工具替换内置工具；子 agent 类型的 `tools` 列表同时适用于内置工具和宿主工具
-- mock provider：`!<tool> {json}` 直接传 JSON 输入，`;;` 一次调用多个工具
+- Built-in tools: `read`, `write`, `edit`, `glob`, `grep`, `bash` (`run_in_background` plus `bash_output` / `bash_kill`), `web_fetch`, and `todo_write`, inspired by soren's tools of the same names.
+- Each tool call is a separate thread pool task: parallel tool calls actually run concurrently, and waiting for commands or downloads does not occupy a thread. Adds a process reaper thread (`src/proc.c`).
+- New events: `SOPE_EVENT_TOOL_START` (12), `SOPE_EVENT_TOOL_END` (13, emitted for all tool calls, including host tools), and `SOPE_EVENT_PERMISSION` (14).
+- New `sope_permit` function to approve or deny tool calls requiring permission, with an optional denial message for the model.
+- New options: `cwd` (tool working directory) and `permissions` (`ask` / `allow` / `deny`).
+- `write` / `edit` require files to have been read first and to remain unchanged since that read.
+- Cancelling a turn kills running commands (entire process groups), aborts downloads, and closes every open tool call with `TOOL_END`.
+- Hosts can replace built-in tools by registering tools with the same names. A subagent type's `tools` list applies to both built-in and host tools.
+- Mock provider: `!<tool> {json}` passes JSON input directly; `;;` calls multiple tools in one response.
 
-### sope 可执行文件
+### sope executable
 
-- 不再自己实现工具，只显示库发来的工具事件、回答许可请求
-- `todo_write` 的任务清单直接显示在对话里
-- `-p` 模式下（没有 `--allow-all`）需要许可的工具改为由库直接拒绝，模型会收到原因
+- No longer implements tools itself; it only displays tool events from the library and answers permission requests.
+- `todo_write` task lists appear directly in the conversation.
+- In `-p` mode without `--allow-all`, the library now directly denies tools requiring permission and sends the reason to the model.
 
 ## 0.1.1 — 2026-10-23
 
-- 许可证：MIT（`LICENSE`，版权人 Zonor，源文件带 SPDX 标识）；bundled 发布包附带 curl 和 mbedTLS 的许可证
-- TUI 默认接管鼠标：滚轮滚动对话（之前滚轮在备用屏幕里变成 ↑/↓，翻的是输入历史）；拖动选中文字、松开复制到剪贴板（OSC 52 + pbcopy/wl-copy/xclip）；`SOPE_MOUSE=0` 或 `/mouse` 还给终端
-- 往上翻看时，新输出不再把视图往下推
+- License: MIT (`LICENSE`, copyright holder Zonor, SPDX identifiers in source files). Bundled release archives include curl and mbedTLS licenses.
+- The TUI captures mouse input by default: the wheel scrolls the conversation (previously it became ↑/↓ in the alternate screen and browsed input history). Drag to select text and release to copy to the clipboard (OSC 52 plus pbcopy/wl-copy/xclip). `SOPE_MOUSE=0` or `/mouse` returns mouse input to the terminal.
+- New output no longer pushes the view down while scrolling up.
 
 ## 0.1.0 — 2026-10-22
 
-第一个发布版本。
+Initial release.
 
-### libsope（C ABI 0.1）
+### libsope (C ABI 0.1)
 
-- agent 循环：模型 → 工具 → 模型，支持一次调用多个工具；`max_rounds` 限制轮数
-- 子 agent：内置 `agent` 工具、`sope_subagent_register` 自定义类型，多个子 agent 并行
-- 共享线程池：agent 不占线程，等待模型、工具、子 agent 都不占线程
-- 每个 agent 一个可读 fd（`sope_agent_fd`），可接入 poll/epoll/kqueue/libuv
-- 历史压缩：`compact.threshold` 自动压缩，`sope_compact` 手动压缩，`SOPE_EVENT_COMPACT` 事件
-- provider：OpenAI 兼容的流式 Chat Completions（含 reasoning、并行 tool calls、usage、自动重试），离线 mock
-- 构建选项 `SOPE_CURL=system|bundled|off`：bundled 把 curl + mbedTLS 静态编进 libsope，只导出 `sope_*`；`tls.ca_file` 选项
-- 共享库只导出 19 个 `sope_*` 符号
+- Agent loop: model → tools → model, supporting multiple tool calls at once; `max_rounds` limits the number of rounds.
+- Subagents: built-in `agent` tool and custom types through `sope_subagent_register`; multiple subagents run in parallel.
+- Shared thread pool: agents do not occupy dedicated threads, and waiting for models, tools, or subagents does not occupy a thread.
+- One readable fd per agent (`sope_agent_fd`), for integration with poll/epoll/kqueue/libuv.
+- History compaction: automatic with `compact.threshold`, manual with `sope_compact`, and the `SOPE_EVENT_COMPACT` event.
+- Providers: OpenAI-compatible streaming Chat Completions (including reasoning, parallel tool calls, usage, and automatic retries), plus an offline mock.
+- Build option `SOPE_CURL=system|bundled|off`: bundled mode links curl and mbedTLS statically into libsope, exporting only `sope_*`; `tls.ca_file` option.
+- The shared library exports only 19 `sope_*` symbols.
 
-### sope 可执行文件
+### sope executable
 
-- 单文件，内嵌 libsope；`sope` 打开全屏 TUI，`sope -p` 非交互输出，可接管道
-- 工具：`list_files`、`read_file`、`search`（只读，直接运行），`write_file`、`edit_file`、`bash`（需要用户批准）
-- 权限确认：允许一次 / 本次会话总是允许 / 拒绝 / 拒绝并停止；`--allow-all` 跳过
-- `/compact`、上下文大小显示、ABI trace 面板、Markdown 渲染、子 agent 进度
-- 配置：`~/.config/sope/config` 或环境变量
+- Single file with embedded libsope: `sope` opens the full-screen TUI; `sope -p` provides noninteractive output and accepts piped input.
+- Tools: `list_files`, `read_file`, and `search` (read-only, run directly); `write_file`, `edit_file`, and `bash` (require user approval).
+- Permission prompts: allow once / always allow for this session / deny / deny and stop; `--allow-all` skips prompts.
+- `/compact`, context size display, ABI trace panel, Markdown rendering, and subagent progress.
+- Configuration through `~/.config/sope/config` or environment variables.

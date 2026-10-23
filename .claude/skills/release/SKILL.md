@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut a sope release end to end — pick the version, bump it everywhere, verify (C tests under ASan/TSan/leaks, bundled build, JS tests, typecheck, live model), commit, run scripts/release.sh, tag, install from the tarball and smoke-test. Use when the user asks to release, publish, ship, cut, tag or "升级发布" sope, or to bump its version.
+description: Cut a sope release end to end — pick the version, bump it everywhere, verify (C tests under ASan/TSan/leaks, bundled build, JS tests, typecheck, live model), commit, run scripts/release.sh, tag, install from the tarball and smoke-test. Use when the user asks to release, publish, ship, cut, tag or upgrade sope, or to bump its version.
 ---
 
 # Releasing sope
@@ -37,19 +37,20 @@ scripts/bump-version.sh X.Y.Z
 
 It updates `include/sope.h`, the three `package.json`, the bindings' `ABI`
 in `bindings/js/src/ffi.ts`, the version line of `docs/abi.md`, and the
-tarball names in `README.md`, and reports whether `CHANGELOG.md` has a
+tarball names in `README.md` and `docs/guide/quickstart.md`, and reports whether `CHANGELOG.md` has a
 section for X.Y.Z. Then by hand:
 
 - **CHANGELOG.md**: a `## X.Y.Z — YYYY-MM-DD` section at the top (rename an
-  `## 未发布…` heading if there is one), in Chinese like the rest, grouped
-  as `### libsope（C ABI x.y）`, `### 绑定`, `### TUI`. Lead with one
+  `## Unreleased…` heading if there is one), in English like the rest, grouped
+  as `### libsope (C ABI x.y)`, `### Bindings`, `### TUI`. Lead with one
   sentence on what the release is about and whether hosts must recompile.
 - **Exported symbol count**: `nm -gU build/libsope.dylib | grep -c " _sope_"`
   (Linux: `nm -D --defined-only build/libsope.so | grep -c " sope_"`) must
-  match "导出公开的 `sope_*` 函数（N 个）" in `docs/abi.md`.
+  match "exports only the public `sope_*` functions (N in total)" in `docs/abi.md`.
 - **Docs for anything new**: `include/sope.h` comments, `docs/abi.md`
   (options table, events table, limitations in the last section), `README.md`
-  (keys, commands, configuration table). Check with
+  (overview), `docs/guide/terminal.md` (keys and commands), and
+  `docs/guide/configuration.md` (configuration table). Check with
   `grep -rn "<old version>" README.md docs include */package.json` that
   nothing still names the old version, CHANGELOG excepted.
 
@@ -78,7 +79,7 @@ bun test && bun run typecheck
   `-DSOPE_CURL_URL=… -DSOPE_MBEDTLS_URL=…` when offline.
 - **Live model** (needs `.env` with `SOPE_API_KEY`; load it with
   `set -a; . ./.env; set +a`, never echo it):
-  `bun tui/src/main.ts -p "一句话：1+1 等于几？"`, plus one check per
+  `bun tui/src/main.ts -p "In one sentence: what is 1+1?"`, plus one check per
   user-visible feature of the release (for example `--image` with a small
   PNG). The endpoint sometimes stalls or times out in the TLS handshake:
   check `curl -m 20 -w "%{http_code}" "$SOPE_BASE_URL/models" -H "Authorization: Bearer $SOPE_API_KEY"`
@@ -131,7 +132,7 @@ itself is what gets checked:
 (cd dist && shasum -a 256 -c sope-X.Y.Z-*.tar.gz.sha256)
 tar xzf dist/sope-X.Y.Z-*.tar.gz -C <scratch> && <scratch>/sope-X.Y.Z-*/install.sh
 (cd / && ~/.local/bin/sope --version)    # sope X.Y.Z (<os>-<arch>, libsope embedded)
-(cd / && ~/.local/bin/sope -p "一句话：1+1 等于几？")   # with .env loaded
+(cd / && ~/.local/bin/sope -p "In one sentence: what is 1+1?")   # with .env loaded
 ```
 
 The repository has no remote: do not push, and do not upload the tarball

@@ -1,94 +1,94 @@
-# 发布与版本
+# Releases and versioning
 
-## 发布的是什么
+## What we ship
 
-sope 有两个产物，面向两类使用者：
+sope has two artifacts for two audiences:
 
-| 产物 | 给谁用 | 形式 |
+| Artifact | Audience | Format |
 |---|---|---|
-| **libsope** | 把 agent 嵌进自己程序的开发者（任何语言，经 C ABI） | `libsope.dylib/.so`、`libsope.a`、`sope.h` |
-| **sope 可执行文件** | 直接在终端里使用、调试 agent 的人 | 一个文件 `bin/sope`，打开全屏 TUI，`-p` 为非交互模式 |
+| **libsope** | Developers embedding agents in their own programs, in any language through the C ABI | `libsope.dylib/.so`, `libsope.a`, `sope.h` |
+| **sope executable** | People using and debugging agents directly in a terminal | A single `bin/sope` file; opens a full-screen TUI, with `-p` for noninteractive mode |
 
-它们的关系类似 `libsqlite3` 和 `sqlite3` 命令行：命令行只是库的一个使用者，它调用的 ABI 和任何嵌入方调用的完全一样。
+Their relationship is similar to `libsqlite3` and the `sqlite3` CLI: the CLI is just one consumer of the library, using exactly the same ABI as any embedding application.
 
-## TUI 和 agent 需要同一个版本吗
+## Do the TUI and agent need the same version?
 
-**同一个版本号、同时发布，但运行时不依赖“恰好相同”。**
+**They share a version number and are released together, but an exact version match is not required at runtime.**
 
-- **一个仓库、一个版本号。** 版本只在 `include/sope.h` 里定义（`SOPE_VERSION_*`），CMake 从头文件读取，`package.json` 必须一致；不一致时 `scripts/release.sh` 会拒绝发布，测试也会失败。发布打一个 tag：`v0.1.0`。
-  - 好处：不用维护版本矩阵；改动常常同时涉及两边（比如新增 `sope_compact` 时，`/compact` 命令也一起加上了），一个提交、一次发布就能完成。
-- **`sope` 可执行文件内嵌它构建时的 libsope。** 所以用户拿到的 TUI 和库不可能对不上，也不需要另外安装库。
-- **两者之间唯一的契约是 ABI 版本。** 绑定层在加载库时检查 `sope_version_number()`：
-  - 1.0 之前要求主、次版本号都相同；
-  - 1.0 之后要求主版本相同、次版本号不低于绑定编写时的版本。
+- **One repository, one version number.** The version is defined only in `include/sope.h` (`SOPE_VERSION_*`). CMake reads it from the header, and `package.json` versions must match. If they do not, `scripts/release.sh` refuses to release and tests fail. Each release gets one tag, such as `v0.1.0`.
+  - This avoids maintaining a version matrix. Changes often affect both sides—for example, `sope_compact` and the `/compact` command were added together—so one commit and one release cover both.
+- **The `sope` executable embeds the libsope it was built with.** Users therefore receive a matching TUI and library without needing to install the library separately.
+- **The ABI version is the only compatibility contract between them.** Bindings check `sope_version_number()` when loading the library:
+  - Before 1.0, both major and minor versions must match.
+  - From 1.0 onward, the major version must match, and the minor version must be at least the one the bindings were written for.
 
-  不兼容时立即报错，不会等到调用时才崩溃。这条检查也服务于第三种情况：用 `SOPE_LIB=/path/to/libsope.dylib sope` 让 TUI 加载另一份库，比如调试自己改过的库，或者复现嵌入方用的某个版本。
-- **嵌入方只需要库。** 他们按 ABI 版本选库，不关心 TUI；TUI 的改动（界面、工具、权限交互）只要不碰 ABI，就只增加修订号或次版本号。
+  Incompatibility produces an immediate error instead of a crash on a later call. This check also supports loading another library with `SOPE_LIB=/path/to/libsope.dylib sope`, for example to debug a modified library or reproduce an embedding application's version.
+- **Embedding applications only need the library.** They choose it by ABI version, independently of the TUI. TUI changes (interface, tools, permission interactions) that do not affect the ABI only require a patch or minor version increment.
 
-版本号怎么变：
+Version increments:
 
-| 改动 | 1.0 之前 | 1.0 之后 |
+| Change | Before 1.0 | From 1.0 onward |
 |---|---|---|
-| 只改 TUI、修 bug、性能 | 修订号 +1 | 修订号 +1 |
-| ABI 新增函数、事件、选项 | 次版本 +1 | 次版本 +1 |
-| ABI 破坏性变更（改结构体布局、改语义） | 次版本 +1 | 主版本 +1 |
+| TUI-only changes, bug fixes, performance | Patch +1 | Patch +1 |
+| New ABI functions, events, or options | Minor +1 | Minor +1 |
+| Breaking ABI changes (struct layout or semantics) | Minor +1 | Major +1 |
 
-## 发布包内容
+## Release archive contents
 
-`scripts/release.sh` 为当前平台构建 `dist/sope-<版本>-<系统>-<架构>.tar.gz`（附 `.sha256`）：
+`scripts/release.sh` builds `dist/sope-<version>-<os>-<arch>.tar.gz` for the current platform, with a `.sha256` file:
 
 ```
 sope-0.1.0-darwin-arm64/
-  bin/sope            单文件可执行程序（Bun 运行时 + TUI + 内嵌 libsope）
-  lib/libsope.*       共享库（只导出 sope_*）和静态库
+  bin/sope            Single executable (Bun runtime, TUI, and embedded libsope)
+  lib/libsope.*       Shared library (exports only sope_*) and static library
   include/sope.h
   docs/  README.md  CHANGELOG.md  LICENSE
-  licenses/           bundled 模式下 curl 和 mbedTLS 的许可证
-  install.sh          安装 sope 到 ~/.local/bin；--lib 同时安装库和头文件
+  licenses/           curl and mbedTLS licenses in bundled mode
+  install.sh          Install sope into ~/.local/bin; --lib also installs the library and header
 ```
 
-脚本依次执行：Release 构建、C 测试、绑定和 TUI 测试、类型检查，然后编译 `sope`、在 `/` 目录下冒烟测试（不依赖仓库），最后打包。
+The script runs a Release build, C tests, binding and TUI tests, and type checking. It then compiles `sope`, smoke-tests it from `/` without relying on the repository, and packages the result.
 
-### 各平台的 HTTP/TLS
+### HTTP/TLS by platform
 
-| 平台 | `SOPE_CURL` | 原因 |
+| Platform | `SOPE_CURL` | Reason |
 |---|---|---|
-| macOS | `system` | libcurl 是系统自带的一部分（不算额外依赖）；TLS 信任系统钥匙串，公司证书、HTTPS 代理都能用 |
-| Linux | `bundled` | 各发行版的 libcurl 版本和路径不一，打包进去才是真正的单文件；mbedTLS 读系统证书文件，这正是 Linux 上的惯例 |
+| macOS | `system` | libcurl is part of the OS, so it adds no extra dependency. TLS trusts the system keychain, including corporate certificates and HTTPS proxies |
+| Linux | `bundled` | libcurl versions and paths vary across distributions; bundling it makes the binary self-contained. mbedTLS reads the system certificate file, which is the standard approach on Linux |
 
-可以用 `SOPE_CURL=bundled bash scripts/release.sh` 覆盖。
+Override with `SOPE_CURL=bundled bash scripts/release.sh`.
 
-### 关于 `sope` 的体积
+### About the size of `sope`
 
-`bin/sope` 约 58 MB，其中绝大部分是 Bun 运行时，libsope 本身不到 100 KB（bundled 模式约 1.1 MB）。如果以后要更小，可以把 TUI 用 C 或 Zig 重写后直接静态链接 libsope，ABI 不需要任何改动。
+`bin/sope` is about 58 MB, almost all of which is the Bun runtime. libsope itself is under 100 KB (about 1.1 MB in bundled mode). A future C or Zig rewrite of the TUI could link libsope statically for a smaller executable without any ABI changes.
 
-## 许可证
+## License
 
-sope 使用 MIT 许可证，全文在 `LICENSE`。每个源文件第一行是简写的 SPDX 标识：
+sope uses the MIT license; the full text is in `LICENSE`. Every source file starts with a short SPDX identifier:
 
 ```c
 /* SPDX-License-Identifier: MIT */
 ```
 
-这是 Linux 内核、curl 等项目通用的写法，工具（如 `reuse`、GitHub）能识别它。`include/sope.h` 还多一行版权声明，因为嵌入方常常只拷贝这一个头文件。
+This is a common convention in projects such as the Linux kernel and curl, and tools such as `reuse` and GitHub recognize it. `include/sope.h` also includes a copyright notice because embedding applications often copy only this header.
 
-bundled 模式把 curl（curl 许可证，MIT 风格）和 mbedTLS（Apache-2.0）编进了 libsope，发布包会在 `licenses/` 里附上它们的许可证全文，这是这两个许可证的要求。
+Bundled mode compiles curl (curl license, MIT-style) and mbedTLS (Apache-2.0) into libsope. Release archives include their full license texts in `licenses/`, as required by those licenses.
 
-## 发布步骤
+## Release steps
 
 ```sh
-scripts/bump-version.sh 0.4.0           # sope.h、三个 package.json、绑定的 ABI、文档里的版本号
-# 在 CHANGELOG.md 写 “## 0.4.0 — 日期” 一节
-bash scripts/release.sh                 # 构建、测试、打包到 dist/
+scripts/bump-version.sh 0.4.0           # Update sope.h, three package.json files, the bindings' ABI, and doc versions
+# Add a “## 0.4.0 — YYYY-MM-DD” section to CHANGELOG.md
+bash scripts/release.sh                 # Build, test, and package into dist/
 git tag -a v0.4.0 -m "sope 0.4.0"
-dist/sope-0.4.0-darwin-arm64/install.sh # 本机安装
+dist/sope-0.4.0-darwin-arm64/install.sh # Install locally
 ```
 
-完整的检查清单（ASan/TSan/泄漏、bundled 构建、真实模型、提交前查密钥、从压缩包安装验证）写在 `.claude/skills/release/SKILL.md`，在 Claude Code 里输入 `/release` 就按它走一遍。
+The complete checklist (ASan/TSan/leak checks, bundled builds, live model checks, checking for secrets before committing, and installation from the archive) is in `.claude/skills/release/SKILL.md`. Enter `/release` in Claude Code to follow it.
 
-每个平台需要在对应的机器上运行一次（libsope 是原生代码，不能交叉编译）。上传到 GitHub Releases 等分发渠道目前是手动步骤。
+Each platform requires a run on a machine of that platform (libsope is native code and cannot be cross-compiled). Uploading to distribution channels such as GitHub Releases is currently manual.
 
-## 尚未决定的事
+## Open decisions
 
-- **macOS 签名与公证**：目前只有 ad-hoc 签名。通过浏览器下载的包会被 Gatekeeper 拦截，`install.sh` 会去掉隔离属性；正式分发应使用 Developer ID 签名并公证。
-- **Windows**：fd、线程池和 HTTP 层都还没有 Windows 实现。
+- **macOS signing and notarization**: currently ad-hoc signed only. Gatekeeper blocks archives downloaded through a browser; `install.sh` removes the quarantine attribute. Formal distribution should use Developer ID signing and notarization.
+- **Windows**: the fd, thread pool, and HTTP layers do not yet have Windows implementations.

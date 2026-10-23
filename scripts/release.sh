@@ -81,7 +81,7 @@ else
   cp "$build/libsope.a" "$stage/lib/libsope.a" # link with -lcurl
 fi
 cp include/sope.h "$stage/include/"
-cp docs/*.md "$stage/docs/"
+cp -R docs/. "$stage/docs/"
 cp README.md CHANGELOG.md "$stage/"
 cp scripts/install.sh "$stage/install.sh"
 cp LICENSE "$stage/"
