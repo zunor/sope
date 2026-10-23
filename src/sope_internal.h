@@ -45,6 +45,8 @@ int sope__set_error(int code, const char *fmt, ...) SOPE_PRINTF(2, 3);
 
 char *sope__strndup(const char *s, size_t n);
 char *sope__strdup(const char *s);
+/* Read-only, close-on-exec; rejects non-regular files without blocking. */
+int sope__open_regular_read(const char *path);
 
 typedef struct sope_buf {
     char *ptr;

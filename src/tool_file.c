@@ -114,7 +114,7 @@ static int read_all(const char *path, sope_buf *out)
 {
     char buf[65536];
     ssize_t n;
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int fd = sope__open_regular_read(path);
     if (fd < 0) return 0;
     while ((n = read(fd, buf, sizeof buf)) != 0) {
         if (n < 0) {
@@ -123,6 +123,7 @@ static int read_all(const char *path, sope_buf *out)
             return 0;
         }
         sope__buf_append(out, buf, (size_t)n);
+        if (out->oom) { close(fd); errno = ENOMEM; return 0; }
     }
     close(fd);
     if (!out->ptr) sope__buf_append(out, "", 0);
@@ -166,7 +167,7 @@ static uint64_t digest_bytes(const char *p, size_t n)
 static int digest_file(const char *path, uint64_t *hash)
 {
     char buf[65536];
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int fd = sope__open_regular_read(path);
     if (fd < 0) return 0;
     uint64_t h = UINT64_C(14695981039346656037);
     ssize_t n;

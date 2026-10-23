@@ -90,7 +90,7 @@ static sope_next artifact_read(tool_run *r)
     if (!path || offset < 0 || limit <= 0 || limit > 32768) return sope__run_fail(r, "path, offset >= 0, and limit 1..32768 are required");
     /* Artifacts can also be read with ordinary file tools; this endpoint gives
      * byte pagination without the read tool's per-line truncation. */
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int fd = sope__open_regular_read(path);
     if (fd < 0) return sope__run_fail(r, "Cannot open artifact: %s", strerror(errno));
     char buf[32768];
     ssize_t n;

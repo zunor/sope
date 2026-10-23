@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define WALK_MAX_ENTRIES 500000
 
@@ -182,7 +183,9 @@ static void load_ignore(walk *w, const char *dir)
     char line[1024];
 
     sope__buf_appendf(&path, "%s/.gitignore", dir);
-    f = path.oom ? NULL : fopen(path.ptr, "r");
+    int fd = path.oom ? -1 : sope__open_regular_read(path.ptr);
+    f = fd < 0 ? NULL : fdopen(fd, "r");
+    if (!f && fd >= 0) close(fd);
     sope__buf_free(&path);
     if (!f) return;
     while (fgets(line, sizeof line, f)) {

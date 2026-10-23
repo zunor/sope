@@ -388,8 +388,12 @@ static void grep_file(sope_walk *w, const char *path, const struct stat *st)
         w->stop = 1;
         return;
     }
-    if ((fd = open(path, O_RDONLY | O_CLOEXEC)) < 0) return;
-    while ((got = read(fd, buf, sizeof buf)) > 0) sope__buf_append(&data, buf, (size_t)got);
+    if ((fd = sope__open_regular_read(path)) < 0) return;
+    while ((got = read(fd, buf, sizeof buf)) > 0) {
+        if ((size_t)got > GREP_MAX_FILE - data.len) { close(fd); sope__buf_free(&data); return; }
+        sope__buf_append(&data, buf, (size_t)got);
+        if (data.oom) break;
+    }
     close(fd);
     if (!data.len || data.oom || memchr(data.ptr, '\0', data.len < 8192 ? data.len : 8192)) {
         sope__buf_free(&data);
@@ -498,6 +502,8 @@ static sope_next tool_grep(tool_run *r)
     } else if (S_ISDIR(st.st_mode)) {
         sope__walk_ignores_above(&w, base);
         sope__walk(&w, base);
+    } else if (!S_ISREG(st.st_mode)) {
+        sope__run_fail(r, "%s is not a regular file", sope__display_path(r, base));
     } else {
         g.n_globs = 0; /* an explicit file is searched whatever its name */
         grep_file(&w, base, &st);

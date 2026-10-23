@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -502,6 +503,48 @@ static void test_todo_and_subagents(void)
     sope_agent_free(a);
 }
 
+/* Fork before starting any library threads. A stuck file open must fail the
+ * test, not pin the test runner forever when freeing an agent. */
+static void test_special_files(void)
+{
+    char fifo[512], ignored[512], ignore_dir[512];
+    snprintf(fifo, sizeof fifo, "%s/pipe", dir);
+    snprintf(ignore_dir, sizeof ignore_dir, "%s/ignore-pipe", dir);
+    snprintf(ignored, sizeof ignored, "%s/ignore-pipe/.gitignore", dir);
+    CHECK(mkfifo(fifo, 0600) == 0);
+    CHECK(mkdir(ignore_dir, 0700) == 0);
+    CHECK(mkfifo(ignored, 0600) == 0);
+    const char *commands[] = {
+        "!read {\"file_path\":\"pipe\"}",
+        "!artifact_read {\"path\":\"%s\"}",
+        "!grep {\"path\":\"pipe\",\"pattern\":\"x\"}",
+        "!glob {\"path\":\"ignore-pipe\",\"pattern\":\"**/*\"}",
+        "!read {\"file_path\":\"/dev/null\"}"
+    };
+    for (size_t i = 0; i < sizeof commands / sizeof commands[0]; i++) {
+        pid_t child = fork();
+        CHECK(child >= 0);
+        if (child == 0) {
+            alarm(3);
+            char command[1024];
+            snprintf(command, sizeof command, commands[i], fifo);
+            sope_agent_t *a = new_agent("allow");
+            run_log log;
+            run(a, command, &log, NO_ANSWER, NULL);
+            CHECK(log.n == 1 && log.is_error[0] == (i != 3));
+            sope_agent_free(a);
+            CHECK(sope_shutdown() == SOPE_OK);
+            _exit(failures ? 1 : 0);
+        }
+        if (child > 0) {
+            int status = 0;
+            CHECK(waitpid(child, &status, 0) == child);
+            CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        }
+    }
+    unlink(fifo); unlink(ignored); rmdir(ignore_dir);
+}
+
 int main(void)
 {
     char tmpl[] = "/tmp/sope-tools-XXXXXX";
@@ -512,6 +555,8 @@ int main(void)
     /* macOS: /tmp is a symlink, and pwd reports the real path */
     snprintf(dir, sizeof dir, "%s", realpath(made, resolved) ? resolved : made);
     CHECK(sope_set_threads(2) == SOPE_OK);
+
+    test_special_files();
 
     test_read_image();
     test_read_write_edit();

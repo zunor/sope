@@ -1,9 +1,26 @@
 /* SPDX-License-Identifier: MIT */
+#define _POSIX_C_SOURCE 200809L
 #include "sope_internal.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/* Open without waiting for a FIFO peer, then verify the opened inode rather
+ * than an earlier pathname stat. Tools cannot consume devices or pipes. */
+int sope__open_regular_read(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) return -1;
+    struct stat st;
+    int error = fstat(fd, &st) != 0 ? errno : S_ISREG(st.st_mode) ? 0 : EINVAL;
+    if (error) { close(fd); errno = error; return -1; }
+    return fd;
+}
 
 /* ---- version ---- */
 
