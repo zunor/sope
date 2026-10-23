@@ -119,6 +119,7 @@ function parseCsi(s: string, i: number, final: boolean): Parsed {
   if (fin === "u") {
     // kitty keyboard protocol: CSI code ; mods u
     const code = params[0] ?? 0;
+    if (!Number.isInteger(code) || code < 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return { end };
     const mods = modsFrom(params[1]);
     const named: Record<number, string> = { 9: "tab", 13: "enter", 27: "escape", 127: "backspace" };
     return { event: key(named[code] ?? String.fromCodePoint(code).toLowerCase(), mods), end };

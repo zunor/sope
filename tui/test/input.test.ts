@@ -28,6 +28,12 @@ test("CSI keys with modifiers", () => {
   expect(parse("\x1b[13;2u")).toEqual(["shift+enter"]);
 });
 
+test("invalid CSI-u code points are ignored without losing later input", () => {
+  for (const code of ["", "-1", "1114112", "99999999999999999999999999", "55296"]) {
+    expect(parse(`\x1b[${code}uok`)).toEqual(["text:ok"]);
+  }
+});
+
 test("alt combinations", () => {
   expect(parse("\x1bb\x1b\x7f\x1bB")).toEqual(["alt+b", "alt+backspace", "alt+shift+b"]);
 });

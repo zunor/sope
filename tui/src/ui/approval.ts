@@ -53,6 +53,7 @@ const previewColor = (kind: PreviewLine["kind"]) =>
 const askingRows = (a: Approval) => 1 + (a.reason ? 1 : 0) + 1 + DECISIONS.length;
 
 function previewRows(a: Approval, max: number): PreviewLine[] {
+  if (max <= 0) return [];
   const rows = previewFor(a.name, a.input);
   return rows.length > max ? [...rows.slice(0, max - 1), { text: `⋯ ${rows.length - max + 1} more lines`, kind: "gap" }] : rows;
 }

@@ -18,6 +18,14 @@ function asking(approvals: Approval[]) {
   return { prompt: new ApprovalPrompt(() => session), decided };
 }
 
+test("a short permission popup omits its preview and keeps decisions reachable", () => {
+  const { prompt } = asking([{ callId: 1, turnId: 1, name: "bash", input: { command: "echo line\n".repeat(100) } }]);
+  expect(prompt.height(6)).toBe(6);
+  const buf = new CellBuffer(80, 6);
+  const { hits } = prompt.render(buf, 0, 0, 80, 6, surfaces(null));
+  expect(hits.map((hit) => hit.y)).toEqual([2, 3, 4, 5]);
+});
+
 test("the permission prompt answers by key, lets tab and scroll keys through, and swallows the rest", () => {
   const { prompt, decided } = asking([{ callId: 1, turnId: 1, name: "bash", input: { command: "git push" }, reason: "git push publishes commits" }]);
   expect(prompt.key("y")).toBe("handled");
