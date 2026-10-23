@@ -28,6 +28,7 @@ export const TIPS = [
   "/thinking shows the full reasoning",
   "drag to select text, it is copied on release",
   "/compact frees context when the conversation grows long",
+  "/context shows what fills the context window",
   "ctrl+j inserts a newline",
   "pgup/pgdn or the wheel scroll the transcript",
   "shift+tab switches who approves edits and commands",

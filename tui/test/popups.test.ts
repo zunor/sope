@@ -5,6 +5,8 @@ import { CellBuffer } from "../src/render/buffer";
 import type { Approval, Decision, Session } from "../src/session";
 import { surfaces } from "../src/theme";
 import { ApprovalPrompt } from "../src/ui/approval";
+import type { Effort } from "../src/agent/effort";
+import { EffortPicker } from "../src/ui/effort";
 import { ModePicker } from "../src/ui/modes";
 import { SessionList } from "../src/ui/sessions";
 
@@ -88,4 +90,45 @@ test("the session list opens what enter or a click picks, and closes on a click 
   expect(list.click(30, y)).toBe("close");
   expect(list.click(0, 19)).toBe("close");
   expect(opened).toEqual(["a", "b"]);
+});
+
+test("the effort slider moves with arrows, clamps at its ends, and picks by enter or number", () => {
+  const picked: Effort[] = [];
+  const picker = new EffortPicker("high", "glm-5.3", (e) => picked.push(e));
+  expect(picker.title).toBe("Reasoning effort · glm-5.3");
+  expect(picker.selected).toBe("high");
+  picker.key("right");
+  picker.key("right"); // already at the end
+  expect(picker.selected).toBe("xhigh");
+  picker.key("home");
+  picker.key("left");
+  expect(picker.selected).toBe("");
+  picker.wheel(-1);
+  expect(picker.selected).toBe("low");
+  expect(picker.key("x")).toBe("handled");
+  expect(picker.key("enter")).toBe("close");
+  expect(picker.key("3")).toBe("close");
+  expect(picker.key("escape")).toBe("close");
+  expect(picked).toEqual(["low", "medium"]);
+  expect(new EffortPicker("minimal", "", () => {}).selected).toBe(""); // not on the slider
+});
+
+test("the effort slider draws labels over a track lit up to the selection", () => {
+  const picker = new EffortPicker("medium", "m", () => {});
+  picker.key("right"); // high
+  const buf = new CellBuffer(60, 6);
+  const { hits } = picker.render(buf, 0, 0, 60, picker.height(10));
+  const text = Array.from({ length: 6 }, (_, y) => row(buf, y).trimEnd());
+  expect(text[0]).toBe("");
+  expect(text[1]).toMatch(/^ *Default +Low +Medium ✓ +High +Extra high$/);
+  expect(text[2]).toMatch(/^ *○─+○─+○─+●─+○$/);
+  expect(text[2]!.indexOf("●")).toBe(text[1]!.indexOf("High") + 2);
+  expect(text[4]).toContain("Thinks longer before answering");
+  expect(new Set(hits.map((h) => h.index))).toEqual(new Set([0, 1, 2, 3, 4]));
+  const onHigh = hits.find((h) => h.index === 3 && h.y === 2)!;
+  expect(onHigh.x0 <= text[2]!.indexOf("●") && text[2]!.indexOf("●") < onHigh.x1).toBe(true);
+
+  const narrow = new CellBuffer(30, 6);
+  picker.render(narrow, 0, 0, 30, 6);
+  expect(row(narrow, 1).trim()).toBe("High"); // stops too close for every label
 });

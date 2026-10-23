@@ -41,6 +41,7 @@ const symbols = {
   sope_agent_free: { args: [FFIType.ptr], returns: FFIType.void },
   sope_agent_reset: { args: [FFIType.ptr], returns: FFIType.i32 },
   sope_agent_history: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+  sope_agent_context: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
   sope_agent_load_history: { args: [FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
   sope_agent_fd: { args: [FFIType.ptr], returns: FFIType.i32 },
   sope_subagent_register: { args: [FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },

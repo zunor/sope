@@ -7,18 +7,20 @@
 // journals own admitted inputs, checkpoints and outcomes, including mid-turn.
 // A restored session opens its journal on first use and waits for /recover.
 
-import type { SopeEvent } from "sope";
+import { Agent, type ContextUsage, type SopeEvent } from "sope";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { AgentBridge } from "./agent/bridge";
 import { HostToolRunner } from "./agent/runner";
+import { effortLabel, parseEffort, type Effort } from "./agent/effort";
 import { describeImage, type ImageFile } from "./agent/images";
 import { judge, type PermissionMode } from "./agent/permissions";
 import { describeCall, formatTodos, hostToolsFor, parseInput, todosOf, type HostTool } from "./agent/tools";
-import { agentOptions, type Config } from "./config";
+import { agentOptions, contextOptions, type Config } from "./config";
 import type { SavedMessage, Store, StoredSession } from "./store";
 import { palette } from "./theme";
 import { ChatView, type Message, type Step } from "./ui/chat";
+import { contextSummary } from "./ui/context";
 import { Editor } from "./ui/editor";
 import { EventLog } from "./ui/eventlog";
 import { TokenRate } from "./ui/status";
@@ -68,6 +70,8 @@ export class Session {
   title = UNTITLED;
   provider: string;
   model: string;
+  /** Reasoning effort from the next turn; "" leaves it to the model. */
+  effort: Effort;
   approvals: Approval[] = [];
   readonly alwaysAllowed = new Set<string>(); // "don't ask again" in the permission prompt
   /** Its tab was in the background when a turn finished. */
@@ -79,6 +83,7 @@ export class Session {
   compacting = false;
 
   #config: Config;
+  #modelWindow = 0; // the endpoint's window for this.model, 0 while unknown
   #bridge: AgentBridge | null = null; // created on first use
   #runner: HostToolRunner | null = null;
   #onEvents: (session: Session, events: SopeEvent[]) => void;
@@ -104,6 +109,7 @@ export class Session {
     this.#persist = persist;
     this.provider = config.provider;
     this.model = config.model;
+    this.effort = config.effort;
     this.hostTools = hostToolsFor(config.provider);
     const stored = persist?.stored;
     if (stored) {
@@ -119,6 +125,22 @@ export class Session {
 
   get busy(): boolean {
     return this.#openTurns.size > 0;
+  }
+
+  /** The model's context window in tokens, 0 while unknown. */
+  get contextWindow(): number {
+    return this.#config.contextWindow || this.#modelWindow;
+  }
+
+  /** The endpoint told the window of this session's model: automatic compaction follows it. */
+  setModelWindow(window: number): void {
+    if (window === this.#modelWindow) return;
+    this.#modelWindow = window;
+    if (this.#bridge) this.#sizeContext();
+  }
+
+  #sizeContext(): void {
+    for (const [key, value] of Object.entries(contextOptions(this.#config, this.#modelWindow))) this.setOption(key, value);
   }
 
   /** Images in the input box, by the N of their [Image #N] token. */
@@ -162,10 +184,12 @@ export class Session {
       for (const tool of this.hostTools) bridge.agent.registerTool(tool);
       if (this.model !== this.#config.model) bridge.agent.setOption("model", this.model || null);
       if (this.provider !== this.#config.provider) bridge.agent.setOption("provider", this.provider);
+      if (this.effort !== this.#config.effort) bridge.agent.setOption("reasoning.effort", this.effort || null);
       this.#runner = new HostToolRunner(bridge.agent, this.hostTools, (fn, detail) =>
         fn === "note" ? this.trace.note(detail) : this.trace.call(fn, detail),
       );
       this.#bridge = bridge;
+      if (this.#modelWindow) this.#sizeContext();
       if (this.#history && !directory) {
         try {
           bridge.agent.loadHistory(this.#history);
@@ -263,6 +287,27 @@ export class Session {
     this.trace.call("sope_compact", `t${turnId}${focus ? ` ${JSON.stringify(focus)}` : ""}`);
   }
 
+  /** Adds a /context report to the transcript. */
+  showContext(): void {
+    // A session with nothing saved yet is measured without creating its agent (and its saved row).
+    const usage = this.#bridge || this.#id ? this.#agent.context() : this.#measureNew();
+    this.trace.call("sope_agent_context", `${usage.used} tokens`);
+    const report = { ...usage, model: this.model };
+    this.chat.add({ role: "context", text: contextSummary(report), context: report });
+  }
+
+  /** What the first request of a new session would hold. */
+  #measureNew(): ContextUsage {
+    const options = { ...agentOptions(this.#config), ...contextOptions(this.#config, this.#modelWindow), provider: this.provider };
+    const agent = Agent.create(this.model ? { ...options, model: this.model } : options);
+    try {
+      for (const tool of this.hostTools) agent.registerTool(tool);
+      return agent.context();
+    } finally {
+      agent.free();
+    }
+  }
+
   recover(args: string[]): void {
     const agent = this.#agent;
     if (args[0] === "resume") { agent.resume(); return; }
@@ -293,6 +338,13 @@ export class Session {
     this.trace.call("sope_agent_set_option", `${key}=${key.includes("key") ? "***" : (value ?? "(unset)")}`);
     if (key === "provider") this.provider = value ?? "mock";
     if (key === "model") this.model = value ?? "";
+    if (key === "reasoning.effort") this.effort = parseEffort(value ?? "") ?? ""; // a level sope does not know is sent, not shown
+  }
+
+  /** Sets the reasoning effort from the next turn, without creating the agent just for that. */
+  setEffort(effort: Effort): void {
+    if (this.#bridge) this.setOption("reasoning.effort", effort || null);
+    else this.effort = effort;
   }
 
   /** Stops the agent (ending its turn) and saves the session one last time. */
@@ -501,10 +553,17 @@ export class Session {
         }
         this.#openTurns.delete(ev.turnId);
         if (ev.stopReason === "cancelled") this.chat.add({ role: "info", text: "turn cancelled" });
+        try {
+          this.context = this.#agent.context().used; // what the next request starts from
+        } catch {
+          // another turn is queued: its usage reports will say
+        }
         this.save();
         return;
       case "error":
         this.chat.add({ role: "error", text: ev.message });
+        if (this.effort && /reasoning[ _.]?effort/i.test(ev.message))
+          this.chat.add({ role: "info", text: `${this.model || "the model"} may not accept effort ${effortLabel(this.effort).toLowerCase()} · /effort picks another, /effort default sends none` });
         return;
       case "log":
         if (ev.message.startsWith("compacting")) this.compacting = true;

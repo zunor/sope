@@ -13,15 +13,16 @@ Precedence, from lowest to highest: `~/.config/sope/config` (`KEY=VALUE` format)
 | `SOPE_BASE_URL` | `--base-url` | `https://api-taas.moi.matrixorigin.cn/v1` |
 | `SOPE_PROVIDER` | `--provider` | `openai` when a key is set, otherwise `mock` |
 | `SOPE_PERMISSIONS` | `--permissions`, `--allow-all` | `auto` (Approve for me); also supports `ask` and `full` |
-| `SOPE_COMPACT_THRESHOLD` | | `100000` (`0` disables automatic compaction) |
-| `SOPE_CONTEXT_WINDOW` | | `0` (unknown); set to the full token window of the model used |
+| `SOPE_REASONING_EFFORT` | `--effort` | Unset (the model decides); `low`, `medium`, `high`, `xhigh`, also `none` and `minimal` |
+| `SOPE_COMPACT_THRESHOLD` | | 80% of the model's window; `100000` while the window is unknown (`0` disables automatic compaction) |
+| `SOPE_CONTEXT_WINDOW` | | The window the endpoint's `/models` reports for the model, otherwise unknown; set it to override |
 | `SOPE_LIB` | | Load a different libsope instead of the embedded copy |
 | `SOPE_MOUSE` | | `1`; `0` leaves mouse input to the terminal (the wheel becomes ↑/↓) |
 | `SOPE_GRAPHICS` | | Automatically probes for the Kitty graphics protocol; `0` disables image tabs and the pixel meteor |
 | `SOPE_TRUECOLOR` | | Automatically detected; `0`/`1` forces 256 colors / true color |
 
-Context is checked before each model request, including restored sessions and newly added tool results. Set `SOPE_CONTEXT_WINDOW` for the model actually used (use the smaller capacity if switching between text and image models). The default output reservation is 4096 tokens. In the TUI, `/set context.window 128000` changes the window from the next turn; `/set context.reserve 8192` increases the normal output allowance. A window value of zero leaves the model capacity unknown.
+Context is checked before each model request, including restored sessions and newly added tool results. The TUI reads each model's window from the endpoint's `/models` list (`context_window` or `context_length`) at startup and when you switch models, passes it to libsope as `context.window`, and starts automatic compaction at 80% of it unless `SOPE_COMPACT_THRESHOLD` is set. `-p` mode does not query `/models`. Set `SOPE_CONTEXT_WINDOW` when the endpoint does not list a window, or for the model actually used (use the smaller capacity if switching between text and image models). The default output reservation is 4096 tokens. In the TUI, `/set context.window 128000` changes the window from the next turn; `/set context.reserve 8192` increases the normal output allowance. A window value of zero leaves the model capacity unknown.
 
 `/compact [focus]` summarizes older messages while retaining recent originals within budget. `/set compact.retain_tokens 8000`, `/set compact.max_tokens 2048` and `/set compact.input_tokens 64000` control retention, summary output and summary input respectively. See the [ABI compaction contract](../abi.md#51-history-compaction) for failure behavior and estimation limits.
 
-Native options are also available through `/set`. `/set openai.wire_api responses` selects stateless Responses requests on endpoints that support that protocol; the default is `chat`. `/set reasoning.effort high` sets the model's reasoning effort. Supported effort values depend on the model. These options take effect on the next turn; see the [ABI options table](../abi.md#9-options-and-providers) for the complete list.
+Native options are also available through `/set`. `/set openai.wire_api responses` selects stateless Responses requests on endpoints that support that protocol; the default is `chat`. `/effort` (or `/set reasoning.effort high`) sets the model's reasoning effort. Supported effort values depend on the model. These options take effect on the next turn; see the [ABI options table](../abi.md#9-options-and-providers) for the complete list.

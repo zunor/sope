@@ -2,6 +2,30 @@
 
 The version in `include/sope.h` is authoritative. The library, bindings, and `sope` executable are released together; see [docs/release.md](docs/release.md) for the policy.
 
+## Unreleased
+
+### libsope
+
+- Add `sope_agent_context`: how full the context is, as JSON, measured the way
+  automatic compaction measures it, split into system prompt, tools, summary,
+  messages, tool results and images, with the largest tool results. It works
+  between turns and, from a snapshot, while a turn runs. Go `Agent.Context()`
+  and JS `agent.context()` expose it.
+
+### Terminal
+
+- Add `/context`: a breakdown of the context window in the conversation, with a
+  bar, a legend and the largest tool results; the bottom bar shows the model
+  and `used / window`.
+- Size automatic compaction from the model's window: 80% of what the
+  endpoint's `/models` reports (or `SOPE_CONTEXT_WINDOW`), still 100000 while
+  it is unknown; `SOPE_COMPACT_THRESHOLD` overrides it. The window is also
+  passed to libsope as `context.window`.
+- Add `/effort`: a slider over reasoning effort levels (default, low, medium,
+  high, extra high; `none` and `minimal` by name) for the session's next turns
+  and new sessions, with `--effort` / `SOPE_REASONING_EFFORT` at startup and a
+  hint when a model rejects a level.
+
 ## 0.4.0 — 2026-10-24
 
 This release adds durable execution and host integration across libsope and its

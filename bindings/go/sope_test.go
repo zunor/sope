@@ -887,3 +887,24 @@ func TestDurableChildCompaction(t *testing.T) {
 		t.Fatal("live/replay mismatch")
 	}
 }
+
+func TestContext(t *testing.T) {
+	a := openTest(t, config(t.TempDir()))
+	empty, err := a.Context()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.State != "idle" || empty.Parts.Messages != 0 || empty.Counts.Tools == 0 || empty.Used != empty.Estimate {
+		t.Fatalf("empty context: %+v", empty)
+	}
+	submit(t, a, "k1", "hello")
+	until(t, a, EventTurnEnd)
+	after, err := a.Context()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := after.Parts
+	if sum := p.System + p.Tools + p.Summary + p.Messages + p.ToolResults + p.Images; sum != after.Estimate || after.Counts.Messages != 2 {
+		t.Fatalf("context after a turn: %+v", after)
+	}
+}

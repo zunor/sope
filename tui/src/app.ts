@@ -21,7 +21,7 @@
 //   › input                         (or a popup in its place: the permission
 //   ───────────────────────────────  prompt, the permission modes, the models;
 //                                    see ui/popup.ts)
-//     ◈ Approve for me                 (and short notices after it)
+//     ◈ Approve for me                 (and short notices after it)   glm-5.3 · 42.1k / 200k
 //
 // What a popup, the session list, a command or the editor does with a key
 // is theirs to decide; the app routes input, owns the layout and the state
@@ -30,6 +30,7 @@
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import type { SopeEvent } from "sope";
+import { effortLabel, type Effort } from "./agent/effort";
 import { clipboardImage, describeImage, imageRefs, pastedImagePath, readImageFile, type ImageFile } from "./agent/images";
 import { listModels, type ModelInfo } from "./agent/models";
 import { MODES, modeLabel, type PermissionMode } from "./agent/permissions";
@@ -45,6 +46,8 @@ import { Store, type StoredSession } from "./store";
 import { palette, SPINNER, SPINNER_MS, surfaces, type Surfaces } from "./theme";
 import { ApprovalPrompt } from "./ui/approval";
 import { CommandSuggestions } from "./ui/commands";
+import { formatTokens } from "./ui/context";
+import { EffortPicker } from "./ui/effort";
 import type { Editor } from "./ui/editor";
 import { METEOR_ROWS } from "./ui/meteor";
 import { ModePicker } from "./ui/modes";
@@ -105,6 +108,7 @@ export class App {
   #popupRows = 0; // rows the popup on screen takes, its edges included
   #choiceHits: ChoiceHit[] = [];
   #modelList: Promise<ModelInfo[]> | null = null; // the endpoint's models, asked for once
+  #models: ModelInfo[] = []; // what it said: each session's context window
   #list: SessionList | null = null; // the session list, while open
   #commands = new CommandSuggestions(COMMANDS);
   #commandHits: ChoiceHit[] = [];
@@ -149,6 +153,7 @@ export class App {
   }
 
   start(): void {
+    void this.#fetchModels().catch(() => {}); // the model popup asks again and shows the error
     this.#term.onInput((data) => this.#onInput(data));
     this.#term.enter();
     this.#term.onResize(() => {
@@ -184,6 +189,7 @@ export class App {
     const persist = store ? { store, directory: this.#tabs.directory, stored } : undefined;
     const s = new Session(this.#config, () => this.#mode, (session, events) => this.#onSessionEvents(session, events), persist);
     s.chat.showThinking = this.#showThinking;
+    this.#sizeContext(s);
     return s;
   }
 
@@ -252,6 +258,8 @@ export class App {
     openModels: () => app.#openModels(),
     useModel: (id) => app.#useModel(id),
     openModes: () => (app.#popup = app.#modePicker()),
+    openEffort: () => (app.#popup = app.#effortPicker()),
+    setEffort: (effort) => app.#setEffort(effort),
     setMode: (mode) => app.#setMode(mode),
     toggleThinking: () => {
       app.#showThinking = !app.#showThinking;
@@ -574,14 +582,49 @@ export class App {
   #openModels(): void {
     const picker = new ModelPicker(this.#session.model, this.#tabs.store?.recentModels() ?? [], (id) => this.#useModel(id));
     this.#popup = picker;
-    this.#modelList ??= listModels(this.#config);
-    this.#modelList
+    this.#fetchModels()
       .then((models) => picker.setModels(models))
       .catch((err: Error) => {
         this.#modelList = null; // ask again next time
         picker.setError(err.message);
       })
       .finally(() => this.#scheduleRender());
+  }
+
+  #effortPicker(): EffortPicker {
+    const s = this.#session;
+    return new EffortPicker(s.effort, s.model, (effort) => this.#setEffort(effort));
+  }
+
+  /** Sets this session's reasoning effort and makes it the one new sessions start with. */
+  #setEffort(effort: Effort): void {
+    const s = this.#session;
+    this.#config.effort = effort; // sessions already open keep theirs
+    if (effort === s.effort) return this.#flash(`already on ${effort ? effortLabel(effort).toLowerCase() : "the model's default"} effort`);
+    s.setEffort(effort);
+    s.chat.add({ role: "info", text: `effort = ${effort ? effortLabel(effort).toLowerCase() : "default: the model decides"} (from the next turn)` });
+  }
+
+  /** The endpoint's models, asked for once (again after a failure). */
+  #fetchModels(): Promise<ModelInfo[]> {
+    this.#modelList ??= listModels(this.#config).then(
+      (models) => {
+        this.#models = models;
+        for (const s of this.#tabs.sessions) this.#sizeContext(s);
+        this.#scheduleRender();
+        return models;
+      },
+      (err: Error) => {
+        this.#modelList = null;
+        throw err;
+      },
+    );
+    return this.#modelList;
+  }
+
+  /** Gives a session its model's window, which sizes automatic compaction. */
+  #sizeContext(s: Session): void {
+    s.setModelWindow(this.#models.find((m) => m.id === s.model)?.context ?? 0);
   }
 
   /** Switches this session's model and makes it the one new sessions start with. */
@@ -593,6 +636,7 @@ export class App {
     store?.usedModel(id);
     if (id === s.model) return this.#flash(`already on ${id}`);
     s.setOption("model", id);
+    this.#sizeContext(s);
     s.chat.add({ role: "info", text: `model = ${id} (from the next turn)` });
   }
 
@@ -748,13 +792,24 @@ export class App {
     this.#renderer.cursor = { x: x + layout.cursorCol, y: y + layout.cursorRow, visible: true };
   }
 
-  /** The permission mode, then a notice when there is one. */
+  /** The permission mode, then a notice when there is one; on the right, the model and how full the context is. */
   #drawFooter(buf: CellBuffer, y: number, inner: number): void {
-    const end = PAD + inner;
+    const s = this.#session;
     const left = PAD + 2;
+    const usage = s.context ? `${formatTokens(s.context)}${s.contextWindow ? ` / ${formatTokens(s.contextWindow)}` : ""}` : "";
+    const sep = s.model && usage ? " · " : "";
+    const width = stringWidth(s.model) + sep.length + stringWidth(usage);
+    const right = PAD + inner - 2 - width; // under the input box's right edge, as the mode is under its left
+    let end = PAD + inner;
+    if (width && right > left + 24) {
+      let x = buf.text(right, y, s.model, { fg: palette.muted });
+      x = buf.text(x, y, sep, { fg: palette.faint });
+      buf.text(x, y, usage, { fg: palette.muted });
+      end = right - 2;
+    }
     let x = buf.text(left, y, `${MODE_ICON[this.#mode]} `, { fg: MODE_COLOR[this.#mode] }, end);
     x = buf.text(x, y, modeLabel(this.#mode), { fg: MODE_COLOR[this.#mode] }, end);
     this.#modeHit = { x0: left, x1: x };
-    if (this.#notice) buf.text(x + 2, y, truncate(this.#notice, end - x - 2), { fg: palette.tool });
+    if (this.#notice && end - x - 2 > 0) buf.text(x + 2, y, truncate(this.#notice, end - x - 2), { fg: palette.tool });
   }
 }

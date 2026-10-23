@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 import { expect, test } from "bun:test";
+import { effortLabel, parseEffort } from "../src/agent/effort";
 import { describeCall, formatTodos, previewFor, todosOf } from "../src/agent/tools";
 import { CliError, parseArgs } from "../src/cli";
-import { agentOptions, loadConfig, parseEnvFile } from "../src/config";
+import { agentOptions, contextOptions, loadConfig, parseEnvFile } from "../src/config";
 
 test("parses flags and the prompt", () => {
   expect(parseArgs([])).toEqual({ print: false, images: [], version: false, help: false });
@@ -110,7 +111,32 @@ test("passes the configured model window to the native request budget", () => {
   const config = loadConfig({}, { SOPE_CONTEXT_WINDOW: "32000", SOPE_COMPACT_THRESHOLD: "0" }, { SOPE_CONTEXT_WINDOW: "64000" });
   expect(config.contextWindow).toBe(32000);
   expect(agentOptions(config)["context.window"]).toBe("32000");
-  expect(agentOptions(config)["compact.threshold"]).toBeUndefined();
+  expect(agentOptions(config)["compact.threshold"]).toBe("0");
   expect(loadConfig({}, { SOPE_CONTEXT_WINDOW: "invalid" }, {}).contextWindow).toBe(0);
-  expect(loadConfig({}, { SOPE_COMPACT_THRESHOLD: "1.5" }, {}).compactThreshold).toBe(100000);
+  expect(loadConfig({}, { SOPE_COMPACT_THRESHOLD: "1.5" }, {}).compactThreshold).toBeNull();
+});
+
+test("compacts at 80% of the model's window unless a threshold is set", () => {
+  const auto = loadConfig({}, {}, {});
+  expect(contextOptions(auto)).toEqual({ "context.window": "0", "compact.threshold": "100000" });
+  expect(contextOptions(auto, 200_000)).toEqual({ "context.window": "200000", "compact.threshold": "160000" });
+  const set = loadConfig({}, { SOPE_COMPACT_THRESHOLD: "50000" }, {});
+  expect(contextOptions(set, 200_000)["compact.threshold"]).toBe("50000");
+  const window = loadConfig({}, { SOPE_CONTEXT_WINDOW: "32000" }, {});
+  expect(contextOptions(window, 200_000)).toEqual({ "context.window": "32000", "compact.threshold": "25600" });
+  expect(agentOptions(window)["compact.threshold"]).toBe("25600");
+});
+
+test("reasoning effort: --effort, SOPE_REASONING_EFFORT and the option sent", () => {
+  expect(["high", "Extra high", "x-high", "default", "auto", "MINIMAL", "max"].map(parseEffort)).toEqual(["high", "xhigh", "xhigh", "", "", "minimal", undefined]);
+  expect(parseArgs(["--effort", "xhigh"]).effort).toBe("xhigh");
+  expect(parseArgs(["--effort=default"]).effort).toBe("");
+  expect(() => parseArgs(["--effort", "max"])).toThrow(CliError);
+  expect(loadConfig({}, {}, {}).effort).toBe("");
+  expect(loadConfig({}, { SOPE_REASONING_EFFORT: "high" }, {}).effort).toBe("high");
+  expect(loadConfig({}, { SOPE_REASONING_EFFORT: "bogus" }, {}).effort).toBe("");
+  expect(loadConfig({ effort: "low" }, { SOPE_REASONING_EFFORT: "high" }, {}).effort).toBe("low");
+  expect(agentOptions(loadConfig({ effort: "medium" }, {}, {}))["reasoning.effort"]).toBe("medium");
+  expect(agentOptions(loadConfig({}, {}, {}))["reasoning.effort"]).toBeUndefined();
+  expect([effortLabel("xhigh"), effortLabel(""), effortLabel("minimal")]).toEqual(["Extra high", "Default", "Minimal"]);
 });

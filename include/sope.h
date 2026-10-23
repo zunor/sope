@@ -300,6 +300,28 @@ SOPE_API int sope_agent_reset(sope_agent_t *agent);
  * Reasoning is not kept. */
 SOPE_API int sope_agent_history(sope_agent_t *agent, const char **json, size_t *len);
 
+/* How full the model's context is, as JSON, measured the way compaction
+ * measures it. Shares sope_agent_history's storage. Works at any time:
+ * between turns it measures the request the next turn would send; while a
+ * turn runs it reports the turn's last request ("state":"running"), and
+ * SOPE_EBUSY only before a queued turn has started.
+ *
+ *   {"state":"idle","used":42130,"estimate":41800,"window":200000,
+ *    "reserve":4096,"threshold":100000,
+ *    "parts":{"system":1210,"tools":6830,"summary":2100,"messages":12400,
+ *             "tool_results":19260,"images":0},
+ *    "counts":{"tools":14,"messages":38,"tool_results":9,"images":0},
+ *    "largest":[{"name":"read","input":"{\"file_path\":\"a.c\"}","tokens":6100}]}
+ *
+ * The parts are local estimates and add up to "estimate"; "used" is what
+ * compaction compares with "threshold", also counting the provider's report
+ * of the last request. "window" and "threshold" are 0 when unknown or
+ * disabled (options context.window and compact.threshold); "reserve" is the
+ * output reservation, 0 without a window. "largest" lists up to three tool
+ * results, biggest first; "input" is the call's JSON input, left out when
+ * long. */
+SOPE_API int sope_agent_context(sope_agent_t *agent, const char **json, size_t *len);
+
 /* Replaces the conversation history with one from sope_agent_history, to
  * resume a saved conversation. Between turns only (SOPE_EBUSY otherwise);
  * SOPE_EINVAL if json is not such an array. Unanswered tool uses at the end

@@ -79,6 +79,19 @@ export interface RecoveryState {
   calls: Array<{ call_id: string; name: string; input: string; artifacts: string[] }>;
 }
 
+/** How full the model's context is (sope_agent_context); tokens, 0 when unknown. */
+export interface ContextUsage {
+  state: "idle" | "running";
+  used: number;
+  estimate: number;
+  window: number;
+  reserve: number;
+  threshold: number;
+  parts: { system: number; tools: number; summary: number; messages: number; tool_results: number; images: number };
+  counts: { tools: number; messages: number; tool_results: number; images: number };
+  largest: Array<{ name: string; input?: string; tokens: number }>;
+}
+
 const STOP_REASONS: StopReason[] = ["end_turn", "cancelled", "error"];
 const LOG_LEVELS: LogLevel[] = ["debug", "info", "warn", "error"];
 
@@ -262,6 +275,17 @@ export class Agent {
     const len = new BigUint64Array(1);
     check(C().sope_agent_history(this.#ptr(), ptr, len), "sope_agent_history");
     return readString(Number(ptr[0]), Number(len[0]));
+  }
+
+  /**
+   * How full the model's context is, measured the way compaction measures
+   * it. Any time: while a turn runs, as of its last request.
+   */
+  context(): ContextUsage {
+    const ptr = new BigUint64Array(1);
+    const len = new BigUint64Array(1);
+    check(C().sope_agent_context(this.#ptr(), ptr, len), "sope_agent_context");
+    return JSON.parse(readString(Number(ptr[0]), Number(len[0]))) as ContextUsage;
   }
 
   /**

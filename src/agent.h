@@ -203,6 +203,7 @@ struct sope_agent {
     file_state *files;   /* what read/write/edit have seen; edits require a fresh read */
     char **tool_filter;  /* subagents: tools their type allows; NULL: all */
     char *history_json;  /* the last sope_agent_history result */
+    char *context_json;  /* the running turn's context, as of its last request */
     sope_image *attached; /* sope_attach_image, waiting for the next sope_send */
     size_t n_attached;
     size_t n_tool_filter;
@@ -265,6 +266,10 @@ void sope__pending_free(pending_call *p);
 
 /* loop.c */
 sope_next sope__agent_run(sope_task *task);
+/* Fills t->system and the tool specs a turn of `a` would offer now; *mu held.
+ * Free with sope__turn_offer_free, also after a failure. */
+int sope__turn_offer_locked(sope_agent_t *a, turn_state *t);
+void sope__turn_offer_free(turn_state *t);
 
 /* call.c */
 sope_call *sope__call_new(sope_agent_t *a, uint64_t round, int compaction);
@@ -275,6 +280,11 @@ int sope__context_configure(sope_agent_t *a);
 uint64_t sope__request_tokens(const sope_agent_t *a);
 uint64_t sope__context_tokens(const sope_agent_t *a);
 uint64_t sope__context_limit(const sope_agent_t *a);
+/* Snapshots the running turn's context for sope_agent_context; the agent's
+ * task only. `locked`: *mu is already held. */
+void sope__context_publish(sope_agent_t *a, int locked);
+/* sope_agent_context between turns, for the turn `offer` describes; *mu held. */
+int sope__context_measure_locked(sope_agent_t *a, const turn_state *offer, sope_buf *b);
 
 /* subagent.c */
 #define SOPE__AGENT_TOOL "agent" /* the built-in tool that spawns subagents */

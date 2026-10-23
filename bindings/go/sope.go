@@ -324,6 +324,35 @@ type Outcome struct {
 	Stop   int    `json:"stop"`
 	Final  string `json:"final"`
 }
+// ContextUsage is sope_agent_context's report; tokens, 0 when unknown.
+type ContextUsage struct {
+	State     string `json:"state"`
+	Used      uint64 `json:"used"`
+	Estimate  uint64 `json:"estimate"`
+	Window    uint64 `json:"window"`
+	Reserve   uint64 `json:"reserve"`
+	Threshold uint64 `json:"threshold"`
+	Parts     struct {
+		System      uint64 `json:"system"`
+		Tools       uint64 `json:"tools"`
+		Summary     uint64 `json:"summary"`
+		Messages    uint64 `json:"messages"`
+		ToolResults uint64 `json:"tool_results"`
+		Images      uint64 `json:"images"`
+	} `json:"parts"`
+	Counts struct {
+		Tools       int `json:"tools"`
+		Messages    int `json:"messages"`
+		ToolResults int `json:"tool_results"`
+		Images      int `json:"images"`
+	} `json:"counts"`
+	Largest []struct {
+		Name   string `json:"name"`
+		Input  string `json:"input,omitempty"`
+		Tokens uint64 `json:"tokens"`
+	} `json:"largest"`
+}
+
 type RecoveryCall struct {
 	CallID    uint64   `json:"call_id,string"`
 	Name      string   `json:"name"`
@@ -384,6 +413,8 @@ func (a *Agent) queryContext(ctx context.Context, kind int, id uint64, limit uin
 			rc = C.sope_agent_outcome(p, C.uint64_t(id), &raw, &size)
 		case 4:
 			rc = C.sope_agent_history(p, &raw, &size)
+		case 5:
+			rc = C.sope_agent_context(p, &raw, &size)
 		}
 		if err := result(rc); err != nil {
 			return err
@@ -410,6 +441,14 @@ func (a *Agent) Outcome(turn uint64) (Outcome, error) {
 func (a *Agent) History() (json.RawMessage, error) {
 	var v json.RawMessage
 	err := a.query(4, 0, 0, &v)
+	return v, err
+}
+
+// Context reports how full the model's context is, measured the way
+// compaction measures it. While a turn runs it describes the last request.
+func (a *Agent) Context() (ContextUsage, error) {
+	var v ContextUsage
+	err := a.query(5, 0, 0, &v)
 	return v, err
 }
 

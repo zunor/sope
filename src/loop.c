@@ -72,10 +72,10 @@ static int add_spec(turn_state *t, const char *name, const char *description, co
 }
 
 /* Offers `agent`, describing the subagent types; *mu held. */
-static int add_agent_spec_locked(sope_agent_t *a)
+static int add_agent_spec_locked(sope_agent_t *a, turn_state *t)
 {
     sope_buf desc = { 0 }, schema = { 0 };
-    int ok = sope__subagent_spec_locked(a, &desc, &schema) && add_spec(&a->turn, SOPE__AGENT_TOOL, desc.ptr, schema.ptr);
+    int ok = sope__subagent_spec_locked(a, &desc, &schema) && add_spec(t, SOPE__AGENT_TOOL, desc.ptr, schema.ptr);
     sope__buf_free(&desc);
     sope__buf_free(&schema);
     return ok;
@@ -93,9 +93,8 @@ static int filter_allows(const sope_agent_t *a, const char *name)
 }
 
 /* Offers the built-in tools that no host tool replaces; *mu held. */
-static int add_builtin_specs_locked(sope_agent_t *a)
+static int add_builtin_specs_locked(sope_agent_t *a, turn_state *t)
 {
-    turn_state *t = &a->turn;
     size_t i;
     for (i = 0; i < sope__builtin_count(); i++) {
         const sope_builtin *b = sope__builtin_at(i);
@@ -125,6 +124,35 @@ static const sope_provider *find_provider(const char *name)
     return NULL;
 }
 
+void sope__turn_offer_free(turn_state *t)
+{
+    free_specs(t);
+    free(t->system);
+    t->system = NULL;
+}
+
+int sope__turn_offer_locked(sope_agent_t *a, turn_state *t)
+{
+    char *subagents = sope__option_dup_locked(a, "subagents");
+    int ok = 1, offer_agent = a->parent == NULL && filter_allows(a, SOPE__AGENT_TOOL) && a->root->subagents &&
+                              !(subagents && !strcmp(subagents, "off"));
+    size_t n_tools = sope__builtin_count() + 1; /* + agent */
+    tool_def *td;
+
+    free(subagents);
+    t->system = sope__option_dup_locked(a, "system");
+    if (!t->system) ok = (t->system = sope__strdup(DEFAULT_SYSTEM)) != NULL;
+    for (td = a->tools; td; td = td->next) n_tools++;
+    t->specs = calloc(n_tools, sizeof *t->specs);
+    t->spec_builtin = calloc(n_tools, sizeof *t->spec_builtin);
+    if (!t->specs || !t->spec_builtin) ok = 0;
+    for (td = a->tools; ok && td; td = td->next)
+        if (filter_allows(a, td->name)) ok = add_spec(t, td->name, td->description, td->input_schema);
+    if (ok) ok = add_builtin_specs_locked(a, t);
+    if (ok && offer_agent) ok = add_agent_spec_locked(a, t);
+    return ok;
+}
+
 static void finish_turn(sope_agent_t *a, int32_t stop);
 
 /* Takes the next queued message and prepares the turn. Returns 0 if none. */
@@ -132,10 +160,8 @@ static int begin_turn(sope_agent_t *a)
 {
     turn_state *t = &a->turn;
     msg_node *m;
-    char *provider = NULL, *rounds = NULL, *subagents = NULL, *cwd = NULL, *permissions = NULL;
-    size_t n_tools = 0;
-    tool_def *td;
-    int reset, ok = 1, offer_agent;
+    char *provider = NULL, *rounds = NULL, *cwd = NULL, *permissions = NULL;
+    int reset, ok;
     sope_message *user;
 
     pthread_mutex_lock(a->mu);
@@ -158,21 +184,9 @@ static int begin_turn(sope_agent_t *a)
     t->phase = PHASE_START;
     provider = sope__option_dup_locked(a, "provider");
     rounds = sope__option_dup_locked(a, "max_rounds");
-    subagents = sope__option_dup_locked(a, "subagents");
     cwd = sope__option_dup_locked(a, "cwd");
     permissions = sope__option_dup_locked(a, "permissions");
-    t->system = sope__option_dup_locked(a, "system");
-
-    offer_agent = a->parent == NULL && filter_allows(a, SOPE__AGENT_TOOL) && a->root->subagents && !(subagents && !strcmp(subagents, "off"));
-    for (td = a->tools; td; td = td->next) n_tools++;
-    n_tools += sope__builtin_count() + 1; /* + agent */
-    t->specs = calloc(n_tools, sizeof *t->specs);
-    t->spec_builtin = calloc(n_tools, sizeof *t->spec_builtin);
-    if (!t->specs || !t->spec_builtin) ok = 0;
-    for (td = a->tools; ok && td; td = td->next)
-        if (filter_allows(a, td->name)) ok = add_spec(t, td->name, td->description, td->input_schema);
-    if (ok) ok = add_builtin_specs_locked(a);
-    if (ok && offer_agent) ok = add_agent_spec_locked(a);
+    ok = sope__turn_offer_locked(a, t);
     pthread_mutex_unlock(a->mu);
 
     t->permit = permissions && !strcmp(permissions, "allow")  ? PERMIT_ALLOW
@@ -191,7 +205,6 @@ static int begin_turn(sope_agent_t *a)
     t->max_rounds = rounds ? (int32_t)strtol(rounds, NULL, 10) : DEFAULT_MAX_ROUNDS;
     if (t->max_rounds <= 0) t->max_rounds = DEFAULT_MAX_ROUNDS;
     t->provider = find_provider(provider ? provider : "mock");
-    if (!t->system && ok) ok = (t->system = sope__strdup(DEFAULT_SYSTEM)) != NULL;
 
     user = ok && !m->compact && !m->resume ? sope__message_new(SOPE__MSG_USER, m->text, m->len) : NULL;
     if (user) { /* the attached images move into the message */
@@ -220,9 +233,9 @@ static int begin_turn(sope_agent_t *a)
         pthread_mutex_unlock(a->mu);
         if (!ok) finish_turn(a, SOPE_STOP_ERROR);
     }
+    if (t->active) sope__context_publish(a, 0);
     free(provider);
     free(rounds);
-    free(subagents);
     free(cwd);
     free(permissions);
     return 1;
@@ -523,6 +536,7 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
     /* Missing usage is not evidence that the previous calibration was wrong. */
     a->context_tokens = c->has_usage ? c->usage_tokens : sope__context_tokens(a);
     a->context_estimate = sope__request_tokens(a);
+    sope__context_publish(a, 0);
     t->overflow_retried = 0;
     sope__call_free(c);
     t->call = NULL;
@@ -783,6 +797,7 @@ static sope_next end_compact(sope_agent_t *a, int32_t rc)
         a->context_tokens = 0;
         a->context_estimate = 0; /* new window: measure summary, retained messages and current input */
         if (manual) a->last_stop = SOPE_STOP_END_TURN;
+        sope__context_publish(a, 1);
         ok = sope__journal_checkpoint(a, "compact", manual);
         t->terminal_committed = manual && ok;
         if (ok) sope__push_event_locked(a, SOPE_EVENT_COMPACT, sope__turn_id(a), 0, 0, manual ? "manual" : "auto",

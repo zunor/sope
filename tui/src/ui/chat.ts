@@ -6,10 +6,11 @@ import type { CellBuffer, Style } from "../render/buffer";
 import { mix } from "../render/color";
 import { palette } from "../theme";
 import { stringWidth, truncate } from "../unicode/width";
+import { contextRows, type ContextReport } from "./context";
 import { renderMarkdown, slice } from "./markdown";
 import { wrapText } from "./wrap";
 
-export type Role = "user" | "assistant" | "thinking" | "tool" | "subagent" | "error" | "info";
+export type Role = "user" | "assistant" | "thinking" | "tool" | "subagent" | "error" | "info" | "context";
 
 /** A tool call made by a subagent, shown nested under it. */
 export interface Step {
@@ -35,6 +36,8 @@ export interface Message {
   /** Subagents: their tool calls, and the tail of their streaming text. */
   steps?: Step[];
   tail?: string;
+  /** /context: what it measured; laid out again at each width. */
+  context?: ContextReport;
   version: number;
 }
 
@@ -167,6 +170,9 @@ function linesFor(m: Message, width: number, showThinking: boolean, expanded: bo
     case "info":
       lines = textLines(m.text, width, { fg: palette.muted });
       break;
+    case "context":
+      lines = m.context ? contextRows(m.context, width, summarizeInput).map((spans) => ({ spans })) : textLines(m.text, width, { fg: palette.muted });
+      break;
     case "thinking": {
       const head = m.streaming ? "Thinking…" : `Thought for ${seconds(m)}`;
       lines = [{ spans: [{ text: head, style: { fg: palette.muted, italic: true } }] }];
@@ -227,6 +233,8 @@ function gutterFor(m: Message, spin: string): Span {
       return { text: "✕", style: { fg: palette.error, bold: true } };
     case "info":
       return { text: "·", style: { fg: palette.faint } };
+    case "context":
+      return { text: "◔", style: { fg: palette.accent } };
   }
 }
 

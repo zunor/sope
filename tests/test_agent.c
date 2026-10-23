@@ -639,6 +639,92 @@ static void test_manual_compact(void)
     sope_agent_free(a);
 }
 
+/* The number after "key": in a sope_agent_context report (the first match). */
+static unsigned long long context_field(const char *json, const char *key)
+{
+    char pattern[64];
+    const char *p;
+    snprintf(pattern, sizeof pattern, "\"%s\":", key);
+    p = strstr(json, pattern);
+    return p ? strtoull(p + strlen(pattern), NULL, 10) : ~0ULL;
+}
+
+static unsigned long long context_parts_sum(const char *json)
+{
+    static const char *parts[] = { "system", "tools", "summary", "messages", "tool_results", "images" };
+    const char *p = strstr(json, "\"parts\":");
+    unsigned long long sum = 0;
+    size_t i;
+    for (i = 0; p && i < sizeof parts / sizeof parts[0]; i++) sum += context_field(p, parts[i]);
+    return sum;
+}
+
+static void test_context(void)
+{
+    sope_agent_t *a = new_agent("0");
+    turn_log log;
+    sope_event_t ev;
+    const char *json = NULL;
+    size_t len = 0;
+    unsigned long long before;
+    int rc;
+
+    CHECK(sope_agent_context(NULL, &json, &len) == SOPE_EINVAL);
+    CHECK(sope_agent_context(a, NULL, &len) == SOPE_EINVAL);
+
+    /* Before any turn: the system prompt and the tools the first turn offers. */
+    CHECK(sope_agent_context(a, &json, &len) == SOPE_OK && len == strlen(json));
+    CHECK(strstr(json, "\"state\":\"idle\"") != NULL);
+    CHECK(context_field(json, "messages") == 0 && context_field(json, "system") > 12);
+    CHECK(context_field(json, "tools") > 0 && strstr(json, "\"counts\":{\"tools\":") != NULL);
+    CHECK(context_field(json, "window") == 0 && context_field(json, "reserve") == 0);
+    CHECK(context_field(json, "used") == context_field(json, "estimate"));
+    CHECK(context_parts_sum(json) == context_field(json, "estimate"));
+    CHECK(strstr(json, "\"largest\":[]") != NULL);
+    before = context_field(json, "estimate");
+
+    CHECK(sope_agent_set_option(a, "context.window", "200000") == SOPE_OK);
+    CHECK(sope_agent_set_option(a, "compact.threshold", "160000") == SOPE_OK);
+    CHECK(sope_agent_set_option(a, "openai.max_tokens", "8192") == SOPE_OK);
+    CHECK(sope_agent_context(a, &json, &len) == SOPE_OK);
+    CHECK(context_field(json, "window") == 200000 && context_field(json, "threshold") == 160000);
+    CHECK(context_field(json, "reserve") == 8192);
+
+    /* A host tool result is listed with the call that produced it. */
+    send_and_drain(a, "!echo a fairly long tool input", &log);
+    CHECK(sope_agent_context(a, &json, &len) == SOPE_OK);
+    CHECK(context_field(json, "estimate") > before && context_parts_sum(json) == context_field(json, "estimate"));
+    CHECK(context_field(json, "used") >= context_field(json, "estimate"));
+    CHECK(strstr(json, "\"tool_results\":1") != NULL); /* the count */
+    CHECK(strstr(json, "\"largest\":[{\"name\":\"echo\",\"input\":\"{\\\"input\\\":\\\"a fairly long tool input\\\"}\"") != NULL);
+
+    /* While a turn runs: its last request. */
+    CHECK(sope_send(a, "!echo again", 11, NULL) == SOPE_OK);
+    while ((rc = next_event(a, &ev)) == 1 && ev.type != SOPE_EVENT_TOOL_CALL) {}
+    CHECK(rc == 1);
+    CHECK(sope_agent_context(a, &json, &len) == SOPE_OK);
+    CHECK(strstr(json, "\"state\":\"running\"") != NULL && context_field(json, "window") == 200000);
+    CHECK(strstr(json, "\"tool_results\":1") != NULL); /* this call is not answered yet */
+    CHECK(sope_tool_result(a, ev.call_id, 0, "done", 4) == SOPE_OK);
+    memset(&log, 0, sizeof log);
+    CHECK(drain_turn(a, &log, 1) == 0);
+    CHECK(sope_agent_context(a, &json, &len) == SOPE_OK && strstr(json, "\"tool_results\":2") != NULL);
+
+    /* After compaction the older history is a summary. */
+    memset(&log, 0, sizeof log);
+    CHECK(sope_compact(a, NULL, 0, NULL) == SOPE_OK);
+    CHECK(drain_turn(a, &log, 0) == 0 && log.compacts == 1);
+    CHECK(sope_agent_context(a, &json, &len) == SOPE_OK);
+    CHECK(context_field(json, "summary") > 0 && context_parts_sum(json) == context_field(json, "estimate"));
+
+    /* A reset counts from the next turn on, and so does the report. */
+    CHECK(sope_agent_reset(a) == SOPE_OK);
+    CHECK(sope_agent_context(a, &json, &len) == SOPE_OK);
+    CHECK(context_field(json, "summary") == 0 && context_field(json, "messages") == 0);
+    CHECK(context_field(json, "used") == context_field(json, "estimate"));
+    sope_agent_free(a);
+}
+
 static void test_auto_compact_at_turn_start(void)
 {
     sope_agent_t *a = new_agent("0");
@@ -779,6 +865,7 @@ int main(void)
     test_custom_subagent();
     test_free_with_running_subagents();
     test_manual_compact();
+    test_context();
     test_auto_compact_at_turn_start();
     test_auto_compact_mid_turn();
     test_cancel_compaction();

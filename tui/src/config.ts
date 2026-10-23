@@ -11,8 +11,13 @@
 //   SOPE_PROVIDER           mock | openai (default: openai when a key is set)
 //   SOPE_MODEL              default glm-5.3
 //   SOPE_BASE_URL           any OpenAI-compatible endpoint
-//   SOPE_COMPACT_THRESHOLD  compact the history past this many tokens (0: never)
-//   SOPE_CONTEXT_WINDOW     model's full token window (0: unknown)
+//   SOPE_COMPACT_THRESHOLD  compact the history past this many tokens (0: never;
+//                           default: 80% of the model's window, 100000 while
+//                           the window is unknown)
+//   SOPE_CONTEXT_WINDOW     model's full token window (default: what the
+//                           endpoint's /models says, else unknown)
+//   SOPE_REASONING_EFFORT   low | medium | high | xhigh (also none, minimal):
+//                           how long the model thinks (default: the model's)
 //   SOPE_MOUSE              0 leaves the mouse to the terminal (default: the TUI
 //                           takes it for wheel scrolling and drag-to-copy)
 //   SOPE_PERMISSIONS        ask | auto | full: who approves edits, commands and
@@ -21,6 +26,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { parseEffort, type Effort } from "./agent/effort";
 import { DEFAULT_MODE, parseMode, type PermissionMode } from "./agent/permissions";
 
 export const DEFAULT_BASE_URL = "https://api-taas.moi.matrixorigin.cn/v1";
@@ -28,6 +34,8 @@ export const DEFAULT_MODEL = "glm-5.3";
 /** glm-5.3 reads text only; on the default endpoint kimi-k3 takes over for images. */
 export const DEFAULT_IMAGE_MODEL = "kimi-k3";
 export const DEFAULT_COMPACT_THRESHOLD = 100_000;
+/** Without SOPE_COMPACT_THRESHOLD, compaction starts at this share of a known window. */
+export const AUTO_COMPACT_SHARE = 0.8;
 
 export interface Config {
   provider: string;
@@ -36,14 +44,17 @@ export interface Config {
   imageModel: string;
   baseUrl: string;
   apiKey?: string;
-  compactThreshold: number;
+  /** null: AUTO_COMPACT_SHARE of the model's window (contextOptions). */
+  compactThreshold: number | null;
   contextWindow: number;
+  /** Reasoning effort; "" leaves it to the model. */
+  effort: Effort;
   mouse: boolean;
   /** Who approves built-in tools that change things (agent/permissions.ts). */
   permissions: PermissionMode;
 }
 
-export type Overrides = Partial<Pick<Config, "provider" | "model" | "baseUrl" | "permissions">>;
+export type Overrides = Partial<Pick<Config, "provider" | "model" | "baseUrl" | "permissions" | "effort">>;
 
 export function configPath(env: Record<string, string | undefined> = process.env): string {
   return join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "sope", "config");
@@ -81,7 +92,7 @@ export function loadConfig(
   const get = (key: string) => env[key] || file[key] || undefined;
   const apiKey = get("SOPE_API_KEY");
   const provider = overrides.provider || get("SOPE_PROVIDER") || (apiKey ? "openai" : "mock");
-  const threshold = Number(get("SOPE_COMPACT_THRESHOLD") ?? DEFAULT_COMPACT_THRESHOLD);
+  const threshold = Number(get("SOPE_COMPACT_THRESHOLD") ?? NaN);
   const window = Number(get("SOPE_CONTEXT_WINDOW") ?? 0);
   const baseUrl = overrides.baseUrl || get("SOPE_BASE_URL") || DEFAULT_BASE_URL;
   const imageModel = get("SOPE_IMAGE_MODEL") ?? (provider === "openai" && baseUrl === DEFAULT_BASE_URL ? DEFAULT_IMAGE_MODEL : "");
@@ -91,8 +102,9 @@ export function loadConfig(
     imageModel: /^(off|none|0)$/i.test(imageModel) ? "" : imageModel,
     baseUrl,
     apiKey,
-    compactThreshold: Number.isInteger(threshold) && threshold >= 0 && threshold <= 0xffffffff ? threshold : DEFAULT_COMPACT_THRESHOLD,
+    compactThreshold: Number.isInteger(threshold) && threshold >= 0 && threshold <= 0xffffffff ? threshold : null,
     contextWindow: Number.isInteger(window) && window >= 0 && window <= 0xffffffff ? window : 0,
+    effort: overrides.effort ?? parseEffort(get("SOPE_REASONING_EFFORT") ?? "") ?? "",
     mouse: !/^(0|false|off|no)$/i.test(get("SOPE_MOUSE") ?? ""),
     permissions: overrides.permissions ?? parseMode(get("SOPE_PERMISSIONS") ?? "") ?? DEFAULT_MODE,
   };
@@ -114,6 +126,16 @@ export function systemPrompt(cwd = process.cwd(), now = new Date()): string {
 }
 
 /**
+ * The context budget for a model whose window is `window` tokens (0:
+ * unknown); SOPE_CONTEXT_WINDOW and SOPE_COMPACT_THRESHOLD win over it.
+ */
+export function contextOptions(c: Config, window = 0): Record<"context.window" | "compact.threshold", string> {
+  const w = c.contextWindow || window;
+  const threshold = c.compactThreshold ?? (w ? Math.floor(w * AUTO_COMPACT_SHARE) : DEFAULT_COMPACT_THRESHOLD);
+  return { "context.window": String(w), "compact.threshold": String(threshold) };
+}
+
+/**
  * Agent options for a config; secrets stay out of anything that gets
  * displayed. Built-in tools that change things always ask: the host
  * answers each request by the permission mode (agent/permissions.ts), so a
@@ -123,8 +145,8 @@ export function agentOptions(c: Config): Record<string, string> {
   const options: Record<string, string> = { provider: c.provider, system: systemPrompt(), permissions: "ask" };
   if (c.model) options.model = c.model;
   if (c.imageModel && c.imageModel !== c.model) options.image_model = c.imageModel;
-  if (c.compactThreshold) options["compact.threshold"] = String(c.compactThreshold);
-  if (c.contextWindow) options["context.window"] = String(c.contextWindow);
+  if (c.effort) options["reasoning.effort"] = c.effort;
+  Object.assign(options, contextOptions(c));
   if (c.provider === "openai") {
     options["openai.base_url"] = c.baseUrl;
     if (c.apiKey) options["openai.api_key"] = c.apiKey;

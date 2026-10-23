@@ -42,7 +42,7 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  const config = loadConfig({ provider: opts.provider, model: opts.model, baseUrl: opts.baseUrl, permissions: opts.permissions });
+  const config = loadConfig({ provider: opts.provider, model: opts.model, baseUrl: opts.baseUrl, permissions: opts.permissions, effort: opts.effort });
   let images: ImageFile[];
   try {
     images = opts.images.map((path) => readImageFile(path));

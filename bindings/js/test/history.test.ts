@@ -60,3 +60,23 @@ test("only between turns, and only valid histories", () => {
   expect(() => a.loadHistory('[{"role":"robot"}]')).toThrow(/unknown role/);
   expect(JSON.parse(a.history())).toHaveLength(2); // untouched
 });
+
+test("context() reports what the next request holds, by part", () => {
+  const a = create();
+  a.setOption("context.window", "200000");
+  const empty = a.context();
+  expect(empty).toMatchObject({ state: "idle", window: 200000, reserve: 4096, threshold: 0, largest: [] });
+  expect(empty.parts.messages).toBe(0);
+  expect(empty.counts.tools).toBeGreaterThan(5);
+
+  run(a, '!glob {"pattern":"*.json"}');
+  const after = a.context();
+  const parts = Object.values(after.parts).reduce((sum, n) => sum + n, 0);
+  expect(parts).toBe(after.estimate);
+  expect(after.used).toBeGreaterThanOrEqual(after.estimate);
+  expect(after.counts).toMatchObject({ messages: 3, tool_results: 1 });
+  expect(after.largest[0]).toMatchObject({ name: "glob", input: '{"pattern":"*.json"}' });
+
+  a.reset();
+  expect(a.context().parts.messages).toBe(0);
+});

@@ -185,6 +185,7 @@ void sope__agent_free_memory(sope_agent_t *a)
     for (i = 0; i < a->n_tool_filter; i++) free(a->tool_filter[i]);
     free(a->tool_filter);
     free(a->history_json);
+    free(a->context_json);
     while (a->in_head) {
         msg_node *m = a->in_head;
         a->in_head = m->next;
@@ -667,6 +668,39 @@ int sope_agent_history(sope_agent_t *a, const char **json, size_t *len)
     if (!s) return sope__set_error(SOPE_ENOMEM, "sope_agent_history: out of memory");
     *json = s;
     if (len) *len = n;
+    return SOPE_OK;
+}
+
+int sope_agent_context(sope_agent_t *a, const char **json, size_t *len)
+{
+    sope_buf b = { 0 };
+    int ok;
+
+    if (!a || !json) return sope__set_error(SOPE_EINVAL, "sope_agent_context: agent or json is NULL");
+    pthread_mutex_lock(a->mu);
+    if (between_turns_locked(a)) {
+        turn_state offer;
+        memset(&offer, 0, sizeof offer);
+        ok = sope__turn_offer_locked(a, &offer) && sope__context_measure_locked(a, &offer, &b);
+        sope__turn_offer_free(&offer);
+    } else if (a->context_json) {
+        sope__buf_appends(&b, a->context_json);
+        ok = !b.oom;
+    } else {
+        pthread_mutex_unlock(a->mu);
+        return sope__set_error(SOPE_EBUSY, "sope_agent_context: the queued turn has not started");
+    }
+    if (ok) {
+        free(a->history_json);
+        a->history_json = b.ptr;
+        *json = b.ptr;
+        if (len) *len = b.len;
+    }
+    pthread_mutex_unlock(a->mu);
+    if (!ok) {
+        sope__buf_free(&b);
+        return sope__set_error(SOPE_ENOMEM, "sope_agent_context: out of memory");
+    }
     return SOPE_OK;
 }
 

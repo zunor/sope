@@ -4,6 +4,7 @@
 // through CommandHost, the app's side of them.
 
 import { version } from "sope";
+import { parseEffort, type Effort } from "./agent/effort";
 import { parseMode, type PermissionMode } from "./agent/permissions";
 import { ASKING_TOOLS, READ_TOOLS, type HostTool } from "./agent/tools";
 import { configPath } from "./config";
@@ -20,6 +21,9 @@ export interface CommandHost {
   /** Switches this session to a model, from its next turn. */
   useModel(id: string): void;
   openModes(): void;
+  openEffort(): void;
+  /** This session's reasoning effort from its next turn; also the default for new sessions. */
+  setEffort(effort: Effort): void;
   setMode(mode: PermissionMode): void;
   /** Each returns the new state. */
   toggleThinking(): boolean;
@@ -49,6 +53,16 @@ export const COMMANDS: Command[] = [
     run: (h, [name]) => (name ? h.useModel(name) : h.openModels()),
   },
   {
+    name: "effort",
+    args: "[level]",
+    description: "Choose how long the model thinks: default, low, medium, high, xhigh",
+    run: (h, args) => {
+      if (!args.length) return h.openEffort();
+      const effort = parseEffort(args.join(" "));
+      return effort === undefined ? fail(h, "usage: /effort [default|none|minimal|low|medium|high|xhigh]") : h.setEffort(effort);
+    },
+  },
+  {
     name: "permissions",
     args: "[ask|auto|full]",
     description: "Choose who approves edits and commands",
@@ -63,6 +77,7 @@ export const COMMANDS: Command[] = [
       h.openModes();
     },
   },
+  { name: "context", description: "Show what fills the model's context window", run: (h) => h.session.showContext() },
   { name: "compact", args: "[focus]", description: "Summarize the conversation to free context (also automatic)", run: (h, args) => h.session.compact(args.join(" ")) },
   { name: "recover", args: "[resume|resolve <id> <ok|error> <outcome>]", description: "Inspect and resume an interrupted task after verifying tool outcomes", run: (h, args) => h.session.recover(args) },
   { name: "thinking", description: "Show or hide the model's full reasoning", run: (h) => info(h, `full reasoning ${h.toggleThinking() ? "shown" : "collapsed"}`) },
