@@ -243,6 +243,10 @@ int sope_shutdown(void)
     uint32_t i, n;
 
     pthread_mutex_lock(&P.mu);
+    if (P.shutdown) {
+        pthread_mutex_unlock(&P.mu);
+        return sope__set_error(SOPE_EBUSY, "sope_shutdown: shutdown is already in progress");
+    }
     if (P.tasks) {
         size_t live = P.tasks;
         pthread_mutex_unlock(&P.mu);
@@ -280,6 +284,10 @@ int sope_shutdown(void)
 int sope__pool_acquire(void)
 {
     pthread_mutex_lock(&P.mu);
+    if (P.shutdown) {
+        pthread_mutex_unlock(&P.mu);
+        return sope__set_error(SOPE_EBUSY, "worker pool: shutdown is in progress");
+    }
     if (!P.started) {
         uint32_t want = P.configured ? P.configured : default_threads();
         P.threads = calloc(want, sizeof *P.threads);

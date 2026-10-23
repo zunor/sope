@@ -100,7 +100,8 @@ SOPE_API int sope_set_threads(uint32_t n);
 /* Stops and joins the worker pool and the HTTP I/O thread. Every agent must
  * be freed first (SOPE_EBUSY otherwise). Optional: use it before unloading
  * the library or for a clean leak-checker report. The pool restarts on the
- * next sope_agent_new. */
+ * next sope_agent_new. During shutdown, concurrent sope_shutdown and
+ * sope_agent_new calls return SOPE_EBUSY. */
 SOPE_API int sope_shutdown(void);
 
 /* ------------------------------------------------------------------------ */
