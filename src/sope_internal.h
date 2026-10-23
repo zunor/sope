@@ -8,10 +8,16 @@
  *   pool.c           shared worker pool: runs tasks one short step at a time
  *   http.c           libcurl multi on one I/O thread; wakes tasks as bytes arrive
  *   proc.c           child processes on one reaper thread; wakes tasks likewise
+ *   history.c        messages and the conversation, and their JSON form
+ *   compact.c        the prompts that summarize a conversation
  *   provider_*.c     one streaming model call ("round"), as a state machine
- *   tools.c, ...     built-in tools, each call a task of its own (tools.h)
+ *   tools.c, tool_*  built-in tools, each call a task of its own (tools.h)
+ *   call.c           sope_call: what a provider sees of a model call
  *   loop.c           a turn: model round -> tools/subagents -> next round ...
+ *   subagent.c       subagent types and the children the `agent` tool spawns
  *   agent.c          public API, event queue, readable fd, lifecycle
+ *
+ * agent.h and tools.h hold what only the agent core and the tools share.
  */
 #ifndef SOPE_INTERNAL_H
 #define SOPE_INTERNAL_H
@@ -199,7 +205,7 @@ void sope__proc_release(sope_proc *p);
 void sope__proc_shutdown(void);
 
 /* ======================================================================== */
-/* conversation history (loop.c)                                             */
+/* conversation history (history.c)                                          */
 /* ======================================================================== */
 
 typedef enum { SOPE__MSG_USER, SOPE__MSG_ASSISTANT, SOPE__MSG_TOOL } sope_msg_role;
@@ -243,6 +249,26 @@ typedef struct sope_history {
     sope_message *head, *tail;
     size_t count;
 } sope_history;
+
+/* NULL on out of memory. content is copied; NULL means empty. */
+sope_message *sope__message_new(sope_msg_role role, const char *content, size_t len);
+/* The answer to tool use u. */
+sope_message *sope__tool_message(const sope_tool_use *u, const char *content, size_t len, int is_error);
+void sope__message_free(sope_message *m);
+void sope__tool_uses_free(sope_tool_use *uses, size_t n);
+
+void sope__history_append(sope_history *h, sope_message *m);
+/* Unlinks and returns the last message; NULL if empty. */
+sope_message *sope__history_pop(sope_history *h);
+/* The last message with this role, or NULL. */
+const sope_message *sope__history_last(const sope_history *h, sope_msg_role role);
+void sope__history_clear(sope_history *h);
+/* Answers tool uses a cut-short turn left open, as "cancelled" errors. */
+void sope__history_repair(sope_history *h);
+/* The history as a JSON array (sope.h: sope_agent_history); malloc'd, NULL on OOM. */
+char *sope__history_json(const sope_history *h, size_t *len);
+/* Parses such an array into *out, repaired; SOPE_EINVAL (err says why) or SOPE_ENOMEM. */
+int sope__history_parse(sope_history *out, const char *json, size_t len, char *err, size_t cap);
 
 /* ======================================================================== */
 /* providers: one streaming model call                                       */

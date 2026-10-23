@@ -157,7 +157,7 @@ Every agent comes with tools executed by the library; the host does not need to 
 | `web_fetch` | Fetch an HTTP(S) URL: convert HTML to text with headings, lists, and links (page images become `![alt](url)`); return text and JSON unchanged; send image URLs' images directly to the model. Follows redirects; paginate long pages with `offset` (about 40000 bytes per page) | Yes |
 | `todo_write` | Maintain a task list: submit the full list each time, with `content`, `activeForm`, and `status` for each item | No |
 
-Full tool descriptions and JSON schemas are in `src/tools.c`; these are what the model sees.
+Full tool descriptions and JSON schemas are next to each tool in `src/tool_*.c`; these are what the model sees.
 
 **Events.** Each built-in tool call first emits `TOOL_START` (`data` contains JSON input, which the host can display—for example, rendering a `todo_write` list), then `TOOL_END` (`code` is 1 on failure; `data` is the result shown to the model). Host tool calls also emit `TOOL_END`, allowing the host to display all tool results in one place.
 

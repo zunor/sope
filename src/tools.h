@@ -7,9 +7,17 @@
  * tool calls of one model response run in parallel, and a running command
  * or download holds no thread while it waits.
  *
- *   tools.c    registry, the run task, read/write/edit, bash, todo_write
- *   search.c   glob and grep: tree walking, glob patterns, .gitignore
- *   web.c      web_fetch: HTTP GET and HTML to text
+ *   tools.c        the registry, the run task, helpers for tools
+ *   tool_file.c    read, write, edit (and what the model has seen)
+ *   tool_search.c  glob, grep
+ *   tool_bash.c    bash, bash_output, bash_kill (and background shells)
+ *   tool_web.c     web_fetch: HTTP GET and HTML to text
+ *   tool_todo.c    todo_write
+ *   walk.c         glob patterns, .gitignore and the tree walk of glob/grep
+ *
+ * A tool is one sope_builtin: name, description and schema as the model
+ * sees them, and a step function. Adding one means a tool_*.c file and a
+ * line in the registry.
  *
  * Tools that change things or reach the network ask the host first
  * (SOPE_EVENT_PERMISSION, answered with sope_permit), unless the agent's
@@ -62,12 +70,20 @@ struct sope_builtin {
     void (*cancel)(tool_run *r);
 };
 
-/* tools.c */
+/* The tools, in their tool_*.c files. */
+extern const sope_builtin sope__builtin_read, sope__builtin_write, sope__builtin_edit;
+extern const sope_builtin sope__builtin_glob, sope__builtin_grep;
+extern const sope_builtin sope__builtin_bash, sope__builtin_bash_output, sope__builtin_bash_kill;
+extern const sope_builtin sope__builtin_web_fetch;
+extern const sope_builtin sope__builtin_todo_write;
+
+/* tools.c: the registry */
 size_t sope__builtin_count(void);
 const sope_builtin *sope__builtin_at(size_t i);
 const sope_builtin *sope__builtin_find(const char *name);
 
-/* A run of tool b, not started yet. NULL on out of memory. */
+/* tools.c: running a call. A run of tool b, not started yet; NULL on out
+ * of memory. */
 tool_run *sope__tool_run_new(sope_agent_t *a, const sope_builtin *b, uint64_t call_id, const char *input,
                              size_t len);
 /* Starts a prepared run; it ends with SOPE_EVENT_TOOL_END and completes its
@@ -77,12 +93,7 @@ void sope__tool_run_start_locked(tool_run *r);
 /* Frees a run that never started. */
 void sope__tool_run_discard(tool_run *r);
 
-/* Kills the root's background shells (agent teardown). */
-void sope__shells_free(sope_agent_t *root);
-/* Forgets which files the agent has read (history reset, teardown). */
-void sope__files_clear(sope_agent_t *a);
-
-/* Helpers shared by the tool implementations. */
+/* tools.c: helpers shared by the tool implementations. */
 const char *sope__arg_string(tool_run *r, const char *key);
 int64_t sope__arg_int(tool_run *r, const char *key, int64_t fallback);
 int sope__arg_bool(tool_run *r, const char *key);
@@ -96,16 +107,39 @@ char *sope__run_path(tool_run *r, const char *path);
 /* path relative to r->cwd when inside it, else path itself. */
 const char *sope__display_path(tool_run *r, const char *path);
 
-/* search.c */
-sope_next sope__tool_glob(tool_run *r);
-sope_next sope__tool_grep(tool_run *r);
+/* tool_file.c: forgets which files the agent has read (history reset, teardown). */
+void sope__files_clear(sope_agent_t *a);
+/* tool_bash.c: kills the root's background shells (agent teardown). */
+void sope__shells_free(sope_agent_t *root);
+/* tool_web.c: HTML to readable text with Markdown-style headings, lists and links. */
+void sope__html_to_text(const char *html, size_t n, sope_buf *out);
+
+/* walk.c: glob patterns */
+#define SOPE__MAX_PATTERNS 64 /* alternatives one pattern expands to, at most */
 /* Whether `pattern` (*, ?, [..], ** and {a,b}) matches all of `path`. */
 int sope__glob_match(const char *pattern, const char *path);
+/* The same for a pattern without {a,b}: one result of sope__glob_expand. */
+int sope__glob_match_one(const char *pattern, const char *path);
+/* Expands {a,b} groups into at most `room` malloc'd patterns; returns how many. */
+size_t sope__glob_expand(const char *pattern, char **out, size_t room);
 
-/* web.c */
-sope_next sope__tool_web_fetch(tool_run *r);
-void sope__tool_web_fetch_cancel(tool_run *r);
-/* HTML to readable text with Markdown-style headings, lists and links. */
-void sope__html_to_text(const char *html, size_t n, sope_buf *out);
+/* walk.c: the tree walk */
+struct stat;
+typedef struct sope_walk sope_walk;
+struct sope_walk {
+    int max_depth; /* directories below the start to enter; -1: unlimited */
+    void (*on_file)(sope_walk *w, const char *path, const struct stat *st);
+    void *ctx;
+    int stop; /* on_file sets it to end the walk; also set past the entry limit */
+    /* private */
+    struct sope_ignore_rule *rules;
+    size_t n_rules, cap_rules;
+    size_t visited;
+};
+/* Applies the .gitignore files above `dir`, up to the repository root. */
+void sope__walk_ignores_above(sope_walk *w, const char *dir);
+/* Calls on_file for each file under `dir` that is not skipped, in name order. */
+void sope__walk(sope_walk *w, const char *dir);
+void sope__walk_free(sope_walk *w);
 
 #endif /* SOPE_TOOLS_H */

@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * agent.c - public API: agent lifecycle, options, tools, subagent
- * definitions, the event queue and its readable fd.
+ * agent.c - public API: agent lifecycle, options, tools, the event queue
+ * and its readable fd, and the registry of pending tool calls.
  *
- * Turn execution lives in loop.c. An agent owns no thread: it is a task on
- * the shared pool (pool.c), woken by host calls that create work.
+ * Turns run in loop.c, subagents in subagent.c. An agent owns no thread: it
+ * is a task on the shared pool (pool.c), woken by host calls that create work.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -21,11 +21,6 @@
 
 /* Bindings hard-code this layout; keep docs/abi.md in sync when it changes. */
 _Static_assert(sizeof(void *) != 8 || sizeof(sope_event_t) == 72, "sope_event_t layout changed");
-
-static const char GENERAL_PURPOSE_PROMPT[] =
-    "You are a subagent. Given the task below, use the tools available to complete it. Complete the task "
-    "fully, but do not gold-plate. When you are done, respond with a concise report of what you did and any "
-    "key findings; the caller relays it to the user, so include only the essentials.";
 
 /* ------------------------------------------------------------------------ */
 /* helpers                                                                   */
@@ -59,20 +54,7 @@ static void tool_free(tool_def *t)
     free(t);
 }
 
-static void subagent_free(subagent_def *d)
-{
-    size_t i;
-    if (!d) return;
-    free(d->name);
-    free(d->description);
-    free(d->system_prompt);
-    free(d->model);
-    for (i = 0; i < d->n_tools; i++) free(d->tools[i]);
-    free(d->tools);
-    free(d);
-}
-
-static int valid_name(const char *s, size_t n)
+int sope__valid_name(const char *s, size_t n)
 {
     size_t i;
     if (n == 0 || n > 64) return 0;
@@ -94,6 +76,23 @@ char *sope__option_dup_locked(sope_agent_t *a, const char *key)
 {
     option_kv *kv = *option_slot_locked(a, key);
     return kv ? sope__strdup(kv->value) : NULL;
+}
+
+pending_call *sope__pending_find_locked(sope_agent_t *a, uint64_t call_id, pending_kind kind)
+{
+    pending_call *p;
+    for (p = a->root->pending; p; p = p->next)
+        if (p->call_id == call_id && p->kind == kind) return p;
+    return NULL;
+}
+
+void sope__pending_free(pending_call *p)
+{
+    sope__tool_run_discard(p->run); /* still waiting for sope_permit */
+    sope__images_free(p->images, p->n_images);
+    free(p->name);
+    free(p->content);
+    free(p);
 }
 
 /* Keeps the fd readable exactly while events are queued or the agent is closed. */
@@ -218,7 +217,7 @@ void sope__agent_free_memory(sope_agent_t *a)
     while (a->subagents) {
         subagent_def *d = a->subagents;
         a->subagents = d->next;
-        subagent_free(d);
+        sope__subagent_free(d);
     }
     if (a->fd_read >= 0) close(a->fd_read);
     if (a->fd_write >= 0) close(a->fd_write);
@@ -227,93 +226,12 @@ void sope__agent_free_memory(sope_agent_t *a)
     free(a);
 }
 
-/* Parses a subagent definition. On failure sets the error, stores its code
- * in *rc and returns NULL. */
-static subagent_def *parse_subagent(const char *json, size_t len, int *rc)
-{
-    sope_json *root = sope__json_parse(json, len);
-    const sope_json *name, *desc, *prompt, *model, *tools, *rounds;
-    subagent_def *d = NULL;
-    size_t n = 0;
-
-    *rc = SOPE_EINVAL;
-    if (!root || root->type != SOPE_JSON_OBJECT) {
-        sope__set_error(SOPE_EINVAL, "sope_subagent_register: definition is not a JSON object");
-        goto done;
-    }
-    name = sope__json_get(root, "name");
-    desc = sope__json_get(root, "description");
-    prompt = sope__json_get(root, "system_prompt");
-    model = sope__json_get(root, "model");
-    tools = sope__json_get(root, "tools");
-    rounds = sope__json_get(root, "max_rounds");
-
-    if (!sope__json_string(name, &n) || !valid_name(name->str, n)) {
-        sope__set_error(SOPE_EINVAL, "sope_subagent_register: \"name\" must be 1-64 chars of [A-Za-z0-9_-]");
-        goto done;
-    }
-    if (!sope__json_string(desc, &n) || !n || !sope__json_string(prompt, &n) || !n) {
-        sope__set_error(SOPE_EINVAL, "sope_subagent_register: \"description\" and \"system_prompt\" are required");
-        goto done;
-    }
-    if (tools && !(tools->type == SOPE_JSON_ARRAY || (tools->type == SOPE_JSON_STRING && !strcmp(tools->str, "*")))) {
-        sope__set_error(SOPE_EINVAL, "sope_subagent_register: \"tools\" must be an array of names or \"*\"");
-        goto done;
-    }
-
-    d = calloc(1, sizeof *d);
-    if (!d || !(d->name = sope__strdup(name->str)) || !(d->description = sope__strdup(desc->str)) ||
-        !(d->system_prompt = sope__strdup(prompt->str)) ||
-        (sope__json_string(model, NULL) && !(d->model = sope__strdup(model->str))))
-        goto oom;
-    d->max_rounds = (int32_t)sope__json_number(rounds, 0);
-    if (tools && tools->type == SOPE_JSON_ARRAY) {
-        const sope_json *t;
-        d->tools = calloc(tools->count ? tools->count : 1, sizeof *d->tools);
-        if (!d->tools) goto oom;
-        for (t = tools->child; t; t = t->next) {
-            if (t->type != SOPE_JSON_STRING) continue;
-            if (!(d->tools[d->n_tools] = sope__strdup(t->str))) goto oom;
-            d->n_tools++;
-        }
-    }
-    *rc = SOPE_OK;
-    goto done;
-
-oom:
-    subagent_free(d);
-    d = NULL;
-    *rc = sope__set_error(SOPE_ENOMEM, "sope_subagent_register: out of memory");
-done:
-    sope__json_free(root);
-    return d;
-}
-
-static int add_subagent(sope_agent_t *a, subagent_def *d)
-{
-    subagent_def **pp;
-    pthread_mutex_lock(a->mu);
-    pp = &a->subagents;
-    while (*pp && strcmp((*pp)->name, d->name) != 0) pp = &(*pp)->next;
-    if (*pp) {
-        d->next = (*pp)->next;
-        subagent_free(*pp);
-    }
-    *pp = d;
-    pthread_mutex_unlock(a->mu);
-    return SOPE_OK;
-}
-
 /* ------------------------------------------------------------------------ */
 /* public API                                                                */
 /* ------------------------------------------------------------------------ */
 
 int sope_agent_new(sope_agent_t **out)
 {
-    static const char builtin[] =
-        "{\"name\":\"general-purpose\",\"description\":\"General-purpose agent for researching complex "
-        "questions and executing multi-step tasks. Use it to work on an independent subtask in a fresh "
-        "context, or to run several subtasks in parallel.\",\"tools\":\"*\",\"system_prompt\":\"-\"}";
     sope_agent_t *a;
     subagent_def *gp;
     int rc;
@@ -336,16 +254,10 @@ int sope_agent_new(sope_agent_t **out)
         return sope__set_error(SOPE_ERROR, "sope_agent_new: pthread_cond_init failed");
     }
 
-    /* The built-in definition is parsed like a user one; its prompt is filled in here. */
-    gp = parse_subagent(builtin, sizeof builtin - 1, &rc);
-    if (gp) {
-        free(gp->system_prompt);
-        if (!(gp->system_prompt = sope__strdup(GENERAL_PURPOSE_PROMPT)))
-            rc = sope__set_error(SOPE_ENOMEM, "sope_agent_new: out of memory");
-    }
+    gp = sope__subagent_general_purpose(&rc);
     if (rc == SOPE_OK) rc = sope__pool_acquire();
     if (rc != SOPE_OK) {
-        subagent_free(gp);
+        sope__subagent_free(gp);
         pthread_cond_destroy(&a->poll_cv);
         pthread_mutex_destroy(&a->mu_storage);
         free(a);
@@ -400,9 +312,9 @@ int sope_tool_register(sope_agent_t *a, const char *name, const char *descriptio
     sope_json *schema;
 
     if (!a || !name) return sope__set_error(SOPE_EINVAL, "sope_tool_register: invalid argument");
-    if (!valid_name(name, strlen(name)))
+    if (!sope__valid_name(name, strlen(name)))
         return sope__set_error(SOPE_EINVAL, "sope_tool_register: invalid tool name '%s'", name);
-    if (!strcmp(name, "agent"))
+    if (!strcmp(name, SOPE__AGENT_TOOL))
         return sope__set_error(SOPE_EINVAL, "sope_tool_register: 'agent' is reserved for subagents");
     if (input_schema_json) {
         schema = sope__json_parse(input_schema_json, strlen(input_schema_json));
@@ -437,8 +349,9 @@ int sope_subagent_register(sope_agent_t *a, const char *definition_json, size_t 
     subagent_def *d;
     int rc;
     if (!a || !definition_json) return sope__set_error(SOPE_EINVAL, "sope_subagent_register: invalid argument");
-    if (!(d = parse_subagent(definition_json, len, &rc))) return rc;
-    return add_subagent(a, d);
+    if (!(d = sope__subagent_parse(definition_json, len, &rc))) return rc;
+    sope__subagent_add(a, d);
+    return SOPE_OK;
 }
 
 /* Queues one turn: a user message, or a compaction request with optional
@@ -549,9 +462,8 @@ int sope_tool_result(sope_agent_t *a, uint64_t call_id, int is_error, const char
         return sope__set_error(SOPE_ENOMEM, "sope_tool_result: out of memory");
 
     pthread_mutex_lock(a->mu);
-    for (p = a->root->pending; p; p = p->next)
-        if (p->call_id == call_id && p->kind == PENDING_TOOL && !p->done) break;
-    if (!p) {
+    p = sope__pending_find_locked(a, call_id, PENDING_TOOL);
+    if (!p || p->done) {
         pthread_mutex_unlock(a->mu);
         free(copy);
         return sope__set_error(SOPE_ENOTFOUND, "sope_tool_result: no pending tool call %" PRIu64, call_id);
@@ -591,9 +503,8 @@ int sope_permit(sope_agent_t *a, uint64_t call_id, int allow, const char *messag
     }
 
     pthread_mutex_lock(a->mu);
-    for (p = a->root->pending; p; p = p->next)
-        if (p->call_id == call_id && p->kind == PENDING_BUILTIN && p->run && !p->done) break;
-    if (!p) {
+    p = sope__pending_find_locked(a, call_id, PENDING_BUILTIN);
+    if (!p || !p->run || p->done) {
         pthread_mutex_unlock(a->mu);
         sope__buf_free(&why);
         return sope__set_error(SOPE_ENOTFOUND, "sope_permit: no tool call %" PRIu64 " is waiting for permission",

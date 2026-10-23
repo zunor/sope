@@ -46,18 +46,25 @@ endif()
 
 set(SOPE_SOURCES
   src/agent.c
+  src/call.c
   src/compact.c
+  src/history.c
   src/http.c
   src/json.c
   src/loop.c
   src/pool.c
-  src/provider_mock.c
   src/proc.c
+  src/provider_mock.c
   src/provider_openai.c
-  src/search.c
+  src/subagent.c
+  src/tool_bash.c
+  src/tool_file.c
+  src/tool_search.c
+  src/tool_todo.c
+  src/tool_web.c
   src/tools.c
   src/util.c
-  src/web.c
+  src/walk.c
 )
 
 add_library(sope SHARED ${SOPE_SOURCES})

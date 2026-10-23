@@ -1,29 +1,22 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * loop.c - turn execution: the agent loop and subagents.
+ * loop.c - turn execution: the agent loop.
  *
  * A turn (one sope_send) runs as a state machine on the pool:
  *
  *   START ─▶ CALL ─(model wants tools)─▶ TOOLS ─(all results in)─▶ CALL ─▶ ...
  *              └──(no tool use)──▶ end_turn
  *
- * CALL streams one model call through a provider; TOOLS waits for the tool
- * calls of that response: built-in tools (tools.c, each a task of its own,
- * maybe after the host's sope_permit), host tools (sope_tool_result) and
- * subagents. Each step returns instead of blocking, so waiting costs no
- * thread.
+ * CALL streams one model call (call.c) through a provider; TOOLS waits for
+ * the tool calls of that response: built-in tools (tools.c, each a task of
+ * its own, maybe after the host's sope_permit), host tools
+ * (sope_tool_result) and subagents (subagent.c). Each step returns instead
+ * of blocking, so waiting costs no thread.
  *
  * COMPACT runs before a CALL once the last call reported more input tokens
  * than compact.threshold, or as the whole turn for sope_compact: one model
  * call summarizes the history (prompts in compact.c), and the summary
  * replaces it.
- *
- * Subagents follow the usual agent-tool design: the model calls the built-in
- * `agent` tool; we spawn a child agent with its own history, system prompt
- * and filtered tool set (never `agent` itself, so no recursion), run it as
- * its own task (so several run in parallel), and return its final message as
- * the tool result. A child forwards its events to the root's queue tagged
- * with agent_id = the spawning call id, and closes itself after one turn.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -37,7 +30,6 @@
 #include <unistd.h>
 
 #define DEFAULT_MAX_ROUNDS 32
-#define AGENT_TOOL "agent"
 
 static const char DEFAULT_SYSTEM[] =
     "You are sope, a capable assistant embedded in a host application. Use the provided tools when they help. "
@@ -45,296 +37,9 @@ static const char DEFAULT_SYSTEM[] =
 
 static const sope_provider *const providers[] = { &sope__provider_mock, &sope__provider_openai };
 
-struct sope_call {
-    sope_agent_t *agent;
-    void *state;
-    uint64_t round;
-    int compaction;       /* summarizes `request` instead of the agent's history */
-    sope_history request; /* compaction only */
-    sope_buf text;
-    sope_tool_use *uses;
-    size_t n_uses, cap_uses;
-    int failed; /* an error was reported */
-};
-
 static sope_next next(sope_next_kind kind)
 {
     return (sope_next){ kind, 0 };
-}
-
-static uint64_t turn_id(sope_agent_t *a)
-{
-    return a->turn.msg->turn_id;
-}
-
-/* ------------------------------------------------------------------------ */
-/* history                                                                   */
-/* ------------------------------------------------------------------------ */
-
-static void tool_uses_free(sope_tool_use *uses, size_t n)
-{
-    size_t i;
-    for (i = 0; i < n; i++) {
-        free(uses[i].id);
-        free(uses[i].name);
-        free(uses[i].input);
-    }
-    free(uses);
-}
-
-static void message_free(sope_message *m)
-{
-    if (!m) return;
-    sope__images_free(m->images, m->n_images);
-    free(m->content);
-    tool_uses_free(m->tool_uses, m->n_tool_uses);
-    free(m->tool_use_id);
-    free(m->tool_name);
-    free(m);
-}
-
-static sope_message *message_new(sope_msg_role role, const char *content, size_t len)
-{
-    sope_message *m = calloc(1, sizeof *m);
-    if (!m) return NULL;
-    m->role = role;
-    m->content_len = len;
-    if (!(m->content = sope__strndup(content ? content : "", len))) {
-        free(m);
-        return NULL;
-    }
-    return m;
-}
-
-static void history_append(sope_history *h, sope_message *m)
-{
-    if (h->tail)
-        h->tail->next = m;
-    else
-        h->head = m;
-    h->tail = m;
-    h->count++;
-}
-
-void sope__history_clear(sope_history *h)
-{
-    while (h->head) {
-        sope_message *m = h->head;
-        h->head = m->next;
-        message_free(m);
-    }
-    h->tail = NULL;
-    h->count = 0;
-}
-
-static sope_message *tool_message(const sope_tool_use *u, const char *content, size_t len, int is_error)
-{
-    sope_message *m = message_new(SOPE__MSG_TOOL, content, len);
-    if (!m) return NULL;
-    m->is_error = is_error;
-    if (!(m->tool_use_id = sope__strdup(u->id)) || !(m->tool_name = sope__strdup(u->name))) {
-        message_free(m);
-        return NULL;
-    }
-    return m;
-}
-
-/* A turn that ends early may leave tool uses unanswered, which providers
- * reject on the next request; answer them so the history stays valid. */
-static void history_repair(sope_history *h)
-{
-    sope_message *asst = NULL, *m;
-    size_t i;
-    for (m = h->head; m; m = m->next)
-        if (m->role == SOPE__MSG_ASSISTANT) asst = m;
-    if (!asst || !asst->n_tool_uses) return;
-    for (i = 0; i < asst->n_tool_uses; i++) {
-        const sope_tool_use *u = &asst->tool_uses[i];
-        int answered = 0;
-        for (m = asst->next; m; m = m->next)
-            if (m->role == SOPE__MSG_TOOL && !strcmp(m->tool_use_id, u->id)) answered = 1;
-        if (!answered && (m = tool_message(u, "cancelled", 9, 1))) history_append(h, m);
-    }
-}
-
-/* ---- the history as JSON (sope_agent_history, sope_agent_load_history) ---- */
-
-static const char *const ROLE_NAMES[] = { "user", "assistant", "tool" };
-
-static void append_message_json(sope_buf *b, const sope_message *m)
-{
-    size_t i;
-    sope__buf_appendf(b, "{\"role\":\"%s\",\"content\":", ROLE_NAMES[m->role]);
-    sope__buf_append_json_string(b, m->content, m->content_len);
-    if (m->role == SOPE__MSG_ASSISTANT && m->n_tool_uses) {
-        sope__buf_appends(b, ",\"tool_uses\":[");
-        for (i = 0; i < m->n_tool_uses; i++) {
-            const sope_tool_use *u = &m->tool_uses[i];
-            sope__buf_appends(b, i ? ",{\"id\":" : "{\"id\":");
-            sope__buf_append_json_string(b, u->id, strlen(u->id));
-            sope__buf_appends(b, ",\"name\":");
-            sope__buf_append_json_string(b, u->name, strlen(u->name));
-            sope__buf_appends(b, ",\"input\":");
-            sope__buf_append_json_string(b, u->input, u->input_len);
-            sope__buf_appends(b, "}");
-        }
-        sope__buf_appends(b, "]");
-    }
-    if (m->role == SOPE__MSG_TOOL) {
-        sope__buf_appends(b, ",\"tool_use_id\":");
-        sope__buf_append_json_string(b, m->tool_use_id, strlen(m->tool_use_id));
-        sope__buf_appends(b, ",\"name\":");
-        sope__buf_append_json_string(b, m->tool_name, strlen(m->tool_name));
-        sope__buf_appends(b, m->is_error ? ",\"is_error\":true" : ",\"is_error\":false");
-    }
-    if (m->n_images) {
-        sope__buf_appends(b, ",\"images\":[");
-        for (i = 0; i < m->n_images; i++) {
-            sope__buf_appends(b, i ? ",{\"media_type\":" : "{\"media_type\":");
-            sope__buf_append_json_string(b, m->images[i].media_type, strlen(m->images[i].media_type));
-            sope__buf_appends(b, ",\"data\":\"");
-            sope__buf_append(b, m->images[i].data, m->images[i].len); /* base64 needs no escaping */
-            sope__buf_appends(b, "\"}");
-        }
-        sope__buf_appends(b, "]");
-    }
-    sope__buf_appends(b, "}");
-}
-
-char *sope__history_json(const sope_history *h, size_t *len)
-{
-    sope_buf b = { 0 };
-    const sope_message *m;
-    sope__buf_appends(&b, "[");
-    for (m = h->head; m; m = m->next) {
-        if (m != h->head) sope__buf_appends(&b, ",");
-        append_message_json(&b, m);
-    }
-    sope__buf_appends(&b, "]");
-    if (b.oom) {
-        sope__buf_free(&b);
-        return NULL;
-    }
-    *len = b.len;
-    return b.ptr;
-}
-
-/* A string member, copied; NULL if missing or not a string. */
-static char *dup_member(const sope_json *obj, const char *key, size_t *len)
-{
-    size_t n;
-    const char *v = sope__json_string(sope__json_get(obj, key), &n);
-    if (len) *len = v ? n : 0;
-    return v ? sope__strndup(v, n) : NULL;
-}
-
-/* One message of a history array; SOPE_EINVAL with err filled when it is
- * not one. */
-static int message_from_json(const sope_json *v, size_t index, sope_message **out, char *err, size_t cap)
-{
-    const sope_json *uses, *u, *flag;
-    const char *role, *content;
-    size_t content_len = 0, i;
-    sope_message *m;
-
-    *out = NULL;
-    role = v->type == SOPE_JSON_OBJECT ? sope__json_string(sope__json_get(v, "role"), NULL) : NULL;
-    content = role ? sope__json_string(sope__json_get(v, "content"), &content_len) : NULL;
-    if (!role) {
-        snprintf(err, cap, "message %zu: expected an object with a \"role\"", index);
-        return SOPE_EINVAL;
-    }
-    if (!strcmp(role, "user"))
-        m = message_new(SOPE__MSG_USER, content, content_len);
-    else if (!strcmp(role, "assistant"))
-        m = message_new(SOPE__MSG_ASSISTANT, content, content_len);
-    else if (!strcmp(role, "tool"))
-        m = message_new(SOPE__MSG_TOOL, content, content_len);
-    else {
-        snprintf(err, cap, "message %zu: unknown role \"%s\"", index, role);
-        return SOPE_EINVAL;
-    }
-    if (!m) return SOPE_ENOMEM;
-
-    if (m->role == SOPE__MSG_ASSISTANT && (uses = sope__json_get(v, "tool_uses")) && uses->count) {
-        if (uses->type != SOPE_JSON_ARRAY || !(m->tool_uses = calloc(uses->count, sizeof *m->tool_uses))) {
-            message_free(m);
-            if (uses->type == SOPE_JSON_ARRAY) return SOPE_ENOMEM;
-            snprintf(err, cap, "message %zu: \"tool_uses\" must be an array", index);
-            return SOPE_EINVAL;
-        }
-        for (u = uses->child, i = 0; u; u = u->next, i++) {
-            sope_tool_use *t = &m->tool_uses[i];
-            m->n_tool_uses = i + 1;
-            t->id = dup_member(u, "id", NULL);
-            t->name = dup_member(u, "name", NULL);
-            t->input = dup_member(u, "input", &t->input_len);
-            if (!t->id || !t->name || !t->input) {
-                message_free(m);
-                snprintf(err, cap, "message %zu: tool use %zu needs string \"id\", \"name\" and \"input\"", index, i);
-                return SOPE_EINVAL;
-            }
-        }
-    }
-    if ((uses = sope__json_get(v, "images")) && uses->count && m->role != SOPE__MSG_ASSISTANT) {
-        if (uses->type != SOPE_JSON_ARRAY || !(m->images = calloc(uses->count, sizeof *m->images))) {
-            message_free(m);
-            if (uses->type == SOPE_JSON_ARRAY) return SOPE_ENOMEM;
-            snprintf(err, cap, "message %zu: \"images\" must be an array", index);
-            return SOPE_EINVAL;
-        }
-        for (u = uses->child, i = 0; u; u = u->next, i++) {
-            sope_image *img = &m->images[i];
-            m->n_images = i + 1;
-            img->media_type = dup_member(u, "media_type", NULL);
-            img->data = dup_member(u, "data", &img->len);
-            if (!img->media_type || !img->data) {
-                message_free(m);
-                snprintf(err, cap, "message %zu: image %zu needs string \"media_type\" and \"data\" (base64)", index, i);
-                return SOPE_EINVAL;
-            }
-        }
-    }
-    if (m->role == SOPE__MSG_TOOL) {
-        m->tool_use_id = dup_member(v, "tool_use_id", NULL);
-        m->tool_name = dup_member(v, "name", NULL);
-        flag = sope__json_get(v, "is_error");
-        m->is_error = flag && flag->type == SOPE_JSON_BOOL && flag->boolean;
-        if (!m->tool_use_id || !m->tool_name) {
-            message_free(m);
-            snprintf(err, cap, "message %zu: a tool result needs string \"tool_use_id\" and \"name\"", index);
-            return SOPE_EINVAL;
-        }
-    }
-    *out = m;
-    return SOPE_OK;
-}
-
-int sope__history_parse(sope_history *out, const char *json, size_t len, char *err, size_t cap)
-{
-    sope_json *root = sope__json_parse(json, len);
-    const sope_json *v;
-    size_t i = 0;
-    int rc = SOPE_OK;
-
-    memset(out, 0, sizeof *out);
-    if (!root || root->type != SOPE_JSON_ARRAY) {
-        snprintf(err, cap, "expected a JSON array of messages");
-        sope__json_free(root);
-        return SOPE_EINVAL;
-    }
-    for (v = root->child; v && rc == SOPE_OK; v = v->next, i++) {
-        sope_message *m;
-        if ((rc = message_from_json(v, i, &m, err, cap)) == SOPE_OK) history_append(out, m);
-    }
-    sope__json_free(root);
-    if (rc != SOPE_OK) {
-        if (rc == SOPE_ENOMEM) snprintf(err, cap, "out of memory");
-        sope__history_clear(out);
-        return rc;
-    }
-    history_repair(out); /* a history saved mid-turn may end in unanswered tool uses */
-    return SOPE_OK;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -366,39 +71,11 @@ static int add_spec(turn_state *t, const char *name, const char *description, co
     return s->name && s->description && s->input_schema;
 }
 
-/* Describes the subagent types to the model; *mu held. */
+/* Offers `agent`, describing the subagent types; *mu held. */
 static int add_agent_spec_locked(sope_agent_t *a)
 {
     sope_buf desc = { 0 }, schema = { 0 };
-    subagent_def *d;
-    int ok;
-
-    sope__buf_appends(&desc,
-                      "Launch a subagent to handle a complex, multi-step task autonomously in its own context.\n\n"
-                      "Available agent types:\n");
-    for (d = a->root->subagents; d; d = d->next) sope__buf_appendf(&desc, "- %s: %s\n", d->name, d->description);
-    sope__buf_appends(&desc,
-                      "\nUsage notes:\n"
-                      "- Launch several agents concurrently whenever possible, using multiple agent tool calls in "
-                      "one response.\n"
-                      "- The subagent cannot see this conversation: give it a complete, self-contained task.\n"
-                      "- Its final report comes back to you as the tool result and is not shown to the user, so "
-                      "summarize what matters.");
-
-    sope__buf_appends(&schema,
-                      "{\"type\":\"object\",\"properties\":{"
-                      "\"description\":{\"type\":\"string\",\"description\":\"A short (3-5 word) description of the "
-                      "task\"},"
-                      "\"prompt\":{\"type\":\"string\",\"description\":\"The task for the agent to perform\"},"
-                      "\"subagent_type\":{\"type\":\"string\",\"description\":\"The type of agent to use; defaults "
-                      "to general-purpose\",\"enum\":[");
-    for (d = a->root->subagents; d; d = d->next) {
-        sope__buf_append_json_string(&schema, d->name, strlen(d->name));
-        if (d->next) sope__buf_appends(&schema, ",");
-    }
-    sope__buf_appends(&schema, "]}},\"required\":[\"description\",\"prompt\"]}");
-
-    ok = !desc.oom && !schema.oom && add_spec(&a->turn, AGENT_TOOL, desc.ptr, schema.ptr);
+    int ok = sope__subagent_spec_locked(a, &desc, &schema) && add_spec(&a->turn, SOPE__AGENT_TOOL, desc.ptr, schema.ptr);
     sope__buf_free(&desc);
     sope__buf_free(&schema);
     return ok;
@@ -514,7 +191,7 @@ static int begin_turn(sope_agent_t *a)
     t->provider = find_provider(provider ? provider : "mock");
     if (!t->system && ok) ok = (t->system = sope__strdup(DEFAULT_SYSTEM)) != NULL;
 
-    user = ok && !m->compact ? message_new(SOPE__MSG_USER, m->text, m->len) : NULL;
+    user = ok && !m->compact ? sope__message_new(SOPE__MSG_USER, m->text, m->len) : NULL;
     if (user) { /* the attached images move into the message */
         user->images = m->images;
         user->n_images = m->n_images;
@@ -525,7 +202,7 @@ static int begin_turn(sope_agent_t *a)
         sope__push_event(a, SOPE_EVENT_ERROR, m->turn_id, 0, SOPE_ENOMEM, NULL, 0, "out of memory", 13);
         finish_turn(a, SOPE_STOP_ERROR);
     } else {
-        if (user) history_append(&a->history, user);
+        if (user) sope__history_append(&a->history, user);
         if (!t->provider) {
             char msg[128];
             int n = snprintf(msg, sizeof msg, "unknown provider '%s'", provider);
@@ -542,24 +219,6 @@ static int begin_turn(sope_agent_t *a)
     return 1;
 }
 
-static void call_free(sope_call *c)
-{
-    if (!c) return;
-    sope__history_clear(&c->request);
-    sope__buf_free(&c->text);
-    tool_uses_free(c->uses, c->n_uses);
-    free(c);
-}
-
-static void pending_free(pending_call *p)
-{
-    sope__tool_run_discard(p->run); /* still waiting for sope_permit */
-    sope__images_free(p->images, p->n_images);
-    free(p->name);
-    free(p->content);
-    free(p);
-}
-
 /* Removes the pending calls of agent `a`, ending the tool calls the host
  * still sees as open; *mu held. */
 static void drop_pending_locked(sope_agent_t *a)
@@ -572,7 +231,7 @@ static void drop_pending_locked(sope_agent_t *a)
             if (!p->done && p->kind != PENDING_SUBAGENT)
                 sope__push_event_locked(a, SOPE_EVENT_TOOL_END, p->turn_id, p->call_id, 1, p->name, strlen(p->name),
                                         "Cancelled.", 10);
-            pending_free(p);
+            sope__pending_free(p);
         } else {
             pp = &p->next;
         }
@@ -582,14 +241,14 @@ static void drop_pending_locked(sope_agent_t *a)
 static void finish_turn(sope_agent_t *a, int32_t stop)
 {
     turn_state *t = &a->turn;
-    uint64_t id = turn_id(a);
+    uint64_t id = sope__turn_id(a);
 
     if (t->call) {
         if (t->call->state) t->provider->finish(t->call->state);
-        call_free(t->call);
+        sope__call_free(t->call);
     }
-    if (t->held) history_append(&a->history, t->held); /* cancelled while compacting */
-    if (stop != SOPE_STOP_END_TURN) history_repair(&a->history);
+    if (t->held) sope__history_append(&a->history, t->held); /* cancelled while compacting */
+    if (stop != SOPE_STOP_END_TURN) sope__history_repair(&a->history);
 
     pthread_mutex_lock(a->mu);
     drop_pending_locked(a); /* late sope_tool_result calls now get ENOTFOUND */
@@ -608,206 +267,12 @@ static void finish_turn(sope_agent_t *a, int32_t stop)
 }
 
 /* ------------------------------------------------------------------------ */
-/* subagents                                                                 */
-/* ------------------------------------------------------------------------ */
-
-static void child_closed(sope_task *task);
-
-static const sope_message *last_assistant(const sope_history *h)
-{
-    const sope_message *m, *last = NULL;
-    for (m = h->head; m; m = m->next)
-        if (m->role == SOPE__MSG_ASSISTANT) last = m;
-    return last;
-}
-
-static int copy_options_locked(sope_agent_t *dst, const sope_agent_t *src)
-{
-    const option_kv *kv;
-    for (kv = src->options; kv; kv = kv->next) {
-        option_kv *c = calloc(1, sizeof *c);
-        if (!c || !(c->key = sope__strdup(kv->key)) || !(c->value = sope__strdup(kv->value))) {
-            if (c) free(c->key);
-            free(c);
-            return 0;
-        }
-        c->next = dst->options;
-        dst->options = c;
-    }
-    return 1;
-}
-
-static int set_child_option(sope_agent_t *child, const char *key, const char *value)
-{
-    option_kv *kv;
-    for (kv = child->options; kv; kv = kv->next)
-        if (!strcmp(kv->key, key)) break;
-    if (!kv) {
-        if (!(kv = calloc(1, sizeof *kv)) || !(kv->key = sope__strdup(key))) {
-            free(kv);
-            return 0;
-        }
-        kv->next = child->options;
-        child->options = kv;
-    }
-    free(kv->value);
-    return (kv->value = sope__strdup(value)) != NULL;
-}
-
-static int def_allows(const subagent_def *d, const char *tool)
-{
-    size_t i;
-    if (!d->tools) return 1;
-    for (i = 0; i < d->n_tools; i++)
-        if (!strcmp(d->tools[i], tool) || !strcmp(d->tools[i], "*")) return 1;
-    return 0;
-}
-
-/* Builds and starts a child for one `agent` tool use. On failure returns a
- * static error message for the tool result. */
-static const char *spawn_subagent(sope_agent_t *a, const sope_tool_use *u)
-{
-    sope_json *input = sope__json_parse(u->input, u->input_len);
-    const char *prompt = sope__json_string(sope__json_get(input, "prompt"), NULL);
-    const char *type = sope__json_string(sope__json_get(input, "subagent_type"), NULL);
-    const char *err = NULL;
-    sope_agent_t *child = NULL;
-    const subagent_def *d;
-    const tool_def *td;
-    tool_def **tail;
-    char rounds[16], name[65];
-
-    if (!prompt) {
-        sope__json_free(input);
-        return "invalid input: \"prompt\" (string) is required";
-    }
-    if (!type || !*type) type = "general-purpose";
-
-    pthread_mutex_lock(a->mu);
-    for (d = a->root->subagents; d; d = d->next)
-        if (!strcmp(d->name, type)) break;
-    if (!d) {
-        err = "unknown subagent_type";
-        goto unlock;
-    }
-    snprintf(name, sizeof name, "%s", d->name); /* d may be replaced once we unlock */
-    if (!(child = calloc(1, sizeof *child)) || !copy_options_locked(child, a) ||
-        !set_child_option(child, "system", d->system_prompt) || (d->model && !set_child_option(child, "model", d->model)))
-        goto oom;
-    if (d->max_rounds > 0) {
-        snprintf(rounds, sizeof rounds, "%d", (int)d->max_rounds);
-        if (!set_child_option(child, "max_rounds", rounds)) goto oom;
-    }
-    if (d->tools) {
-        size_t i;
-        if (!(child->tool_filter = calloc(d->n_tools ? d->n_tools : 1, sizeof *child->tool_filter))) goto oom;
-        for (i = 0; i < d->n_tools; i++) {
-            if (!(child->tool_filter[i] = sope__strdup(d->tools[i]))) goto oom;
-            child->n_tool_filter++;
-        }
-    }
-    tail = &child->tools;
-    for (td = a->tools; td; td = td->next) {
-        tool_def *c;
-        if (!def_allows(d, td->name)) continue;
-        if (!(c = calloc(1, sizeof *c))) goto oom;
-        *tail = c;
-        tail = &c->next;
-        if (!(c->name = sope__strdup(td->name)) || !(c->description = sope__strdup(td->description)) ||
-            !(c->input_schema = sope__strdup(td->input_schema)))
-            goto oom;
-    }
-    if (!(child->in_head = calloc(1, sizeof *child->in_head)) ||
-        !(child->in_head->text = sope__strdup(prompt)))
-        goto oom;
-    goto unlock;
-
-oom:
-    err = "out of memory";
-unlock:
-    pthread_mutex_unlock(a->mu);
-    if (err) {
-        if (child) sope__agent_free_memory(child); /* root is NULL: freed as an unattached child */
-        sope__json_free(input);
-        return err;
-    }
-
-    child->root = a->root;
-    child->parent = a;
-    child->mu = a->mu;
-    child->agent_id = u->call_id;
-    child->parent_turn_id = turn_id(a);
-    child->in_head->turn_id = child->next_turn_id = 1;
-    child->in_head->len = strlen(prompt);
-    child->in_tail = child->in_head;
-    sope__task_init(&child->task, sope__agent_run, child);
-    child->task.on_closed = child_closed;
-    sope__json_free(input);
-
-    sope__pool_acquire(); /* cannot fail: the pool is running */
-    sope__push_event(a, SOPE_EVENT_SUBAGENT_START, turn_id(a), u->call_id, 0, name, strlen(name), u->input,
-                     u->input_len);
-    pthread_mutex_lock(a->mu);
-    child->sibling = a->children;
-    a->children = child;
-    pthread_mutex_unlock(a->mu);
-    sope__task_wake(&child->task);
-    return NULL;
-}
-
-/* Runs on a pool thread once a child closed: hands its final message to the
- * parent as the `agent` tool result, then frees the child. */
-static void child_closed(sope_task *task)
-{
-    sope_agent_t *child = task->owner, *parent = child->parent, **pp;
-    const sope_message *last = last_assistant(&child->history);
-    int32_t stop = child->turns_finished ? child->last_stop : SOPE_STOP_CANCELLED;
-    sope_buf result = { 0 };
-    pending_call *p;
-
-    if (stop != SOPE_STOP_END_TURN)
-        sope__buf_appends(&result, stop == SOPE_STOP_CANCELLED ? "Subagent was cancelled." : "Subagent failed.");
-    if (last && last->content_len) {
-        if (result.len) sope__buf_appends(&result, " Partial output:\n");
-        sope__buf_append(&result, last->content, last->content_len);
-    }
-    if (!result.len) sope__buf_appends(&result, "(no output)");
-
-    sope__push_event(parent, SOPE_EVENT_SUBAGENT_END, child->parent_turn_id, child->agent_id, stop, NULL, 0,
-                     result.oom ? "" : result.ptr, result.oom ? 0 : result.len);
-
-    pthread_mutex_lock(child->mu);
-    for (p = child->root->pending; p; p = p->next)
-        if (p->call_id == child->agent_id && p->kind == PENDING_SUBAGENT) break;
-    if (p && !result.oom) {
-        p->content = result.ptr; /* ownership moves to the pending entry */
-        p->len = result.len;
-        result.ptr = NULL;
-    }
-    if (p) {
-        p->is_error = stop != SOPE_STOP_END_TURN || result.oom;
-        p->done = 1;
-    }
-    for (pp = &parent->children; *pp; pp = &(*pp)->sibling)
-        if (*pp == child) {
-            *pp = child->sibling;
-            break;
-        }
-    sope__task_wake(&parent->task);
-    pthread_mutex_unlock(child->mu);
-
-    sope__buf_free(&result);
-    sope__agent_free_memory(child);
-    sope__pool_release();
-}
-
-/* ------------------------------------------------------------------------ */
 /* rounds                                                                    */
 /* ------------------------------------------------------------------------ */
 
 static void turn_error(sope_agent_t *a, int code, const char *msg)
 {
-    sope__push_event(a, SOPE_EVENT_ERROR, turn_id(a), 0, code, NULL, 0, msg, strlen(msg));
+    sope__push_event(a, SOPE_EVENT_ERROR, sope__turn_id(a), 0, code, NULL, 0, msg, strlen(msg));
 }
 
 static sope_next start_compact(sope_agent_t *a);
@@ -828,13 +293,11 @@ static sope_next start_call(sope_agent_t *a)
         finish_turn(a, SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);
     }
-    if (!(c = calloc(1, sizeof *c))) {
+    if (!(c = sope__call_new(a, t->round, 0))) {
         turn_error(a, SOPE_ENOMEM, "out of memory");
         finish_turn(a, SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);
     }
-    c->agent = a;
-    c->round = t->round;
     t->call = c;
     t->phase = PHASE_CALL;
     if (!(c->state = t->provider->start(c))) {
@@ -842,6 +305,105 @@ static sope_next start_call(sope_agent_t *a)
         finish_turn(a, SOPE_STOP_ERROR);
     }
     return next(SOPE__NEXT_CONTINUE);
+}
+
+/* Runs built-in call u, or asks the host first (p->run waits for
+ * sope_permit). Returns NULL, or why it did not run (in `why` if not static). */
+static const char *start_builtin(sope_agent_t *a, pending_call *p, const sope_tool_use *u, const sope_builtin *b,
+                                 char *why, size_t cap)
+{
+    permit_mode permit = a->turn.permit;
+    tool_run *r = sope__tool_run_new(a, b, u->call_id, u->input, u->input_len);
+
+    if (!r) return "out of memory";
+    if (!b->ask || permit == PERMIT_ALLOW) {
+        sope__tool_run_start(r);
+    } else if (permit == PERMIT_DENY) {
+        sope__tool_run_discard(r);
+        snprintf(why, cap,
+                 "%s is not allowed here (the host runs this agent with permissions=deny). Tell the user what you "
+                 "would do instead.",
+                 u->name);
+        return why;
+    } else {
+        pthread_mutex_lock(a->mu);
+        p->run = r; /* sope_permit starts or discards it */
+        pthread_mutex_unlock(a->mu);
+        sope__push_event(a, SOPE_EVENT_PERMISSION, sope__turn_id(a), u->call_id, 0, u->name, strlen(u->name),
+                         u->input, u->input_len);
+    }
+    return NULL;
+}
+
+/* Sets one tool use of the model's response going, as a pending call the
+ * turn waits for: a built-in runs as a task, `agent` spawns a subagent, a
+ * host tool goes to the host (SOPE_EVENT_TOOL_CALL). Returns 0 on out of
+ * memory. */
+static int dispatch(sope_agent_t *a, sope_tool_use *u)
+{
+    turn_state *t = &a->turn;
+    pending_call *p = calloc(1, sizeof *p);
+    const sope_builtin *builtin = NULL;
+    const char *err = NULL;
+    char why[256];
+    int offered = 0, is_agent;
+    size_t k;
+
+    /* Models sometimes call tools they were not offered; answer those
+     * ourselves instead of bothering the host. */
+    for (k = 0; k < t->n_specs; k++)
+        if (!strcmp(t->specs[k].name, u->name)) {
+            offered = 1;
+            builtin = t->spec_builtin[k];
+        }
+    is_agent = offered && !strcmp(u->name, SOPE__AGENT_TOOL);
+
+    pthread_mutex_lock(a->mu);
+    u->call_id = ++a->root->next_call_id;
+    if (p && (p->name = sope__strdup(u->name))) {
+        p->call_id = u->call_id;
+        p->turn_id = sope__turn_id(a);
+        p->owner = a;
+        p->kind = is_agent ? PENDING_SUBAGENT : builtin ? PENDING_BUILTIN : PENDING_TOOL;
+        p->next = a->root->pending;
+        a->root->pending = p;
+    } else if (p) {
+        free(p);
+        p = NULL;
+    }
+    pthread_mutex_unlock(a->mu);
+    if (!p) return 0;
+
+    if (!*u->id) { /* some providers omit ids; they are needed to pair results */
+        char id[32];
+        snprintf(id, sizeof id, "call_%" PRIu64, u->call_id);
+        free(u->id);
+        u->id = sope__strdup(id);
+    }
+
+    if (!offered) {
+        err = "no such tool is available";
+    } else if (is_agent) {
+        err = sope__subagent_spawn(a, u);
+    } else if (builtin) {
+        sope__push_event(a, SOPE_EVENT_TOOL_START, sope__turn_id(a), u->call_id, 0, u->name, strlen(u->name),
+                         u->input, u->input_len);
+        if ((err = start_builtin(a, p, u, builtin, why, sizeof why))) /* announced: it ends like every built-in */
+            sope__push_event(a, SOPE_EVENT_TOOL_END, sope__turn_id(a), u->call_id, 1, u->name, strlen(u->name), err,
+                             strlen(err));
+    } else {
+        sope__push_event(a, SOPE_EVENT_TOOL_CALL, sope__turn_id(a), u->call_id, 0, u->name, strlen(u->name),
+                         u->input, u->input_len);
+    }
+    if (err) { /* answer the model directly: it can fix its input and retry */
+        pthread_mutex_lock(a->mu);
+        p->content = sope__strdup(err);
+        p->len = p->content ? strlen(err) : 0;
+        p->is_error = 1;
+        p->done = 1;
+        pthread_mutex_unlock(a->mu);
+    }
+    return 1;
 }
 
 /* The model call finished: record the assistant message and dispatch its tool uses. */
@@ -860,7 +422,7 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
         return next(SOPE__NEXT_CONTINUE);
     }
 
-    if (!(asst = message_new(SOPE__MSG_ASSISTANT, c->text.ptr, c->text.len))) {
+    if (!(asst = sope__message_new(SOPE__MSG_ASSISTANT, c->text.ptr, c->text.len))) {
         turn_error(a, SOPE_ENOMEM, "out of memory");
         finish_turn(a, SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);
@@ -869,9 +431,9 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
     asst->n_tool_uses = c->n_uses;
     c->uses = NULL;
     c->n_uses = 0;
-    call_free(c);
+    sope__call_free(c);
     t->call = NULL;
-    history_append(&a->history, asst);
+    sope__history_append(&a->history, asst);
 
     if (!asst->n_tool_uses) {
         finish_turn(a, SOPE_STOP_END_TURN);
@@ -880,93 +442,12 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
 
     t->asst = asst;
     t->phase = PHASE_TOOLS;
-    for (i = 0; i < asst->n_tool_uses; i++) {
-        sope_tool_use *u = &asst->tool_uses[i];
-        pending_call *p = calloc(1, sizeof *p);
-        const sope_builtin *builtin = NULL;
-        const char *err = NULL;
-        char denied[256];
-        int offered = 0, is_agent;
-        size_t k;
-
-        /* Models sometimes call tools they were not offered; answer those
-         * ourselves instead of bothering the host. */
-        for (k = 0; k < t->n_specs; k++)
-            if (!strcmp(t->specs[k].name, u->name)) {
-                offered = 1;
-                builtin = t->spec_builtin[k];
-            }
-        is_agent = offered && !strcmp(u->name, AGENT_TOOL);
-
-        pthread_mutex_lock(a->mu);
-        u->call_id = ++a->root->next_call_id;
-        if (p && (p->name = sope__strdup(u->name))) {
-            p->call_id = u->call_id;
-            p->turn_id = turn_id(a);
-            p->owner = a;
-            p->kind = is_agent ? PENDING_SUBAGENT : builtin ? PENDING_BUILTIN : PENDING_TOOL;
-            p->next = a->root->pending;
-            a->root->pending = p;
-        } else if (p) {
-            free(p);
-            p = NULL;
-        }
-        pthread_mutex_unlock(a->mu);
-        if (!p) {
+    for (i = 0; i < asst->n_tool_uses; i++)
+        if (!dispatch(a, &asst->tool_uses[i])) {
             turn_error(a, SOPE_ENOMEM, "out of memory");
             finish_turn(a, SOPE_STOP_ERROR);
             return next(SOPE__NEXT_CONTINUE);
         }
-
-        if (!*u->id) { /* some providers omit ids; they are needed to pair results */
-            char id[32];
-            snprintf(id, sizeof id, "call_%" PRIu64, u->call_id);
-            free(u->id);
-            u->id = sope__strdup(id);
-        }
-
-        if (!offered) {
-            err = "no such tool is available";
-        } else if (is_agent) {
-            err = spawn_subagent(a, u);
-        } else if (builtin) {
-            tool_run *r;
-            sope__push_event(a, SOPE_EVENT_TOOL_START, turn_id(a), u->call_id, 0, u->name, strlen(u->name), u->input,
-                             u->input_len);
-            if (!(r = sope__tool_run_new(a, builtin, u->call_id, u->input, u->input_len))) {
-                err = "out of memory";
-            } else if (!builtin->ask || t->permit == PERMIT_ALLOW) {
-                sope__tool_run_start(r);
-            } else if (t->permit == PERMIT_DENY) {
-                sope__tool_run_discard(r);
-                snprintf(denied, sizeof denied,
-                         "%s is not allowed here (the host runs this agent with permissions=deny). Tell the user "
-                         "what you would do instead.",
-                         u->name);
-                err = denied;
-            } else {
-                pthread_mutex_lock(a->mu);
-                p->run = r; /* sope_permit starts or discards it */
-                pthread_mutex_unlock(a->mu);
-                sope__push_event(a, SOPE_EVENT_PERMISSION, turn_id(a), u->call_id, 0, u->name, strlen(u->name),
-                                 u->input, u->input_len);
-            }
-            if (err) /* it was announced, so it ends like every built-in call */
-                sope__push_event(a, SOPE_EVENT_TOOL_END, turn_id(a), u->call_id, 1, u->name, strlen(u->name), err,
-                                 strlen(err));
-        } else {
-            sope__push_event(a, SOPE_EVENT_TOOL_CALL, turn_id(a), u->call_id, 0, u->name, strlen(u->name), u->input,
-                             u->input_len);
-        }
-        if (err) { /* answer the model directly: it can fix its input and retry */
-            pthread_mutex_lock(a->mu);
-            p->content = sope__strdup(err);
-            p->len = p->content ? strlen(err) : 0;
-            p->is_error = 1;
-            p->done = 1;
-            pthread_mutex_unlock(a->mu);
-        }
-    }
     return next(SOPE__NEXT_CONTINUE);
 }
 
@@ -994,23 +475,22 @@ static sope_next collect_tools(sope_agent_t *a)
         while (*pp && (*pp)->call_id != u->call_id) pp = &(*pp)->next;
         p = *pp;
         if (p) *pp = p->next;
-        m = p ? tool_message(u, p->content ? p->content : "", p->len, p->is_error)
-              : tool_message(u, "(no result)", 11, 1);
+        m = p ? sope__tool_message(u, p->content ? p->content : "", p->len, p->is_error)
+              : sope__tool_message(u, "(no result)", 11, 1);
         if (m && p && p->n_images) {
             m->images = p->images;
             m->n_images = p->n_images;
             p->images = NULL;
             p->n_images = 0;
         }
-        if (m) history_append(&a->history, m);
-        if (p) pending_free(p);
+        if (m) sope__history_append(&a->history, m);
+        if (p) sope__pending_free(p);
     }
     pthread_mutex_unlock(a->mu);
 
     t->asst = NULL;
     return start_call(a);
 }
-
 
 /* ------------------------------------------------------------------------ */
 /* compaction                                                                */
@@ -1033,35 +513,27 @@ static sope_next start_compact(sope_agent_t *a)
     if (!m->compact && t->round == 0 && a->history.count > 1) {
         /* Compacting before the turn's first call: summarize what came
          * before and keep the new request verbatim after the summary. */
-        sope_message **pp = &a->history.head;
-        while ((*pp)->next) pp = &(*pp)->next;
-        t->held = *pp;
-        *pp = NULL;
-        a->history.count--;
-        for (a->history.tail = a->history.head; a->history.tail->next;) a->history.tail = a->history.tail->next;
+        t->held = sope__history_pop(&a->history);
     }
     text = sope__compact_request(&a->history, m->compact ? m->text : NULL, m->compact ? m->len : 0, &len);
-    if (text) req = message_new(SOPE__MSG_USER, text, len);
+    if (text) req = sope__message_new(SOPE__MSG_USER, text, len);
     free(text);
-    if (!req || !(c = calloc(1, sizeof *c))) {
-        message_free(req);
+    if (!req || !(c = sope__call_new(a, t->round, 1))) {
+        sope__message_free(req);
         turn_error(a, SOPE_ENOMEM, "out of memory");
         finish_turn(a, SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);
     }
-    c->agent = a;
-    c->round = t->round;
-    c->compaction = 1;
-    history_append(&c->request, req);
+    sope__history_append(&c->request, req);
     t->call = c;
     t->phase = PHASE_COMPACT;
-    sope__push_event(a, SOPE_EVENT_LOG, turn_id(a), 0, SOPE_LOG_INFO, NULL, 0, "compacting the conversation",
+    sope__push_event(a, SOPE_EVENT_LOG, sope__turn_id(a), 0, SOPE_LOG_INFO, NULL, 0, "compacting the conversation",
                      strlen("compacting the conversation"));
     if (!(c->state = t->provider->start(c))) {
         if (!c->failed) turn_error(a, SOPE_ERROR, "provider failed to start");
-        call_free(c);
+        sope__call_free(c);
         t->call = NULL;
-        if (t->held) history_append(&a->history, t->held);
+        if (t->held) sope__history_append(&a->history, t->held);
         t->held = NULL;
         if (m->compact) {
             finish_turn(a, SOPE_STOP_ERROR);
@@ -1093,24 +565,24 @@ static sope_next end_compact(sope_agent_t *a, int32_t rc)
     }
     if (ok) {
         text = sope__compact_summary(c->text.ptr, c->text.len, !manual && !t->held, &len);
-        if (!text || !(summary = message_new(SOPE__MSG_USER, text, len))) {
+        if (!text || !(summary = sope__message_new(SOPE__MSG_USER, text, len))) {
             turn_error(a, SOPE_ENOMEM, "out of memory");
             ok = 0;
         }
     }
     if (ok) {
         sope__history_clear(&a->history);
-        history_append(&a->history, summary);
+        sope__history_append(&a->history, summary);
     }
-    if (t->held) history_append(&a->history, t->held);
+    if (t->held) sope__history_append(&a->history, t->held);
     t->held = NULL;
     if (ok) {
         a->context_tokens = len / 4; /* rough until the next call reports usage */
-        sope__push_event(a, SOPE_EVENT_COMPACT, turn_id(a), 0, 0, manual ? "manual" : "auto",
+        sope__push_event(a, SOPE_EVENT_COMPACT, sope__turn_id(a), 0, 0, manual ? "manual" : "auto",
                          manual ? 6 : 4, c->text.ptr, c->text.len);
     }
     free(text);
-    call_free(c);
+    sope__call_free(c);
     t->call = NULL;
     t->phase = PHASE_START;
 
@@ -1152,7 +624,7 @@ static sope_next abort_turn(sope_agent_t *a)
 
     if (a->turn.call) {
         if (a->turn.call->state) a->turn.provider->finish(a->turn.call->state);
-        call_free(a->turn.call);
+        sope__call_free(a->turn.call);
         a->turn.call = NULL;
     }
     pthread_mutex_lock(a->mu);
@@ -1213,136 +685,4 @@ sope_next sope__agent_run(sope_task *task)
     if (closing || (a->parent && a->turns_finished > 0)) return close_agent(a);
     if (!begin_turn(a)) return next(SOPE__NEXT_WAIT);
     return next(SOPE__NEXT_CONTINUE);
-}
-
-/* ------------------------------------------------------------------------ */
-/* sope_call: the provider's view of a model call                            */
-/* ------------------------------------------------------------------------ */
-
-const sope_history *sope__call_history(sope_call *c)
-{
-    return c->compaction ? &c->request : &c->agent->history;
-}
-
-const char *sope__call_system(sope_call *c)
-{
-    return c->compaction ? sope__compact_system : c->agent->turn.system;
-}
-
-size_t sope__call_tool_count(sope_call *c)
-{
-    return c->compaction ? 0 : c->agent->turn.n_specs;
-}
-
-const sope_tool_spec *sope__call_tool(sope_call *c, size_t i)
-{
-    return i < sope__call_tool_count(c) ? &c->agent->turn.specs[i] : NULL;
-}
-
-int sope__call_has_tool(sope_call *c, const char *name)
-{
-    size_t i;
-    if (!c) return 0;
-    for (i = 0; i < sope__call_tool_count(c); i++)
-        if (!strcmp(c->agent->turn.specs[i].name, name)) return 1;
-    return 0;
-}
-
-char *sope__call_option(sope_call *c, const char *key)
-{
-    char *v;
-    pthread_mutex_lock(c->agent->mu);
-    v = sope__option_dup_locked(c->agent, key);
-    pthread_mutex_unlock(c->agent->mu);
-    return v;
-}
-
-sope_task *sope__call_task(sope_call *c)
-{
-    return &c->agent->task;
-}
-
-uint64_t sope__call_round(sope_call *c)
-{
-    return c->round;
-}
-
-int sope__call_is_compaction(sope_call *c)
-{
-    return c->compaction;
-}
-
-void sope__call_text(sope_call *c, const char *s, size_t n)
-{
-    if (!n) return;
-    sope__buf_append(&c->text, s, n);
-    if (c->compaction) return; /* the summary is delivered with SOPE_EVENT_COMPACT */
-    sope__push_event(c->agent, SOPE_EVENT_TEXT_DELTA, turn_id(c->agent), 0, 0, NULL, 0, s, n);
-}
-
-void sope__call_thinking(sope_call *c, const char *s, size_t n)
-{
-    if (!n || c->compaction) return;
-    sope__push_event(c->agent, SOPE_EVENT_THINKING_DELTA, turn_id(c->agent), 0, 0, NULL, 0, s, n);
-}
-
-int sope__call_tool_use(sope_call *c, const char *id, const char *name, const char *input, size_t input_len)
-{
-    sope_tool_use *u;
-    if (c->n_uses == c->cap_uses) {
-        size_t cap = c->cap_uses ? c->cap_uses * 2 : 4;
-        sope_tool_use *uses = realloc(c->uses, cap * sizeof *uses);
-        if (!uses) return SOPE_ENOMEM;
-        c->uses = uses;
-        c->cap_uses = cap;
-    }
-    u = &c->uses[c->n_uses];
-    memset(u, 0, sizeof *u);
-    u->id = sope__strdup(id ? id : "");
-    u->name = sope__strdup(name);
-    u->input = sope__strndup(input_len ? input : "{}", input_len ? input_len : 2);
-    u->input_len = input_len ? input_len : 2;
-    if (!u->id || !u->name || !u->input) {
-        free(u->id);
-        free(u->name);
-        free(u->input);
-        return SOPE_ENOMEM;
-    }
-    c->n_uses++;
-    return SOPE_OK;
-}
-
-void sope__call_usage(sope_call *c, uint64_t input_tokens, uint64_t output_tokens)
-{
-    char buf[96];
-    int n = snprintf(buf, sizeof buf, "{\"input_tokens\":%" PRIu64 ",\"output_tokens\":%" PRIu64 "}", input_tokens,
-                     output_tokens);
-    if (!c->compaction) c->agent->context_tokens = input_tokens + output_tokens;
-    sope__push_event(c->agent, SOPE_EVENT_USAGE, turn_id(c->agent), 0, 0, NULL, 0, buf, (size_t)n);
-}
-
-static void push_formatted(sope_call *c, uint32_t type, int32_t code, const char *fmt, va_list ap)
-{
-    char buf[2048];
-    int n = vsnprintf(buf, sizeof buf, fmt, ap);
-    if (n < 0) n = 0;
-    if ((size_t)n >= sizeof buf) n = (int)sizeof buf - 1;
-    sope__push_event(c->agent, type, turn_id(c->agent), 0, code, NULL, 0, buf, (size_t)n);
-}
-
-void sope__call_log(sope_call *c, int level, const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    push_formatted(c, SOPE_EVENT_LOG, level, fmt, ap);
-    va_end(ap);
-}
-
-void sope__call_error(sope_call *c, int code, const char *fmt, ...)
-{
-    va_list ap;
-    c->failed = 1;
-    va_start(ap, fmt);
-    push_formatted(c, SOPE_EVENT_ERROR, code, fmt, ap);
-    va_end(ap);
 }

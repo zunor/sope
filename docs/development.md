@@ -25,11 +25,17 @@ cmake -S . -B build-thread -DSOPE_SANITIZE=thread && cmake --build build-thread 
 ```
 include/sope.h        Public header: the ABI itself
 src/
-  agent.c            Public API, event queue, readable fd, lifecycle
-  loop.c             Turn state machine (agent loop), subagents, compaction
+  agent.c            Public API, options, event queue, readable fd, pending calls, lifecycle
+  loop.c             Turn state machine (agent loop): rounds, tool dispatch, compaction
+  call.c             sope_call: a model call as a provider sees it
+  subagent.c         Subagent types and the children the `agent` tool spawns
+  history.c          Messages, the conversation, and its JSON form
   compact.c          Compaction prompts and conversation transcripts
-  tools.c            Built-in tools: registry, execution tasks, permissions, read/write/edit, bash, todo_write
-  search.c, web.c    glob/grep (.gitignore, glob patterns, regex rewriting), web_fetch (HTML to text)
+  tools.c            Built-in tool registry, the run task, helpers shared by tools
+  tool_*.c           One tool family each, with its descriptions and schemas: file (read/write/edit),
+                     search (glob/grep, regex rewriting), bash (and background shells), web (web_fetch,
+                     HTML to text), todo
+  walk.c             Glob patterns, .gitignore, and the tree walk behind glob and grep
   pool.c             Shared thread pool and timers
   http.c             libcurl multi I/O thread (the only file that uses libcurl)
   proc.c             Child processes: new sessions, merged output, reaper thread

@@ -1,30 +1,19 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * search.c - the glob and grep tools: walking a tree the way a developer
- * expects (hidden files, .git, node_modules and .gitignore'd paths are
- * skipped), glob patterns, and a regex dialect close to what models write.
- *
- * Patterns: * and ? stay within one path segment, ** spans any number of
- * them ("**" + "/" also matches no directory at all), [...] is a character
- * class and {a,b} alternatives (nesting allowed).
- *
- * .gitignore support covers what real projects use: comments, negation (!),
- * directory-only rules (trailing /), anchored rules (containing /) and the
- * files of every directory from the repository root down.
+ * tool_search.c - glob and grep, over the files walk.c finds (patterns,
+ * .gitignore and the walk itself are there).
  *
  * Regexes are POSIX extended, after rewriting the Perl-isms models reach
  * for: \d \w \s (and capitals), (?i), (?:...) and lazy quantifiers.
  */
 #if defined(__APPLE__)
-#  define _DARWIN_C_SOURCE /* REG_ENHANCED, d_type */
+#  define _DARWIN_C_SOURCE /* REG_ENHANCED */
 #else
-#  define _DEFAULT_SOURCE /* d_type */
+#  define _DEFAULT_SOURCE
 #endif
 
 #include "tools.h"
 
-#include <dirent.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <regex.h>
 #include <stdio.h>
@@ -38,334 +27,48 @@
 #define GREP_DEFAULT_LIMIT 250
 #define GREP_MAX_FILE (20 * 1024 * 1024)
 #define GREP_MAX_LINE 500
-#define WALK_MAX_ENTRIES 500000
-#define MAX_PATTERNS 64
 
-/* ------------------------------------------------------------------------ */
-/* glob patterns                                                             */
-/* ------------------------------------------------------------------------ */
+static const char GLOB_DESC[] =
+    "Finds files by path pattern, such as \"**/*.ts\" or \"src/**/test_*.c\".\n\n"
+    "Usage:\n"
+    "- Patterns support *, ?, [abc], {a,b} and ** (any number of directories). A pattern without a slash, "
+    "such as \"*.c\", matches files directly in the search directory only; use \"**/*.c\" to search below it.\n"
+    "- Returns matching paths, most recently modified first, at most 100.\n"
+    "- Hidden files and paths ignored by .gitignore are skipped.\n"
+    "- Use it instead of find or ls -R. For open-ended searches that need several rounds of glob and grep, "
+    "use the agent tool.";
+static const char GLOB_SCHEMA[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"pattern\":{\"type\":\"string\",\"description\":\"The pattern to match paths against\"},"
+    "\"path\":{\"type\":\"string\",\"description\":\"The directory to search (default: the working "
+    "directory)\"}},"
+    "\"required\":[\"pattern\"]}";
 
-static size_t utf8_seq(unsigned char c)
-{
-    return c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xe ? 3 : (c >> 3) == 0x1e ? 4 : 1;
-}
-
-/* Matches a [...] class at *pp against c; advances *pp past it. -1: not a
- * class (no closing bracket). */
-static int match_class(const char **pp, unsigned char c)
-{
-    const char *p = *pp + 1;
-    int negate = 0, hit = 0;
-    if (*p == '!' || *p == '^') negate = 1, p++;
-    if (*p == ']') {
-        hit = c == ']';
-        p++;
-    }
-    while (*p && *p != ']') {
-        unsigned char lo = (unsigned char)*p, hi = lo;
-        if (lo == '\\' && p[1]) lo = hi = (unsigned char)*++p;
-        if (p[1] == '-' && p[2] && p[2] != ']') {
-            hi = (unsigned char)p[2];
-            p += 2;
-        }
-        if (c >= lo && c <= hi) hit = 1;
-        p++;
-    }
-    if (*p != ']') return -1;
-    *pp = p + 1;
-    return hit != negate;
-}
-
-static int match(const char *p, const char *s)
-{
-    for (;;) {
-        if (!*p) return !*s;
-        if (p[0] == '*' && p[1] == '*') {
-            const char *rest = p + 2;
-            if (*rest == '/') {
-                rest++;
-                if (match(rest, s)) return 1; /* no directory */
-                for (; *s; s++)
-                    if (*s == '/' && match(rest, s + 1)) return 1;
-                return 0;
-            }
-            for (;; s++) {
-                if (match(rest, s)) return 1;
-                if (!*s) return 0;
-            }
-        }
-        if (*p == '*') {
-            p++;
-            for (;; s++) {
-                if (match(p, s)) return 1;
-                if (!*s || *s == '/') return 0;
-            }
-        }
-        if (!*s) return 0;
-        if (*p == '?') {
-            if (*s == '/') return 0;
-            p++;
-            s += utf8_seq((unsigned char)*s);
-            continue;
-        }
-        if (*p == '[' && *s != '/') {
-            const char *q = p;
-            int m = match_class(&q, (unsigned char)*s);
-            if (m >= 0) {
-                if (!m) return 0;
-                p = q;
-                s++;
-                continue;
-            }
-        }
-        if (*p == '\\' && p[1]) p++;
-        if (*p != *s) return 0;
-        p++;
-        s++;
-    }
-}
-
-/* Expands the first {a,b} group of `pat` (recursively). Returns the number
- * of patterns added to out[], each malloc'd. */
-static size_t expand_braces(const char *pat, char **out, size_t room)
-{
-    const char *open = NULL, *close = NULL, *p, *start;
-    int depth = 0;
-    size_t n = 0;
-
-    for (p = pat; *p; p++) {
-        if (*p == '\\' && p[1]) {
-            p++;
-        } else if (*p == '{') {
-            if (depth++ == 0) open = p;
-        } else if (*p == '}' && depth > 0) {
-            if (--depth == 0) {
-                close = p;
-                break;
-            }
-        }
-    }
-    if (!open || !close) {
-        if (room && (out[0] = sope__strdup(pat))) return 1;
-        return 0;
-    }
-    for (start = open + 1, p = start, depth = 0; p <= close && n < room; p++) {
-        if (*p == '{') depth++;
-        else if (*p == '}' && depth > 0 && p != close) depth--;
-        else if ((*p == ',' && depth == 0) || p == close) {
-            sope_buf alt = { 0 };
-            sope__buf_append(&alt, pat, (size_t)(open - pat));
-            sope__buf_append(&alt, start, (size_t)(p - start));
-            sope__buf_appends(&alt, close + 1);
-            if (!alt.oom) n += expand_braces(alt.ptr, out + n, room - n);
-            sope__buf_free(&alt);
-            start = p + 1;
-        }
-    }
-    return n;
-}
-
-int sope__glob_match(const char *pattern, const char *path)
-{
-    char *pats[MAX_PATTERNS];
-    size_t n = expand_braces(pattern, pats, MAX_PATTERNS), i;
-    int hit = 0;
-    for (i = 0; i < n; i++) {
-        if (!hit && match(pats[i], path)) hit = 1;
-        free(pats[i]);
-    }
-    return hit;
-}
-
-/* ------------------------------------------------------------------------ */
-/* walking                                                                   */
-/* ------------------------------------------------------------------------ */
-
-typedef struct {
-    char *pattern;
-    char *base; /* directory of the .gitignore */
-    int negate, dir_only, anchored;
-} ignore_rule;
-
-typedef struct walk walk;
-struct walk {
-    tool_run *r;
-    ignore_rule *rules;
-    size_t n_rules, cap_rules;
-    size_t visited;
-    int max_depth; /* -1: unlimited */
-    int stop;
-    void (*on_file)(walk *w, const char *path, const struct stat *st);
-    void *ctx;
-};
-
-static void load_ignore(walk *w, const char *dir)
-{
-    sope_buf path = { 0 };
-    FILE *f;
-    char line[1024];
-
-    sope__buf_appendf(&path, "%s/.gitignore", dir);
-    f = path.oom ? NULL : fopen(path.ptr, "r");
-    sope__buf_free(&path);
-    if (!f) return;
-    while (fgets(line, sizeof line, f)) {
-        size_t len = strcspn(line, "\r\n");
-        char *p = line;
-        ignore_rule *rule;
-        line[len] = '\0';
-        while (len && (line[len - 1] == ' ' || line[len - 1] == '\t')) line[--len] = '\0';
-        if (!len || line[0] == '#') continue;
-        if (w->n_rules == w->cap_rules) {
-            size_t cap = w->cap_rules ? w->cap_rules * 2 : 32;
-            ignore_rule *rules = realloc(w->rules, cap * sizeof *rules);
-            if (!rules) break;
-            w->rules = rules;
-            w->cap_rules = cap;
-        }
-        rule = &w->rules[w->n_rules];
-        memset(rule, 0, sizeof *rule);
-        if (*p == '!') rule->negate = 1, p++;
-        else if (*p == '\\') p++; /* \# and \! */
-        len = strlen(p);
-        if (len && p[len - 1] == '/') rule->dir_only = 1, p[--len] = '\0';
-        if (!len) continue;
-        rule->anchored = strchr(p, '/') != NULL;
-        if (*p == '/') p++;
-        if (!(rule->pattern = sope__strdup(p)) || !(rule->base = sope__strdup(dir))) {
-            free(rule->pattern);
-            free(rule->base);
-            continue;
-        }
-        w->n_rules++;
-    }
-    fclose(f);
-}
-
-static void pop_rules(walk *w, size_t keep)
-{
-    while (w->n_rules > keep) {
-        ignore_rule *rule = &w->rules[--w->n_rules];
-        free(rule->pattern);
-        free(rule->base);
-    }
-}
-
-static int ignored(walk *w, const char *path, const char *name, int is_dir)
-{
-    size_t i;
-    int out = 0;
-    for (i = 0; i < w->n_rules; i++) {
-        const ignore_rule *rule = &w->rules[i];
-        size_t blen = strlen(rule->base);
-        const char *rel;
-        if (rule->dir_only && !is_dir) continue;
-        if (strncmp(path, rule->base, blen) || path[blen] != '/') continue;
-        rel = path + blen + 1;
-        if (rule->anchored ? sope__glob_match(rule->pattern, rel) : sope__glob_match(rule->pattern, name))
-            out = !rule->negate;
-    }
-    return out;
-}
-
-static int by_name(const void *a, const void *b)
-{
-    return strcmp(*(char *const *)a, *(char *const *)b);
-}
-
-static void walk_dir(walk *w, const char *dir, int depth)
-{
-    DIR *d = opendir(dir);
-    struct dirent *e;
-    char **names = NULL;
-    size_t n = 0, cap = 0, i, keep = w->n_rules;
-
-    if (!d) return;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.') continue; /* hidden, and . and .. */
-        if (!strcmp(e->d_name, "node_modules")) continue;
-        if (n == cap) {
-            char **grown = realloc(names, (cap = cap ? cap * 2 : 64) * sizeof *names);
-            if (!grown) break;
-            names = grown;
-        }
-        if ((names[n] = sope__strdup(e->d_name))) n++;
-    }
-    closedir(d);
-    if (n) qsort(names, n, sizeof *names, by_name);
-    load_ignore(w, dir);
-
-    for (i = 0; i < n; i++) {
-        sope_buf path = { 0 };
-        struct stat st;
-        int is_dir;
-        if (w->stop || ++w->visited > WALK_MAX_ENTRIES) {
-            w->stop = 1;
-            free(names[i]);
-            continue;
-        }
-        sope__buf_appendf(&path, "%s%s%s", dir, dir[1] ? "/" : "", names[i]);
-        if (!path.oom && lstat(path.ptr, &st) == 0) {
-            if (S_ISLNK(st.st_mode) && stat(path.ptr, &st) != 0) st.st_mode = 0;
-            is_dir = S_ISDIR(st.st_mode);
-            if (!ignored(w, path.ptr, names[i], is_dir)) {
-                struct stat lst;
-                /* follow symlinked files, but not symlinked directories (cycles) */
-                if (is_dir && (w->max_depth < 0 || depth < w->max_depth) && lstat(path.ptr, &lst) == 0 &&
-                    !S_ISLNK(lst.st_mode))
-                    walk_dir(w, path.ptr, depth + 1);
-                else if (S_ISREG(st.st_mode))
-                    w->on_file(w, path.ptr, &st);
-            }
-        }
-        sope__buf_free(&path);
-        free(names[i]);
-    }
-    free(names);
-    pop_rules(w, keep);
-}
-
-/* Loads the .gitignore files above `dir` up to the repository root, top down. */
-static void load_parent_ignores(walk *w, const char *dir)
-{
-    char *chain[64];
-    size_t n = 0;
-    char *cur = sope__strdup(dir);
-
-    while (cur && n < 64) {
-        sope_buf git = { 0 };
-        struct stat st;
-        char *slash;
-        int is_root;
-        sope__buf_appendf(&git, "%s/.git", cur);
-        is_root = !git.oom && stat(git.ptr, &st) == 0;
-        sope__buf_free(&git);
-        if (is_root) break;
-        slash = strrchr(cur, '/');
-        if (!slash || slash == cur) {
-            free(cur);
-            cur = NULL;
-            n = 0; /* not inside a repository: only the walk's own files count */
-            break;
-        }
-        *slash = '\0';
-        chain[n++] = sope__strdup(cur);
-    }
-    if (cur) {
-        size_t i;
-        for (i = n; i-- > 0;) {
-            if (chain[i]) load_ignore(w, chain[i]);
-        }
-    }
-    while (n) free(chain[--n]);
-    free(cur);
-}
-
-static void walk_free(walk *w)
-{
-    pop_rules(w, 0);
-    free(w->rules);
-}
+static const char GREP_DESC[] =
+    "Searches file contents with a regular expression.\n\n"
+    "Usage:\n"
+    "- Use it for content search instead of running grep or rg through bash.\n"
+    "- The pattern is an extended regular expression (POSIX ERE) with \\d, \\w and \\s shorthands, e.g. "
+    "\"log.*Error\" or \"func\\s+\\w+\". Escape literal braces, brackets and parentheses.\n"
+    "- Narrow the search with path (a file or directory) and glob (e.g. \"*.c\" or \"src/**/*.{ts,tsx}\").\n"
+    "- output_mode: \"files_with_matches\" (default) lists matching files, most recently modified first; "
+    "\"content\" shows matching lines as path:line:text, with context lines when context > 0; \"count\" "
+    "shows the number of matching lines per file.\n"
+    "- Hidden files, binary files and paths ignored by .gitignore are skipped.\n"
+    "- For open-ended searches that need several rounds, use the agent tool.";
+static const char GREP_SCHEMA[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"pattern\":{\"type\":\"string\",\"description\":\"The regular expression to search for\"},"
+    "\"path\":{\"type\":\"string\",\"description\":\"File or directory to search (default: the working "
+    "directory)\"},"
+    "\"glob\":{\"type\":\"string\",\"description\":\"Only search files whose path matches this pattern\"},"
+    "\"output_mode\":{\"type\":\"string\",\"enum\":[\"files_with_matches\",\"content\",\"count\"]},"
+    "\"case_insensitive\":{\"type\":\"boolean\"},"
+    "\"context\":{\"type\":\"integer\",\"description\":\"Lines of context around each match (content "
+    "mode)\"},"
+    "\"head_limit\":{\"type\":\"integer\",\"description\":\"Return at most this many lines or files "
+    "(default 250)\"}},"
+    "\"required\":[\"pattern\"]}";
 
 /* ------------------------------------------------------------------------ */
 /* results                                                                   */
@@ -422,13 +125,13 @@ typedef struct {
     found_list found;
 } glob_ctx;
 
-static void glob_file(walk *w, const char *path, const struct stat *st)
+static void glob_file(sope_walk *w, const char *path, const struct stat *st)
 {
     glob_ctx *g = w->ctx;
     size_t blen = strlen(g->base), i;
     const char *rel = path + (blen > 1 ? blen + 1 : 1);
     for (i = 0; i < g->n_patterns; i++)
-        if (match(g->patterns[i], rel)) {
+        if (sope__glob_match_one(g->patterns[i], rel)) {
             found_add(&g->found, path, st, 0);
             return;
         }
@@ -442,12 +145,12 @@ static int has_wildcard(const char *s, size_t n)
     return 0;
 }
 
-sope_next sope__tool_glob(tool_run *r)
+static sope_next tool_glob(tool_run *r)
 {
     const char *pattern = sope__arg_string(r, "pattern"), *dir_arg = sope__arg_string(r, "path"), *rest;
-    char *base = NULL, *patterns[MAX_PATTERNS];
+    char *base = NULL, *patterns[SOPE__MAX_PATTERNS];
     glob_ctx g = { 0 };
-    walk w = { 0 };
+    sope_walk w = { 0 };
     sope_buf prefix = { 0 };
     struct stat st;
     size_t i, shown;
@@ -481,7 +184,7 @@ sope_next sope__tool_glob(tool_run *r)
     }
 
     g.base = base;
-    g.n_patterns = expand_braces(*rest ? rest : "*", patterns, MAX_PATTERNS);
+    g.n_patterns = sope__glob_expand(*rest ? rest : "*", patterns, SOPE__MAX_PATTERNS);
     g.patterns = patterns;
     w.max_depth = 0;
     for (i = 0; i < g.n_patterns; i++) {
@@ -492,11 +195,10 @@ sope_next sope__tool_glob(tool_run *r)
         if (slashes > w.max_depth) w.max_depth = slashes;
     }
     if (deep) w.max_depth = -1;
-    w.r = r;
     w.on_file = glob_file;
     w.ctx = &g;
-    load_parent_ignores(&w, base);
-    walk_dir(&w, base, 0);
+    sope__walk_ignores_above(&w, base);
+    sope__walk(&w, base);
 
     if (g.found.n) qsort(g.found.items, g.found.n, sizeof *g.found.items, newest_first);
     shown = g.found.n < GLOB_LIMIT ? g.found.n : GLOB_LIMIT;
@@ -509,7 +211,7 @@ sope_next sope__tool_glob(tool_run *r)
 
     for (i = 0; i < g.n_patterns; i++) free(patterns[i]);
     found_free(&g.found);
-    walk_free(&w);
+    sope__walk_free(&w);
     free(base);
     return sope__run_done(r);
 }
@@ -627,7 +329,7 @@ static int glob_allows(grep_ctx *g, const char *path)
     name = name ? name + 1 : path;
     if (!g->n_globs) return 1;
     for (i = 0; i < g->n_globs; i++)
-        if (match(g->globs[i], strchr(g->globs[i], '/') ? rel : name)) return 1;
+        if (sope__glob_match_one(g->globs[i], strchr(g->globs[i], '/') ? rel : name)) return 1;
     return 0;
 }
 
@@ -646,7 +348,7 @@ static void emit_line(grep_ctx *g, const char *shown, size_t no, char sep, const
     g->lines++;
 }
 
-static void grep_file(walk *w, const char *path, const struct stat *st)
+static void grep_file(sope_walk *w, const char *path, const struct stat *st)
 {
     grep_ctx *g = w->ctx;
     sope_buf data = { 0 };
@@ -720,16 +422,16 @@ static void grep_file(walk *w, const char *path, const struct stat *st)
     sope__buf_free(&data);
 }
 
-sope_next sope__tool_grep(tool_run *r)
+static sope_next tool_grep(tool_run *r)
 {
     const char *pattern = sope__arg_string(r, "pattern"), *path_arg = sope__arg_string(r, "path");
     const char *mode = sope__arg_string(r, "output_mode"), *glob = sope__arg_string(r, "glob");
     int icase = sope__arg_bool(r, "case_insensitive"), flags = REG_EXTENDED | REG_NOSUB, rc;
     int64_t limit = sope__arg_int(r, "head_limit", GREP_DEFAULT_LIMIT);
-    char *re_src, *base, *globs[MAX_PATTERNS];
+    char *re_src, *base, *globs[SOPE__MAX_PATTERNS];
     size_t n_globs;
     grep_ctx g = { 0 };
-    walk w = { 0 };
+    sope_walk w = { 0 };
     struct stat st;
     size_t i;
 
@@ -763,9 +465,8 @@ sope_next sope__tool_grep(tool_run *r)
     if (g.mode != MODE_CONTENT) g.context = 0;
     g.limit = limit > 0 ? (size_t)limit : GREP_DEFAULT_LIMIT;
     g.base = base;
-    g.n_globs = n_globs = glob && *glob ? expand_braces(glob, globs, MAX_PATTERNS) : 0;
+    g.n_globs = n_globs = glob && *glob ? sope__glob_expand(glob, globs, SOPE__MAX_PATTERNS) : 0;
     g.globs = globs;
-    w.r = r;
     w.max_depth = -1;
     w.on_file = grep_file;
     w.ctx = &g;
@@ -773,8 +474,8 @@ sope_next sope__tool_grep(tool_run *r)
     if (stat(base, &st) != 0) {
         sope__run_fail(r, "%s does not exist", sope__display_path(r, base));
     } else if (S_ISDIR(st.st_mode)) {
-        load_parent_ignores(&w, base);
-        walk_dir(&w, base, 0);
+        sope__walk_ignores_above(&w, base);
+        sope__walk(&w, base);
     } else {
         g.n_globs = 0; /* an explicit file is searched whatever its name */
         grep_file(&w, base, &st);
@@ -805,8 +506,11 @@ sope_next sope__tool_grep(tool_run *r)
 
     for (i = 0; i < n_globs; i++) free(globs[i]);
     found_free(&g.files);
-    walk_free(&w);
+    sope__walk_free(&w);
     regfree(&g.re);
     free(base);
     return sope__run_done(r);
 }
+
+const sope_builtin sope__builtin_glob = { "glob", GLOB_DESC, GLOB_SCHEMA, 0, tool_glob, NULL };
+const sope_builtin sope__builtin_grep = { "grep", GREP_DESC, GREP_SCHEMA, 0, tool_grep, NULL };

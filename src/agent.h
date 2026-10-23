@@ -1,7 +1,12 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * agent.h - the agent object, shared by agent.c (public API, events,
- * lifecycle) and loop.c (turn execution, subagents). Private.
+ * agent.h - the agent object and what the agent core shares about it.
+ * Private.
+ *
+ *   agent.c     public API, options, the event queue and fd, pending calls
+ *   loop.c      a turn as a state machine on the pool
+ *   call.c      one model call (sope_call), the provider's side of a round
+ *   subagent.c  subagent types and the children of the `agent` tool
  *
  * Agents form a tree: the root is what sope_agent_new returns; subagents are
  * children spawned by the root's `agent` tool. The whole tree shares the
@@ -119,6 +124,18 @@ typedef struct turn_state {
     permit_mode permit;         /* option permissions */
 } turn_state;
 
+struct sope_call { /* a model call, as the loop holds it (call.c) */
+    sope_agent_t *agent;
+    void *state; /* the provider's, between start and finish */
+    uint64_t round;
+    int compaction;       /* summarizes `request` instead of the agent's history */
+    sope_history request; /* compaction only */
+    sope_buf text;
+    sope_tool_use *uses;
+    size_t n_uses, cap_uses;
+    int failed; /* an error was reported */
+};
+
 struct sope_agent {
     sope_task task;
     struct sope_agent *root;   /* self for the root */
@@ -168,6 +185,12 @@ struct sope_agent {
     int32_t last_stop;
 };
 
+/* The turn running now; only while a->turn.active. */
+static inline uint64_t sope__turn_id(const sope_agent_t *a)
+{
+    return a->turn.msg->turn_id;
+}
+
 /* agent.c */
 int sope__push_event_locked(sope_agent_t *a, uint32_t type, uint64_t turn_id, uint64_t call_id, int32_t code,
                             const char *name, size_t name_len, const char *data, size_t data_len);
@@ -176,15 +199,38 @@ int sope__push_event(sope_agent_t *a, uint32_t type, uint64_t turn_id, uint64_t 
 /* Marks the tree's queue readable when the root closed; *mu held. */
 void sope__signal_closed_locked(sope_agent_t *root);
 char *sope__option_dup_locked(sope_agent_t *a, const char *key);
+/* A tool or subagent name: 1-64 characters of [A-Za-z0-9_-]. */
+int sope__valid_name(const char *s, size_t n);
 void sope__agent_free_memory(sope_agent_t *a);
 void sope__msg_node_free(msg_node *m);
+/* The tree's pending call with this id and kind; *mu held. */
+pending_call *sope__pending_find_locked(sope_agent_t *a, uint64_t call_id, pending_kind kind);
+/* Frees an unlinked pending call, discarding a run still waiting for sope_permit. */
+void sope__pending_free(pending_call *p);
 
 /* loop.c */
 sope_next sope__agent_run(sope_task *task);
-void sope__history_clear(sope_history *h);
-/* The history as a JSON array (sope.h: sope_agent_history); malloc'd, NULL on OOM. */
-char *sope__history_json(const sope_history *h, size_t *len);
-/* Parses such an array into *out; SOPE_EINVAL (err says why) or SOPE_ENOMEM. */
-int sope__history_parse(sope_history *out, const char *json, size_t len, char *err, size_t cap);
+
+/* call.c */
+sope_call *sope__call_new(sope_agent_t *a, uint64_t round, int compaction);
+void sope__call_free(sope_call *c);
+
+/* subagent.c */
+#define SOPE__AGENT_TOOL "agent" /* the built-in tool that spawns subagents */
+
+/* Parses a definition (sope_subagent_register). On failure sets the error,
+ * stores its code in *rc and returns NULL. */
+subagent_def *sope__subagent_parse(const char *json, size_t len, int *rc);
+/* The "general-purpose" type every agent starts with. */
+subagent_def *sope__subagent_general_purpose(int *rc);
+/* Adds d to the root's types, replacing one of the same name. */
+void sope__subagent_add(sope_agent_t *a, subagent_def *d);
+void sope__subagent_free(subagent_def *d);
+/* The `agent` tool's description and schema, listing the types; *mu held.
+ * 0 on out of memory. */
+int sope__subagent_spec_locked(const sope_agent_t *a, sope_buf *desc, sope_buf *schema);
+/* Spawns and starts a child for one `agent` tool use; its result completes
+ * the pending call. On failure returns a static message for the tool result. */
+const char *sope__subagent_spawn(sope_agent_t *a, const sope_tool_use *u);
 
 #endif /* SOPE_AGENT_H */

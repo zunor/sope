@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * web.c - the web_fetch tool: an HTTP GET through http.c (so waiting holds
+ * tool_web.c - web_fetch: an HTTP GET through http.c (so waiting holds
  * no pool thread) and an HTML-to-text conversion that keeps what a reader
  * needs: headings, paragraphs, lists, links (resolved to absolute URLs),
  * code blocks and table rows. Scripts, styles and markup are dropped.
@@ -17,6 +17,23 @@
 
 #define FETCH_MAX_BODY (8 * 1024 * 1024)
 #define FETCH_CHUNK 40000
+
+static const char WEB_FETCH_DESC[] =
+    "Fetches a URL and returns its content as text. HTML pages are converted to readable text with "
+    "Markdown-style headings, lists and links; plain text and JSON come back as they are.\n\n"
+    "Usage:\n"
+    "- url must be a complete http:// or https:// URL. Redirects are followed.\n"
+    "- An image URL (PNG, JPEG, GIF, WebP) comes back as the image itself. Images on HTML pages appear as "
+    "![alt](url); fetch one to see it.\n"
+    "- Long pages come back in parts of about 40000 characters; pass offset to read further.\n"
+    "- Use it for documentation and pages the user points you to. For GitHub, prefer the gh CLI through "
+    "bash.\n"
+    "- The request leaves this machine: never put secrets or private data in the URL.";
+static const char WEB_FETCH_SCHEMA[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"url\":{\"type\":\"string\",\"description\":\"The URL to fetch\"},"
+    "\"offset\":{\"type\":\"integer\",\"description\":\"Character offset to continue from (default 0)\"}},"
+    "\"required\":[\"url\"]}";
 
 /* ------------------------------------------------------------------------ */
 /* HTML to text                                                              */
@@ -468,7 +485,7 @@ void sope__html_to_text(const char *html, size_t n, sope_buf *out)
 /* the tool                                                                  */
 /* ------------------------------------------------------------------------ */
 
-void sope__tool_web_fetch_cancel(tool_run *r)
+static void web_fetch_cancel(tool_run *r)
 {
     sope__http_release(r->http);
     r->http = NULL;
@@ -482,7 +499,7 @@ static int contains_ci(const char *hay, const char *needle)
     return 0;
 }
 
-sope_next sope__tool_web_fetch(tool_run *r)
+static sope_next tool_web_fetch(tool_run *r)
 {
     const char *url = sope__arg_string(r, "url");
     int64_t offset = sope__arg_int(r, "offset", 0);
@@ -504,12 +521,12 @@ sope_next sope__tool_web_fetch(tool_run *r)
 
     done = sope__http_take(r->http, &r->body, &status, err, sizeof err);
     if (r->body.len > FETCH_MAX_BODY || r->body.oom) {
-        sope__tool_web_fetch_cancel(r);
+        web_fetch_cancel(r);
         return sope__run_fail(r, "%s: the response is larger than %d MB", url, FETCH_MAX_BODY / (1024 * 1024));
     }
     if (!done) return (sope_next){ SOPE__NEXT_WAIT, 0 };
     sope__http_info(r->http, ctype, sizeof ctype, final_url, sizeof final_url);
-    sope__tool_web_fetch_cancel(r);
+    web_fetch_cancel(r);
     if (err[0]) return sope__run_fail(r, "fetching %s failed: %s", url, err);
 
     html = contains_ci(ctype, "html") ||
@@ -562,3 +579,6 @@ sope_next sope__tool_web_fetch(tool_run *r)
     sope__buf_free(&text);
     return sope__run_done(r);
 }
+
+const sope_builtin sope__builtin_web_fetch = { "web_fetch", WEB_FETCH_DESC, WEB_FETCH_SCHEMA, 1, tool_web_fetch,
+                                               web_fetch_cancel };
