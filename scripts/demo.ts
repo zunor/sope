@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 // SPDX-License-Identifier: MIT
-// Deterministic English demos: real libsope tools and TUI, scripted local model.
-// Everything runs in a disposable workspace; no API key or external service.
+// English demos with real libsope tools and TUI, in a disposable workspace.
+// Configured credentials select GLM 5.3; --offline uses a scripted local model.
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { loadConfig } from "../tui/src/config";
 import { findLibrary } from "../bindings/js/src/ffi";
 import { Store, type SavedMessage } from "../tui/src/store";
 
@@ -18,16 +19,26 @@ type Message = { role: string; content?: string | null; tool_call_id?: string };
 type ToolCall = { id: string; name: string; input: Record<string, unknown> };
 
 const args = process.argv.slice(2);
+const usage = "Usage: bun run demo [tour|edit|review] [--print] [--live|--offline] [--auto]";
 if (args.includes("--help")) {
-  console.log("Usage: bun scripts/demo.ts [tour|edit|review] [--print]\n\nScripted local model, real tools, disposable workspace. No API key needed.\nInteractive runs open three prepared conversations plus the selected demo.\nUse --print for a noninteractive run; interactive edits ask for approval.");
+  console.log(`${usage}\n\nDefault: GLM 5.3 when an API key is configured; otherwise a scripted local model.\n--live: require your configured endpoint and API key (makes real API calls).\n--offline: force the scripted local model; no API key or external requests.\n--auto: approve ordinary fixture edits and tests without a dialog.\n--print: run without a terminal. Interactive runs open four conversations.`);
   process.exit(0);
 }
 const scenario = (args.find((arg) => !arg.startsWith("--")) ?? "tour") as Scenario;
-if (!(scenario in prompts) || args.some((arg) => arg.startsWith("--") && arg !== "--print")) {
-  console.error("Usage: bun scripts/demo.ts [tour|edit|review] [--print]");
+if (!Object.hasOwn(prompts, scenario) || args.filter((arg) => !arg.startsWith("--")).length > 1
+  || args.some((arg) => arg.startsWith("--") && !["--print", "--live", "--offline", "--auto"].includes(arg))
+  || (args.includes("--live") && args.includes("--offline"))) {
+  console.error(usage);
   process.exit(2);
 }
 const print = args.includes("--print");
+const configured = args.includes("--offline") ? null : loadConfig({ provider: "openai", model: "glm-5.3" });
+if (args.includes("--live") && !configured?.apiKey) {
+  console.error("The live demo needs SOPE_API_KEY in .env, the environment, or your sope config.");
+  process.exit(2);
+}
+const live = configured?.apiKey ? configured : null;
+let demoFailed = false;
 if (!print && (!process.stdin.isTTY || !process.stdout.isTTY)) {
   console.error("Open this demo in a terminal, or add --print.");
   process.exit(2);
@@ -44,7 +55,7 @@ A small retry policy for a thoughtful HTTP client.
 - src/retry.test.ts: fast, deterministic policy tests.
 - Run the suite with bun test.
 
-Demo fixture for sope. No requests are sent to an external service.
+Demo fixture for sope. The retry tests do not make network requests.
 `);
 writeFileSync(join(workspace, "src/retry.ts"), `/** Exponential backoff, starting at 250 ms. */
 export function retryDelay(attempt: number): number {
@@ -95,7 +106,12 @@ function response(messages: Message[]): { text: string; calls?: ToolCall[] } {
       new_string: 'test("starts gently", () => expect(retryDelay(0)).toBe(250));\ntest("caps long waits", () => expect(retryDelay(12)).toBe(2000));',
     })] };
     if (!has("test")) return { text: "Now I will run the tests.\n\n", calls: [call("test", "bash", { command: "bun test", description: "Verify the retry policy" })] };
-    return { text: /4 pass/.test(result("test"))
+    const passed = /\b4 pass\b/.test(result("test")) && /\[exit code 0\]/.test(result("test"));
+    if (!passed) {
+      demoFailed = true;
+      if (print) console.error(result("test"));
+    }
+    return { text: passed
       ? "## A ceiling, without changing the rhythm.\n\nThe delay is now **250 → 500 → 1,000 → 2,000 ms**, then stays at two seconds.\n\n- Updated `src/retry.ts` with a single bounded expression.\n- Added a regression test for large attempt counts.\n- **4 tests passed.** No new dependencies; the API is unchanged."
       : "The test command finished. Please inspect its output above; the demo did not observe the expected four passing tests." };
   }
@@ -105,7 +121,7 @@ function response(messages: Message[]): { text: string; calls?: ToolCall[] } {
 }
 
 const token = crypto.randomUUID();
-const server = Bun.serve({
+const server = live ? null : Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
   async fetch(req) {
@@ -141,9 +157,15 @@ for (const key of ["PATH", "HOME", "TERM", "COLORTERM", "TERM_PROGRAM", "LANG", 
 }
 Object.assign(env, {
   SOPE_DB: join(scratch, "sessions.db"), XDG_CONFIG_HOME: join(scratch, "config"),
-  SOPE_LIB: library, SOPE_API_KEY: token, SOPE_COMPACT_THRESHOLD: "0", SOPE_IMAGE_MODEL: "off",
-  NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
+  SOPE_LIB: library, SOPE_API_KEY: live?.apiKey ?? token, SOPE_COMPACT_THRESHOLD: "0", SOPE_IMAGE_MODEL: "off",
 });
+if (live) {
+  for (const key of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE"]) {
+    if (process.env[key]) env[key] = process.env[key]!;
+  }
+} else {
+  env.NO_PROXY = env.no_proxy = "127.0.0.1,localhost";
+}
 // Populate the tab bar through the normal persistence API. These are explicitly
 // scripted conversations, not fabricated tool executions or test results.
 if (!print) {
@@ -183,13 +205,14 @@ if (!print) {
   }
 }
 const child = Bun.spawn([process.execPath, resolve(import.meta.dir, "../tui/src/main.ts"),
-  "--provider", "openai", "--base-url", `http://127.0.0.1:${server.port}/v1`, "--model", "sope-demo",
-  "--permissions", print ? "auto" : "ask", ...(print ? ["--print"] : []), prompts[scenario],
+  "--provider", "openai", "--base-url", live?.baseUrl ?? `http://127.0.0.1:${server!.port}/v1`, "--model", live?.model ?? "sope-demo",
+  "--permissions", print || args.includes("--auto") ? "auto" : "ask", ...(print ? ["--print"] : []),
+  prompts[scenario] + (live ? "\nReply in English. Work only in this Lumen fixture. Use relative file paths in tool calls. Read the source and tests first; keep changes focused and run bun test when editing. Finish with a concise summary of the actual changes and test results." : ""),
 ], { cwd: workspace, env, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
 for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"] as const) process.on(signal, () => child.kill(signal === "SIGINT" ? "SIGTERM" : signal));
 try {
-  process.exitCode = await child.exited;
+  process.exitCode = (await child.exited) || (demoFailed ? 1 : 0);
 } finally {
-  server.stop(true);
+  server?.stop(true);
   rmSync(scratch, { recursive: true, force: true });
 }

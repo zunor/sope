@@ -14,6 +14,13 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ### Terminal
 
+- Restore shell-tool access to Bun and other developer commands by passing an
+  explicit execution environment through the JS binding's new `setPolicy()`.
+  Model credentials and shell startup hooks are not inherited.
+- Run the demos against GLM 5.3 when credentials are configured, with `--offline`
+  for deterministic local responses and `--live` to require a real model.
+  Failed offline edit verification now prints the tool output and exits nonzero.
+
 - Add `/context`: a breakdown of the context window in the conversation, with a
   bar, a legend and the largest tool results; the bottom bar shows the model
   and `used / window`.

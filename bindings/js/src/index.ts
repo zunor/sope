@@ -30,6 +30,14 @@ export class SopeError extends Error {
 export type StopReason = "end_turn" | "cancelled" | "error";
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
+export interface ExecutionPolicy {
+  tools: string[];
+  external?: string[];
+  authorize?: boolean;
+  /** Complete shell environment; libsope does not inherit process.env. */
+  environment?: Record<string, string>;
+}
+
 /** agentId is 0 for the agent itself, else the callId of the subagent_start that launched the subagent. */
 type Origin = { turnId: number; agentId: number; sequence: number };
 
@@ -198,6 +206,12 @@ export class Agent {
 
   setOption(key: string, value: string | null): void {
     check(C().sope_agent_set_option(this.#ptr(), cstr(key), value === null ? null : cstr(value)), "sope_agent_set_option");
+  }
+
+  /** Configure the host execution contract before sending or resuming work. */
+  setPolicy(policy: ExecutionPolicy): void {
+    const bytes = encoder.encode(JSON.stringify(policy));
+    check(C().sope_agent_policy(this.#ptr(), bytes, bytes.length), "sope_agent_policy");
   }
 
   registerTool(tool: ToolSpec): void {

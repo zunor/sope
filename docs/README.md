@@ -11,7 +11,7 @@ sope has two entry points: a terminal workspace for using agents, and a C librar
 | [Getting started](guide/quickstart.md) | Installation, model setup, and your first conversation |
 | [Terminal workspace](guide/terminal.md) | Sessions, images, tool previews, permissions, keys, and commands |
 | [Configuration](guide/configuration.md) | Environment variables, CLI flags, and defaults |
-| [English demos](guide/demos.md) | Three reproducible scenarios with a scripted local model |
+| [English demos](guide/demos.md) | GLM 5.3 demos and three reproducible offline scenarios |
 
 ## Embed and develop
 

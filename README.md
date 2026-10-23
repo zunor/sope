@@ -38,7 +38,7 @@ From a source checkout:
 ```sh
 bun install
 bun run build:native
-bun scripts/demo.ts tour
+bun run demo tour --offline
 ```
 
 The demo runs the real TUI and tools against a scripted local model. It needs no API key and uses a disposable project.
@@ -75,11 +75,11 @@ The TUI keeps the work in view: a conversation in the center, independent sessio
 
 | Try it | What it shows |
 |---|---|
-| `bun scripts/demo.ts tour` | A calm walkthrough of a small codebase, with file discovery and source reading. |
-| `bun scripts/demo.ts edit` | A focused change: inspect the code, approve the diff, add a regression test, and run it. |
-| `bun scripts/demo.ts review` | Two subagents inspect behavior and test coverage in parallel, then report back. |
+| `bun run demo tour` | A calm walkthrough of a small codebase, with file discovery and source reading. |
+| `bun run demo edit` | A focused change: inspect the code, approve the diff, add a regression test, and run it. |
+| `bun run demo review` | Two subagents inspect behavior and test coverage in parallel, then report back. |
 
-Each interactive demo opens alongside three prepared conversations, so you can explore the session tabs immediately. Responses are scripted locally; the TUI and tools execute normally.
+Each interactive demo opens alongside three prepared conversations, so you can explore the session tabs immediately. With an API key configured, demos use real **GLM 5.3** responses and show `glm-5.3` in the bottom bar. Without a key, or with `--offline`, responses are scripted locally; the TUI and tools execute normally.
 
 [Explore the terminal →](docs/guide/terminal.md) · [Reproduce the demos →](docs/guide/demos.md)
 

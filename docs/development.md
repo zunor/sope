@@ -93,7 +93,7 @@ tui/src/
   ui/popup.ts        Popups in the input's place; approval.ts, modes.ts, models.ts are the popups
   unicode/ ui/       Graphemes and column widths, wrapping, Markdown, editor (and its keys), chat view,
                      tabs, status line, session list, command menu, trace panel
-scripts/             demo.ts (offline demos), release.sh (build and package), install.sh
+scripts/             demo.ts (live and offline demos), release.sh (build and package), install.sh
 ```
 
 ## Documentation

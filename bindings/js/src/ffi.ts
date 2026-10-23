@@ -24,6 +24,7 @@ const symbols = {
   sope_agent_resume: { args: [FFIType.ptr], returns: FFIType.i32 },
   sope_agent_resolve: { args: [FFIType.ptr, FFIType.u64, FFIType.i32, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
   sope_agent_set_option: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+  sope_agent_policy: { args: [FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
   sope_tool_register: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
   sope_send: { args: [FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
   sope_attach_image: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },

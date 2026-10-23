@@ -44,4 +44,4 @@ sope --version
 
 The TUI uses the terminal's alternate screen, like vim or htop. On exit, the terminal returns to its previous state, and the conversation does not remain in scrollback. Use the mouse wheel or `pgup`/`pgdn` to browse the conversation; while you are scrolling up, new output will not pull the view back to the bottom.
 
-For a source checkout, build with `bun install && bun run build:native`, then run `bun run tui`. Try `bun scripts/demo.ts tour` for an offline, scripted introduction. See [the demos](demos.md), [terminal guide](terminal.md), and [configuration reference](configuration.md).
+For a source checkout, build with `bun install && bun run build:native`, then run `bun run tui`. Try `bun run demo tour --offline` for an offline, scripted introduction. See [the demos](demos.md), [terminal guide](terminal.md), and [configuration reference](configuration.md).

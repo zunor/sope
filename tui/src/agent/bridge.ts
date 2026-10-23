@@ -3,6 +3,7 @@
 // (send, cancel, tool results) happen here; polling happens in poller.ts.
 
 import { Agent, libraryPath, type SopeEvent } from "sope";
+import { executionPolicy } from "./environment";
 
 export class AgentBridge {
   readonly agent: Agent;
@@ -11,6 +12,12 @@ export class AgentBridge {
 
   constructor(options: Record<string, string>, onEvents: (events: SopeEvent[]) => void, directory?: string) {
     this.agent = directory ? Agent.open(directory, options) : Agent.create(options);
+    try {
+      this.agent.setPolicy(executionPolicy(options.provider ?? "mock"));
+    } catch (error) {
+      this.agent.free();
+      throw error;
+    }
     let resolveClosed!: () => void;
     this.#closed = new Promise((resolve) => (resolveClosed = resolve));
     // From source the worker resolves relative to this file. A compiled

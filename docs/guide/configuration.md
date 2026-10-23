@@ -26,3 +26,14 @@ Context is checked before each model request, including restored sessions and ne
 `/compact [focus]` summarizes older messages while retaining recent originals within budget. `/set compact.retain_tokens 8000`, `/set compact.max_tokens 2048` and `/set compact.input_tokens 64000` control retention, summary output and summary input respectively. See the [ABI compaction contract](../abi.md#51-history-compaction) for failure behavior and estimation limits.
 
 Native options are also available through `/set`. `/set openai.wire_api responses` selects stateless Responses requests on endpoints that support that protocol; the default is `chat`. `/effort` (or `/set reasoning.effort high`) sets the model's reasoning effort. Supported effort values depend on the model. These options take effect on the next turn; see the [ABI options table](../abi.md#9-options-and-providers) for the complete list.
+
+## Shell tools
+
+The TUI passes an explicit environment to libsope's shell tools: `PATH`, `HOME`,
+temporary-directory and locale settings, and XDG configuration/data/cache paths.
+The running executable's directory is prepended to `PATH`, so a source checkout's
+`bun test` works even when its launcher did not include Bun in `PATH`.
+Arbitrary environment variables, including model API keys and shell startup hooks,
+are not inherited. This is environment hygiene, not a filesystem sandbox; tools
+still run with your user account's file access. Embedded hosts can supply their
+own complete environment through `sope_agent_policy` or JS `agent.setPolicy()`.
