@@ -24,9 +24,10 @@ export async function runPrint(config: Config, prompt: string, images: ImageFile
   const bridge = new AgentBridge(agentOptions(config), (events) => {
     for (const ev of events) {
       if (ev.type === "closed") continue;
+      if (ev.type === "turn_end") runner.endTurn(ev.turnId, ev.agentId);
       if (ev.type === "tool_call" || ev.type === "tool_start") {
         err(`· ${ev.name} ${describeCall(ev.name, parseInput(ev.input)).replace(/\s+/g, " ").slice(0, 120)}`);
-        if (ev.type === "tool_call") runner.run(ev.callId, ev.turnId, ev.name, ev.input);
+        if (ev.type === "tool_call") runner.run(ev.callId, ev.turnId, ev.name, ev.input, ev.agentId);
       } else if (ev.type === "permission") {
         const v = judge(config.permissions, ev.name, parseInput(ev.input));
         if (!v.allow && config.permissions === "auto") err(`sope: refused ${ev.name}: ${v.reason}, and -p cannot ask (--permissions full runs it)`);

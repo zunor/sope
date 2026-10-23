@@ -587,7 +587,7 @@ export class Session {
         const step: Step = { name: ev.name, detail: describeCall(ev.name, parseInput(ev.input)), done: false };
         this.chat.update(sub, { steps: [...(sub.steps ?? []), step], tail: "" });
         this.#toolCalls.set(ev.callId, { sub, step });
-        if (ev.type === "tool_call") this.#runner!.run(ev.callId, sub.turnId ?? 0, ev.name, ev.input);
+        if (ev.type === "tool_call") this.#runner!.run(ev.callId, ev.turnId, ev.name, ev.input, ev.agentId);
         return;
       }
       case "tool_end":
@@ -595,7 +595,7 @@ export class Session {
       case "permission":
         return this.#onPermission(ev.callId, ev.turnId, ev.name, ev.input, ev.agentId, sub?.title ?? "subagent");
       case "turn_end":
-        this.#runner!.endTurn(ev.turnId);
+        this.#runner!.endTurn(ev.turnId, ev.agentId);
         this.#dropApprovals(ev.turnId, ev.agentId);
         return;
       case "usage":

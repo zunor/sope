@@ -8,6 +8,7 @@ import type { HostTool } from "./tools";
 
 interface Running {
   turnId: number;
+  agentId: number;
   abort: AbortController;
 }
 
@@ -20,16 +21,16 @@ export class HostToolRunner {
     private readonly onCall?: (fn: string, detail: string) => void,
   ) {}
 
-  run(callId: number, turnId: number, name: string, rawInput: string): void {
+  run(callId: number, turnId: number, name: string, rawInput: string, agentId = 0): void {
     const abort = new AbortController();
-    this.#running.set(callId, { turnId, abort });
+    this.#running.set(callId, { turnId, agentId, abort });
     void this.#run(callId, name, rawInput, abort.signal);
   }
 
   /** The turn ended: stop its tools. Their results are dropped. */
-  endTurn(turnId: number): void {
+  endTurn(turnId: number, agentId = 0): void {
     for (const [callId, r] of this.#running) {
-      if (r.turnId !== turnId) continue;
+      if (r.turnId !== turnId || r.agentId !== agentId) continue;
       r.abort.abort();
       this.#running.delete(callId);
     }
