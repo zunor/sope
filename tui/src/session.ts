@@ -12,6 +12,7 @@ import type { SopeEvent } from "sope";
 import { AgentBridge } from "./agent/bridge";
 import { HostToolRunner } from "./agent/runner";
 import { describeImage, type ImageFile } from "./agent/images";
+import { judge, type PermissionMode } from "./agent/permissions";
 import { describeCall, formatTodos, hostToolsFor, parseInput, todosOf, type HostTool } from "./agent/tools";
 import { agentOptions, type Config } from "./config";
 import type { SavedMessage, Store, StoredSession } from "./store";
@@ -32,6 +33,8 @@ export interface Approval {
   input: Record<string, unknown>;
   /** Who asks: undefined for the agent itself, else the subagent type. */
   subagent?: string;
+  /** Under "Approve for me": why this one asks. */
+  reason?: string;
 }
 
 type ToolTarget = { msg: Message } | { sub: Message; step: Step };
@@ -65,7 +68,7 @@ export class Session {
   provider: string;
   model: string;
   approvals: Approval[] = [];
-  readonly alwaysAllowed = new Set<string>(); // "a" in the permission prompt
+  readonly alwaysAllowed = new Set<string>(); // "don't ask again" in the permission prompt
   /** Its tab was in the background when a turn finished. */
   unread = false;
   turnStarted = 0;
@@ -90,7 +93,8 @@ export class Session {
 
   constructor(
     config: Config,
-    readonly allowAll: boolean,
+    /** The permission mode, shared by every session of the app. */
+    readonly mode: () => PermissionMode,
     onEvents: (session: Session, events: SopeEvent[]) => void,
     persist?: Persistence,
   ) {
@@ -143,7 +147,7 @@ export class Session {
   /** The native agent, created (and given the saved history) on first use. */
   get #agent() {
     if (!this.#bridge) {
-      const bridge = new AgentBridge(agentOptions(this.#config, this.allowAll ? "allow" : "ask"), (events) => {
+      const bridge = new AgentBridge(agentOptions(this.#config), (events) => {
         this.#onAgentEvents(events);
         this.#onEvents(this, events);
       });
@@ -291,10 +295,33 @@ export class Session {
     }
   }
 
+  /** Whether a request runs without asking: the mode decides, or an earlier "don't ask again". */
+  #verdict(name: string, input: Record<string, unknown>) {
+    if (this.alwaysAllowed.has(name)) return { allow: true, reason: `${name} is allowed for this session` };
+    return judge(this.mode(), name, input);
+  }
+
   #onPermission(callId: number, turnId: number, name: string, rawInput: string, agentId = 0, subagent?: string): void {
-    if (this.alwaysAllowed.has(name)) return this.#permit(callId, true);
-    this.approvals.push({ callId, turnId: agentId ? -agentId : turnId, name, input: parseInput(rawInput), subagent });
+    const input = parseInput(rawInput);
+    const v = this.#verdict(name, input);
+    if (v.allow) {
+      this.trace.note(`approved ${name} for you: ${v.reason}`);
+      return this.#permit(callId, true);
+    }
+    const reason = this.mode() === "auto" ? v.reason : undefined;
+    this.approvals.push({ callId, turnId: agentId ? -agentId : turnId, name, input, subagent, reason });
     this.chat.scrollToBottom();
+  }
+
+  /** The mode changed: requests it now lets through stop waiting. */
+  recheck(): void {
+    const still: Approval[] = [];
+    for (const a of this.approvals) {
+      const v = this.#verdict(a.name, a.input);
+      if (v.allow) this.#permit(a.callId, true);
+      else still.push({ ...a, reason: this.mode() === "auto" ? v.reason : undefined });
+    }
+    this.approvals = still;
   }
 
   #permit(callId: number, allow: boolean): void {

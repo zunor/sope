@@ -42,7 +42,7 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  const config = loadConfig({ provider: opts.provider, model: opts.model, baseUrl: opts.baseUrl });
+  const config = loadConfig({ provider: opts.provider, model: opts.model, baseUrl: opts.baseUrl, permissions: opts.permissions });
   let images: ImageFile[];
   try {
     images = opts.images.map((path) => readImageFile(path));
@@ -58,7 +58,7 @@ async function main(): Promise<number> {
       return 2;
     }
     const { runPrint } = await import("./print");
-    return runPrint(config, prompt, opts.allowAll, images);
+    return runPrint(config, prompt, images);
   }
 
   if (!process.stdin.isTTY) {
@@ -71,7 +71,7 @@ async function main(): Promise<number> {
     console.error("sope: --image goes with a prompt: sope --image shot.png \"what is wrong here?\"");
     return 2;
   }
-  const app = new App({ config, allowAll: opts.allowAll, prompt: opts.prompt, images });
+  const app = new App({ config, prompt: opts.prompt, images });
   const crash = (err: unknown) => {
     app.restoreTerminal();
     console.error(err);

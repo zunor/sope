@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: MIT
 // Print mode (sope -p): one turn without the TUI. The answer streams to
 // stdout; tool activity and errors go to stderr, so the output can be piped.
-// Nobody is there to approve edits and commands, so built-in tools that
-// change things are refused unless --allow-all.
+// Nobody is there to answer a permission request, so the mode decides
+// alone: "Approve for me" runs what it would let through anyway and refuses
+// the rest, "Ask for approval" refuses everything that would ask, and
+// "Full access" runs it all.
 
 import { AgentBridge } from "./agent/bridge";
 import type { ImageFile } from "./agent/images";
+import { judge, modeLabel } from "./agent/permissions";
 import { HostToolRunner } from "./agent/runner";
 import { describeCall, hostToolsFor, parseInput } from "./agent/tools";
 import { agentOptions, type Config } from "./config";
 
-export async function runPrint(config: Config, prompt: string, allowAll: boolean, images: ImageFile[] = []): Promise<number> {
+export async function runPrint(config: Config, prompt: string, images: ImageFile[] = []): Promise<number> {
   const err = (line: string) => process.stderr.write(`${line}\n`);
   const tools = hostToolsFor(config.provider);
   let exitCode = 1;
@@ -18,15 +21,17 @@ export async function runPrint(config: Config, prompt: string, allowAll: boolean
   let finish!: () => void;
   const finished = new Promise<void>((resolve) => (finish = resolve));
 
-  const bridge = new AgentBridge(agentOptions(config, allowAll ? "allow" : "deny"), (events) => {
+  const bridge = new AgentBridge(agentOptions(config), (events) => {
     for (const ev of events) {
       if (ev.type === "closed") continue;
       if (ev.type === "tool_call" || ev.type === "tool_start") {
         err(`· ${ev.name} ${describeCall(ev.name, parseInput(ev.input)).replace(/\s+/g, " ").slice(0, 120)}`);
         if (ev.type === "tool_call") runner.run(ev.callId, ev.turnId, ev.name, ev.input);
-      } else if (ev.type === "tool_end") {
-        if (ev.isError && ev.result.includes("permissions=deny"))
-          err(`sope: refused ${ev.name} (run with --allow-all to permit edits, commands and fetches)`);
+      } else if (ev.type === "permission") {
+        const v = judge(config.permissions, ev.name, parseInput(ev.input));
+        if (!v.allow && config.permissions === "auto") err(`sope: refused ${ev.name}: ${v.reason}, and -p cannot ask (--permissions full runs it)`);
+        else if (!v.allow) err(`sope: refused ${ev.name}: ${modeLabel(config.permissions)} is on, and -p cannot ask (--permissions auto or full)`);
+        bridge.agent.permit(ev.callId, v.allow);
       } else if (ev.agentId) {
         continue; // subagents: only their tool calls matter here
       } else if (ev.type === "text_delta") {

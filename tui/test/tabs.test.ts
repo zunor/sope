@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 import { expect, test } from "bun:test";
-import { CellBuffer } from "../src/render/buffer";
-import { surfaces } from "../src/theme";
-import { ALL_SESSIONS, drawTabs, layoutTabs, NEW_TAB, type TabInfo } from "../src/ui/tabs";
+import { BOLD, CellBuffer } from "../src/render/buffer";
+import { palette, surfaces } from "../src/theme";
+import { ALL_SESSIONS, drawTabs, layoutTabs, tabTitle, TAB_ROWS, TAB_WIDTH, NEW_TAB, type TabInfo } from "../src/ui/tabs";
 import { ago, SessionList } from "../src/ui/sessions";
 
 const tabs = (n: number, title = "a session title"): TabInfo[] =>
@@ -10,21 +10,24 @@ const tabs = (n: number, title = "a session title"): TabInfo[] =>
 const row = (buf: CellBuffer, y: number) => buf.chars.slice(y * buf.width, (y + 1) * buf.width).join("").trimEnd();
 const at = (buf: CellBuffer, x: number, y: number) => y * buf.width + x;
 
-test("tabs touch; + follows them, the directory and ⋯ sit at the right", () => {
+test("tabs sit side by side; + follows them, the directory and ⋯ sit at the right", () => {
   const l = layoutTabs(tabs(2), 0, 1, 80, "~/src/app");
   expect(l.tabs.map((t) => [t.x, t.width])).toEqual([
-    [1, 22],
-    [23, 22],
+    [1, 24],
+    [26, 24],
   ]);
-  expect(l.plusX).toBe(45);
+  expect(l.plusX).toBe(50);
   expect(l.moreX).toBe(78);
   expect(l.dir).toEqual({ x: 68, text: "~/src/app" });
 });
 
-test("titles shrink, then the directory goes, then the bar scrolls to the active tab", () => {
-  const shrunk = layoutTabs(tabs(3), 0, 0, 70, "~/src/app");
-  expect(shrunk.tabs.length).toBe(3);
+test("titles truncate inside fixed boxes and overflowing tabs keep the active one visible", () => {
+  const shrunk = layoutTabs(tabs(3, "a much longer session title"), 0, 0, 70, "~/src/app");
+  expect(shrunk.tabs.length).toBe(2);
+  expect(shrunk.tabs.every((t) => t.width === TAB_WIDTH)).toBe(true);
   expect(shrunk.tabs[0]!.title.endsWith("…")).toBe(true);
+  const mixed = layoutTabs([{ title: "a", state: "idle" }, { title: "a very long title that will be truncated", state: "waiting" }], 0, 0, 80, "~/src/app");
+  expect(mixed.tabs.map((t) => t.width)).toEqual([TAB_WIDTH, TAB_WIDTH]);
 
   const scrolled = layoutTabs(tabs(12), 7, 0, 60, "~/src/app");
   expect(scrolled.dir).toBeNull();
@@ -33,32 +36,73 @@ test("titles shrink, then the directory goes, then the bar scrolls to the active
   expect(scrolled.plusX + 3).toBeLessThanOrEqual(scrolled.moreX);
 });
 
-test("a tab is one row: a block whose right edge fades into shadow; × on hover", () => {
-  const buf = new CellBuffer(40, 1);
-  const c = surfaces(0x1e1e1e);
-  const hits = drawTabs(buf, 0, 0, 40, [{ title: "one", state: "idle" }, { title: "two", state: "waiting" }], 0, "~/x", 1, c);
-  expect(row(buf, 0)).toBe(" one     ? two ×   +             ~/x  ⋯");
-  // tab 1: cells 0..5 flat, 6..7 fading darker; tab 2 starts flat again at 8
-  expect(buf.bg[at(buf, 0, 0)]).toBe(c.tabActive);
-  expect(buf.bg[at(buf, 5, 0)]).toBe(c.tabActive);
-  const fade1 = buf.bg[at(buf, 6, 0)]!;
-  const fade2 = buf.bg[at(buf, 7, 0)]!;
-  expect(fade1 & 0xff).toBeLessThan(c.tabActive & 0xff);
-  expect(fade2 & 0xff).toBeLessThan(fade1 & 0xff);
-  expect(buf.bg[at(buf, 8, 0)]).toBe(c.tab);
-  // clicks: the × closes, the rest of the tab selects, + and ⋯
-  expect(hits.find((h) => 15 >= h.x0 && 15 < h.x1)).toMatchObject({ index: 1, close: true });
-  expect(hits.find((h) => 11 >= h.x0 && 11 < h.x1)?.close).toBeUndefined();
-  expect(hits.find((h) => h.index === NEW_TAB)!.x0).toBe(18);
-  expect(hits.find((h) => h.index === ALL_SESSIONS)!.x0).toBe(37);
+test("one-row tabs wrap text in subtle backgrounds with compact spacing and matching hit targets", () => {
+  expect(TAB_ROWS).toBe(1);
+  for (const background of [0x18191e, 0xffffff]) {
+    const colors = surfaces(background);
+    const buf = new CellBuffer(100, 3);
+    const hits = drawTabs(buf, 0, 0, 100, [
+      { title: "one", state: "idle" }, { title: "two", state: "waiting" }, { title: "three", state: "unread" },
+    ], 0, "~/x", 1, 0, colors);
+    expect(row(buf, 0).slice(0, 49)).toBe("  one                      ? two              ×  ");
+    expect(row(buf, 1)).toBe("");
+    expect(row(buf, 2)).toBe("");
+    for (let i = 0; i < 24; i++) {
+      expect(buf.bg[i]).toBe(colors.tabSelected);
+      expect(buf.bg[25 + i]).toBe(colors.tabHover);
+      expect(buf.bg[50 + i]).toBe(colors.tab);
+    }
+    expect(buf.bg[24]).toBe(-1);
+    expect(buf.bg[49]).toBe(-1);
+    expect(buf.attr[at(buf, 2, 0)]! & BOLD).toBe(BOLD);
+    const hit = (x: number, y: number) => hits.find((h) => x >= h.x0 && x < h.x1 && y >= h.y0 && y < h.y1);
+    expect(hit(46, 0)).toMatchObject({ index: 1, close: true });
+    expect(hit(46, 1)).toBeUndefined();
+    expect(hit(30, 0)).toEqual({ x0: 25, x1: 49, y0: 0, y1: 1, index: 1 });
+    expect(hit(24, 0)).toBeUndefined();
+    expect(hit(25, 0)?.index).toBe(1);
+    expect(hit(75, 0)?.index).toBe(NEW_TAB);
+    expect(hit(98, 0)?.index).toBe(ALL_SESSIONS);
+  }
+});
+
+test("hovered titles scroll after a pause, show the end and reset when unhovered", () => {
+  expect(tabTitle("abcdefghij", 5)).toBe("abcd…");
+  expect(tabTitle("abcdefghij", 5, 0)).toBe("abcd…");
+  expect(tabTitle("abcdefghij", 5, 1040)).toBe("bcdef");
+  expect(tabTitle("abcdefghij", 5, 2000)).toBe("fghij");
+  expect(tabTitle("abcdefghij", 5, 3040)).toBe("efghi");
+  expect(tabTitle("你好世界abc", 5, 1040)).toBe(" 好世"); // no half-wide characters
+  expect(tabTitle("e\u0301abcdefgh", 4, 1040)).toBe("abcd");
+  expect(tabTitle("short", 18, 9000)).toBe("short");
+
+  const buf = new CellBuffer(80, 3);
+  const info: TabInfo[] = [{ title: "A very long title that scrolls without moving its border", state: "idle" }];
+  const first = drawTabs(buf, 0, 0, 80, info, 0, "~/x", 0, 0);
+  const original = row(buf, 0);
+  buf.clear();
+  const later = drawTabs(buf, 0, 0, 80, info, 0, "~/x", 0, 2000);
+  expect(later).toEqual(first);
+  expect(row(buf, 0)).not.toBe(original);
+  expect(buf.chars[23]).toBe(" ");
+  expect(buf.bg[23]).toBe(surfaces(null).tabSelected);
+  expect(buf.chars[21]).toBe("×");
+  buf.clear();
+  drawTabs(buf, 0, 0, 80, info, 0, "~/x", null, 2000);
+  expect(row(buf, 0)).toContain("A very long title…");
+});
+
+test("fixed-width active tabs and overflow controls fit a narrow terminal", () => {
+  const l = layoutTabs(tabs(12), 7, 1, 22, "~/src/app");
+  expect(l.tabs.some((t) => t.index === 7)).toBe(true);
+  expect(l.plusX + 3).toBeLessThanOrEqual(l.moreX);
 });
 
 test("surfaces follow the terminal background", () => {
   const dark = surfaces(0x101010);
-  expect(dark.tabActive).toBeGreaterThan(dark.tab); // lighter on dark
-  expect(dark.shadow).toBeLessThan(0x101010);
+  expect(dark.panelSelected).toBeGreaterThan(dark.panel); // lighter on dark
   const light = surfaces(0xffffff);
-  expect(light.tabActive).toBeLessThan(light.tab); // darker on light
+  expect(light.panelSelected).toBeLessThan(light.panel); // darker on light
 });
 
 test("relative times", () => {

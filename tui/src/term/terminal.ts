@@ -2,6 +2,7 @@
 // Raw terminal control: raw mode, alternate screen, bracketed paste, mouse
 // reporting, and guaranteed restoration on exit.
 
+import { KittyGraphics } from "../render/graphics";
 import { detectTruecolor } from "../render/color";
 
 const ENTER = [
@@ -23,6 +24,7 @@ const QUERY_BACKGROUND = "\x1b]11;?\x1b\\";
 
 export class Terminal {
   readonly truecolor = detectTruecolor();
+  readonly graphics = new KittyGraphics();
   #active = false;
   #mouse = false;
   #restoreOnExit = () => this.leave();
@@ -44,14 +46,14 @@ export class Terminal {
     this.#active = true;
     process.stdin.setRawMode(true);
     process.stdin.resume();
-    this.write(ENTER + (this.#mouse ? MOUSE_ON : "") + QUERY_BACKGROUND);
+    this.write(ENTER + (this.#mouse ? MOUSE_ON : "") + QUERY_BACKGROUND + this.graphics.query());
     process.on("exit", this.#restoreOnExit);
   }
 
   leave(): void {
     if (!this.#active) return;
     this.#active = false;
-    this.write((this.#mouse ? MOUSE_OFF : "") + LEAVE);
+    this.write(this.graphics.clear() + (this.#mouse ? MOUSE_OFF : "") + LEAVE);
     process.stdin.setRawMode(false);
     process.stdin.pause();
     process.off("exit", this.#restoreOnExit);

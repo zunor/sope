@@ -64,11 +64,15 @@ TUI 是全屏的（终端的备用屏幕，和 vim、htop 一样）：退出后�
 
 ### 会话
 
-顶部一行是最近用过的几个会话（最多 5 个），最右侧的 `⋯`（或 `/sessions`）列出当前目录保存过的全部会话，可以输入文字筛选、回车打开。每个标签是一个独立的 agent，切走后照常在后台运行。会话存在 SQLite 里（`~/.local/share/sope/sope.db`，可用 `SOPE_DB` 改位置），下次在同一目录打开 sope 时原样恢复：界面上的对话记录，以及模型记得的内容（库的 `sope_agent_history` / `sope_agent_load_history`）。
+顶部是最近用过的几个会话（最多 5 个），每个会话是一行高、固定 24 列宽的浅底色标签（极窄窗口会缩小），标签间仅留一格分隔，长标题截断、鼠标悬浮时缓慢往返滚动；当前会话的标题加粗、底色稍亮；最右侧的 `⋯`（或 `/sessions`）列出当前目录保存过的全部会话，可以输入文字筛选、回车打开。每个标签是一个独立的 agent，切走后照常在后台运行。会话存在 SQLite 里（`~/.local/share/sope/sope.db`，可用 `SOPE_DB` 改位置），下次在同一目录打开 sope 时原样恢复：界面上的对话记录，以及模型记得的内容（库的 `sope_agent_history` / `sope_agent_load_history`）。
 
 点 `+`、`alt+n` 或 `/new` 新建会话；点击标签或 `alt+1…9` 切换；鼠标悬停在标签上会出现 `×`，点击（或 `alt+w`、`/close`）关闭。关闭只是不再列出，数据仍留在数据库里。标签上的 `?` 表示那个会话在等你批准，`•` 表示它在后台跑完了。
 
 鼠标由 TUI 接管：拖动选中文字，松开即复制到剪贴板（底栏会提示“copied N characters”）。想用终端自己的选择，按住 Shift（iTerm2 是 Option）再拖，或者 `/mouse` 关掉接管；`SOPE_MOUSE=0` 默认关闭。
+
+状态栏的像素流星沿小正方形每 3 秒转一圈，只占一行高、两列宽。启动时探测 Kitty 图片协议，收到成功回复才启用；未支持或在 tmux/screen/Zellij 内时回退到一行高的盲文点阵动画。`SOPE_GRAPHICS=0` 可关闭像素效果。独立预览（不调用模型）：`bun scripts/preview-meteor.ts`。
+
+输入 `/` 会在输入框上方弹出命令列表，继续输入可筛选；`↑`/`↓` 选择、`Enter` 使用、`Tab` 只补全、`Esc` 收起，也支持鼠标选择和滚轮。必须带参数的命令先补全到输入框。
 
 ### 工具与权限
 
@@ -77,13 +81,23 @@ TUI 是全屏的（终端的备用屏幕，和 vim、htop 一样）：退出后�
 | 工具 | 作用 | 需要批准 |
 |---|---|---|
 | `read`、`glob`、`grep` | 读文件（带行号）、按模式找文件、正则搜索（跳过 `.gitignore` 忽略的文件） | 不需要 |
-| `write`、`edit` | 新建或覆盖文件、精确替换；必须先读过，且读过之后没被别人改过 | 需要，并预览改动 |
-| `bash` | 在当前目录运行命令（无终端、无输入，默认超时 2 分钟）；可以放到后台 | 需要，并显示命令 |
+| `write`、`edit` | 新建或覆盖文件、精确替换；必须先读过，且读过之后没被别人改过 | 看权限模式，并预览改动 |
+| `bash` | 在当前目录运行命令（无终端、无输入，默认超时 2 分钟）；可以放到后台 | 看权限模式，并显示命令 |
 | `bash_output`、`bash_kill` | 查看、停止后台命令 | 不需要 |
-| `web_fetch` | 抓取网页，转成文本 | 需要，并显示 URL |
+| `web_fetch` | 抓取网页，转成文本 | 看权限模式，并显示 URL |
 | `todo_write` | 任务清单，显示在对话里 | 不需要 |
 
-模型（或它的子 agent）要运行需要批准的工具时，输入框会换成一个确认框：`y` 允许一次，`a` 本次会话总是允许这个工具，`n` 拒绝（模型会收到拒绝并改变做法），`esc` 拒绝并停止整个回合。`--allow-all` 跳过所有确认。`-p` 模式下无法确认，需要批准的工具一律拒绝（模型会收到说明），除非加 `--allow-all`。
+谁来批准由权限模式决定，底栏左侧显示当前模式，`shift+tab` 轮换，`/permissions` 或点击底栏的模式名打开选择框（`↑`/`↓` 选择，回车确认）：
+
+| 模式 | 行为 |
+|---|---|
+| Ask for approval（`ask`） | 上表“看权限模式”的工具每次都弹窗确认 |
+| Approve for me（`auto`，默认） | 尽量放行，只有要紧的操作才弹窗：删除或改动工作目录以外的文件（临时目录除外）、删除整个工作目录或 `.git`、`git push` 和其他发布（`npm publish`、`gh` 的写操作）、丢弃未提交的 git 改动（`reset --hard`、`clean -f`、`checkout -- 文件`）、`sudo` 等系统改动、全局安装（`npm -g`、`brew install`）、`ssh`/`scp` 远程操作、`curl` 往外发数据、把下载的脚本直接交给 shell。弹窗里会写明为什么要问 |
+| Full access（`full`） | 全部直接执行 |
+
+“Approve for me”像 shell 一样拆解命令（管道、`&&`、`$( )`、`sh -c`、`find -exec`、`xargs` 里的命令都会检查），但它防的是失误，不是恶意：它放行的脚本和程序（测试、`python x.py`）本身能做任何事，抓网页也直接放行。在 `/` 或 home 目录下运行时，工作目录范围太大，除临时目录外的删除和写入都会问。
+
+确认弹窗里 `↑`/`↓` 选择、回车确认，也可以按数字 `1`–`4`、点击，或用快捷键：`y` 允许一次，`a` 本次会话不再询问这个工具，`n` 拒绝（模型会收到拒绝并改变做法），`esc` 拒绝并停止整个回合。等待中的请求在切换到更宽松的模式后会自动放行。`--permissions ask|auto|full`（或 `SOPE_PERMISSIONS`）设置启动时的模式，`--allow-all` 等于 `full`。`-p` 模式下没人能确认：按模式判断，需要问的一律拒绝（模型会收到说明）。
 
 ### 按键与命令
 
@@ -92,17 +106,22 @@ TUI 是全屏的（终端的备用屏幕，和 vim、htop 一样）：退出后�
 | `enter` | 发送 |
 | `ctrl+j` / `alt+enter` | 换行 |
 | `esc` | 取消当前回合（连同子 agent） |
+| `shift+tab` | 轮换权限模式 |
 | `alt+n` / `alt+w` | 新建 / 关闭会话 |
+| `alt+m` | 选择模型 |
 | `alt+1` … `alt+9` | 切换到第 N 个会话 |
 | `ctrl+t` / `F2` | 打开/关闭 ABI trace 面板：`→` 是 TUI 调进库的调用，`←` 是 `sope_poll` 返回的事件 |
 | `pgup` / `pgdn` | 滚动对话 |
+| 悬浮 / 点击工具输出的 `⎿` 或 `… N more lines` | 连接符与提示联动高亮；点击展开，再点 `show fewer lines` 或连接符收起 |
 | `↑` / `↓` | 在多行输入里移动；到达边界后翻历史记录 |
 | `ctrl+a/e`、`alt+b/f`、`ctrl+w/u/k` | Emacs 风格编辑（按词移动支持中文分词） |
 | `ctrl+c` | 有回合在跑时取消，输入框非空时清空，否则退出 |
 
-命令：`/help`、`/new`、`/close`、`/clear`（同时清空对话历史）、`/compact [重点]`、`/model <name>`、`/thinking`（展开/折叠推理过程）、`/permissions`、`/trace`、`/mouse`、`/set <key> [value]`、`/quit`。
+命令：`/help`、`/new`、`/close`、`/clear`（同时清空对话历史）、`/compact [重点]`、`/model [name]`（不带参数打开模型选择框）、`/thinking`（展开/折叠推理过程）、`/permissions [ask|auto|full]`、`/trace`、`/mouse`、`/set <key> [value]`、`/quit`。
 
-底栏右侧的 `ctx` 是模型最近一次看到的上下文大小。超过 `SOPE_COMPACT_THRESHOLD`（默认 100000 token）时，历史会自动压缩成摘要；`/compact` 可以随时手动压缩。界面上的对话记录保持不变，只是模型之后看到的是摘要。
+`/model` 或 `alt+m` 打开模型选择框：列出端点（`GET /models`）提供的对话模型和上下文大小，最近用过的排在最前；直接输入文字搜索，`↑`/`↓` 选择、回车使用，端点没列出的名字也可以照输入的用。选中的模型从当前会话的下一回合起生效，之后新开的会话也用它。
+
+上下文超过 `SOPE_COMPACT_THRESHOLD`（默认 100000 token）时，历史会自动压缩成摘要；`/compact` 可以随时手动压缩。界面上的对话记录保持不变，只是模型之后看到的是摘要。
 
 ### 配置
 
@@ -116,9 +135,11 @@ TUI 是全屏的（终端的备用屏幕，和 vim、htop 一样）：退出后�
 | `SOPE_DB` | | `~/.local/share/sope/sope.db`（会话数据库） |
 | `SOPE_BASE_URL` | `--base-url` | `https://api-taas.moi.matrixorigin.cn/v1` |
 | `SOPE_PROVIDER` | `--provider` | 有 key 时为 `openai`，否则 `mock` |
+| `SOPE_PERMISSIONS` | `--permissions`, `--allow-all` | `auto`（Approve for me）；`ask`、`full` |
 | `SOPE_COMPACT_THRESHOLD` | | `100000`（`0` 关闭自动压缩） |
 | `SOPE_LIB` | | 加载另一份 libsope，而不是内嵌的那份 |
 | `SOPE_MOUSE` | | `1`；`0` 时鼠标留给终端（滚轮会变成 ↑/↓） |
+| `SOPE_GRAPHICS` | | 自动探测 Kitty 图片协议；`0` 关闭像素流星 |
 | `SOPE_TRUECOLOR` | | 自动检测；`0`/`1` 强制 256 色/真彩色 |
 
 ## 嵌入 libsope
@@ -198,8 +219,10 @@ tui/src/
   main.ts, cli.ts     sope 可执行文件入口与参数解析
   app.ts, print.ts    全屏 TUI 与 -p 模式
   session.ts store.ts 一个会话（标签）的状态；SQLite 保存与恢复
+  agent/permissions.ts 权限模式；“Approve for me”怎么判断命令和文件
+  agent/models.ts     端点的模型列表（模型选择框用）
   agent/              Worker 轮询线程、bridge、工具的显示与预览、mock 用的宿主工具
   term/ render/       raw mode、输入解码、cell 缓冲区、diff 渲染器
-  unicode/ ui/        字素与列宽、换行、Markdown、编辑器、对话视图、标签栏、状态行、trace 面板
+  unicode/ ui/        字素与列宽、换行、Markdown、编辑器、对话视图、标签栏、状态行、弹窗、模型选择框、trace 面板
 scripts/              release.sh（构建并打包）、install.sh
 ```

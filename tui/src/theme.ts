@@ -23,12 +23,10 @@ export const SPINNER_MS = 80;
 
 /** Background shades for raised and tinted areas. */
 export interface Surfaces {
-  /** Inactive tab. */
+  /** Subtle backgrounds for one-row session tabs. */
   tab: number;
-  /** Active tab. */
-  tabActive: number;
-  /** Where a tab's right edge fades to: its soft shadow. */
-  shadow: number;
+  tabHover: number;
+  tabSelected: number;
   /** Floating panels (the session list). */
   panel: number;
   /** The selected row of a panel. */
@@ -45,9 +43,9 @@ export function surfaces(bg: number | null): Surfaces {
   const dark = luminance(base) < 0.5;
   const lift = (t: number) => (dark ? mix(base, 0xffffff, t) : mix(base, 0x000000, t * 0.7));
   return {
-    tab: lift(0.06),
-    tabActive: lift(0.15),
-    shadow: dark ? mix(base, 0x000000, 0.35) : mix(base, 0x000000, 0.14),
+    tab: lift(0.10),
+    tabHover: lift(0.15),
+    tabSelected: lift(0.21),
     panel: lift(0.08),
     panelSelected: lift(0.17),
     added: mix(base, 0x2ea043, dark ? 0.2 : 0.16),

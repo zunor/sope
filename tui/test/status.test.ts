@@ -52,33 +52,44 @@ test("colors mix", () => {
 });
 
 test("the status line reads verb, time, rate and tip", () => {
-  const buf = new CellBuffer(80, 1);
-  drawStatus(buf, 0, 0, 80, { verb: "Thinking", color: 0xa78bfa, elapsedMs: 64_000, rate: 37.6, tip: "esc cancels the turn" }, 0);
-  expect(row(buf, 0)).toBe("✦       Thinking… (1m 4s · 38 tok/s · tip: esc cancels the turn)");
+  const buf = new CellBuffer(80, 2);
+  drawStatus(buf, 0, 0, 80, { verb: "Thinking", color: 0xa78bfa, elapsedMs: 64_000, rate: 37.6, tip: "esc cancels the turn" }, 250);
+  expect(row(buf, 0)).toBe("⠏  Thinking… (1m 4s · 38 tok/s · tip: esc cancels the turn)");
+  expect(row(buf, 1)).toBe("");
   buf.clear();
-  drawStatus(buf, 0, 0, 30, { verb: "Thinking", color: 0xa78bfa, elapsedMs: 3_000, rate: null, tip: "esc cancels the turn" }, 0);
-  expect(row(buf, 0)).toBe("✦       Thinking… (3s)");
+  drawStatus(buf, 0, 0, 30, { verb: "Thinking", color: 0xa78bfa, elapsedMs: 3_000, rate: null, tip: "esc cancels the turn" }, 750);
+  expect(row(buf, 0)).toBe("⠉⠉ Thinking… (3s)");
+  expect(row(buf, 1)).toBe("");
 });
 
-import { METEOR_WIDTH, meteorCell } from "../src/ui/meteor";
+import { METEOR_ROWS, METEOR_WIDTH, meteorCells } from "../src/ui/meteor";
 
-const sky = (now: number) => Array.from({ length: METEOR_WIDTH }, (_, i) => meteorCell(i, now).glyph).join("");
+/** The single-row track at time `now`. */
+const frame = (now: number) => {
+  const g = Array.from({ length: METEOR_ROWS }, () => Array<string>(METEOR_WIDTH).fill(" "));
+  for (const c of meteorCells(now)) g[c.y]![c.x] = c.glyph;
+  return g.map((r) => r.join(""));
+};
 
-test("the meteor streaks across with a thinning tail, then the sky is empty", () => {
-  expect(sky(0)).toBe("✦      ");
-  expect(sky(55 * 3)).toBe("─━━✦   ");
-  expect(sky(55 * 6)).toBe("··──━━✦");
-  expect(sky(55 * 9)).toBe("   ··──"); // the head has left; the tail follows
-  expect(sky(55 * 13)).toBe("       "); // gone
-  expect(sky(55 * 13 + 650)).toBe("✦      "); // and again
+test("the meteor circles all four sides of a square within one terminal row", () => {
+  expect([METEOR_WIDTH, METEOR_ROWS]).toEqual([2, 1]);
+  expect(frame(0)).toEqual(["⡇ "]); // left edge
+  expect(frame(750)).toEqual(["⠉⠉"]); // top edge
+  expect(frame(1500)).toEqual([" ⢸"]); // right edge
+  expect(frame(2250)).toEqual(["⣀⣀"]); // bottom edge
+  expect(frame(3000)).toEqual(frame(0)); // continuous orbit
 });
 
-test("the head glows brighter than the tail, which fades", () => {
-  const glow = (i: number) => meteorCell(i, 55 * 6).glow;
-  expect(glow(6)).toBeGreaterThan(1);
-  expect(glow(5)).toBe(1);
-  expect(glow(4)).toBeGreaterThan(glow(3));
-  expect(glow(1)).toBeGreaterThan(0);
+test("the head's cell is brighter than the tail and the orbit wraps smoothly", () => {
+  const cells = meteorCells(750);
+  expect(cells[1]!.glow).toBeGreaterThan(1);
+  expect(cells[1]!.glow).toBeGreaterThan(cells[0]!.glow);
+  expect(frame(-250)).toEqual(frame(2750));
+  for (let now = 0; now < 3000; now += 250) {
+    const buf = new CellBuffer(2, 1);
+    for (const c of meteorCells(now)) buf.text(c.x, c.y, c.glyph);
+    expect(buf.chars.join("")).toBe(frame(now)[0]!);
+  }
 });
 
 import { luminance, parseOscColor } from "../src/render/color";

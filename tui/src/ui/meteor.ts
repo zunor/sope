@@ -1,47 +1,58 @@
 // SPDX-License-Identifier: MIT
-// The activity indicator in front of the status line: a meteor streaking
-// across a short track, its tail thinning and fading behind the head.
-//
-//   ✦·······   ━✦──────   ─━━✦    ·─━━✦   ···─━━✦   (gone, a pause, again)
-//
-// The head is a bright spark. The tail is drawn thick to thin (━ ─ ·) and
-// fades from the head's color into the faint rule color, so the streak reads
-// as one glowing line in motion. Between passes the track stays empty for a
-// moment, the way meteors come and go.
+// A meteor circles a square inside two Braille characters. Each character
+// holds 2×4 dots, giving us a 4×4 track without using a second terminal row.
 
 import type { CellBuffer } from "../render/buffer";
 import { mix } from "../render/color";
 import { palette } from "../theme";
 
-export const METEOR_WIDTH = 7;
-const TAIL = ["━", "━", "─", "─", "·", "·"]; // nearest the head first
-const STEP_MS = 55; // one cell of travel
-const PAUSE_MS = 650; // empty sky between passes
-const TRAVEL = METEOR_WIDTH + TAIL.length; // until the tail has left the track
-const PERIOD_MS = TRAVEL * STEP_MS + PAUSE_MS;
+export const METEOR_WIDTH = 2;
+export const METEOR_ROWS = 1;
+
+// Clockwise around a 4×4 dot square, starting at the top left.
+const TRACK: ReadonlyArray<readonly [number, number]> = [
+  [0, 0], [1, 0], [2, 0], [3, 0],
+  [3, 1], [3, 2], [3, 3],
+  [2, 3], [1, 3], [0, 3],
+  [0, 2], [0, 1],
+];
+// Braille bit positions by row, left then right dot.
+const DOT_BITS = [[0, 3], [1, 4], [2, 5], [6, 7]] as const;
+const TAIL = 3;
+const STEP_MS = 250; // three seconds per orbit, matching the pixel animation
+const PERIOD_MS = TRACK.length * STEP_MS;
 
 export interface MeteorCell {
+  x: number;
+  y: number;
   glyph: string;
   /** 0 = faint, 1 = the meteor's color, above 1 = brighter (the head). */
   glow: number;
 }
 
-/** What cell `i` of the track shows at time `now`. */
-export function meteorCell(i: number, now: number): MeteorCell {
+/** Pack the moving head and trailing dots into single-row terminal cells. */
+export function meteorCells(now: number): MeteorCell[] {
   const t = ((now % PERIOD_MS) + PERIOD_MS) % PERIOD_MS;
-  const head = Math.floor(t / STEP_MS); // past the end during the pause
-  const behind = head - i;
-  if (head >= TRAVEL || behind < 0 || behind > TAIL.length) return { glyph: " ", glow: 0 };
-  if (behind === 0) return { glyph: "✦", glow: 1.5 };
-  return { glyph: TAIL[behind - 1]!, glow: 1 - (behind - 1) / TAIL.length };
+  const head = Math.floor(t / STEP_MS);
+  const masks = [0, 0];
+  const glows = [0, 0];
+  for (let k = 0; k <= TAIL; k++) {
+    const [dotX, dotY] = TRACK[(head - k + TRACK.length) % TRACK.length]!;
+    const x = Math.floor(dotX / 2);
+    masks[x] = masks[x]! | (1 << DOT_BITS[dotY]![dotX % 2]!);
+    // A terminal colors whole characters, so each cell uses its brightest dot.
+    glows[x] = Math.max(glows[x]!, k === 0 ? 1.5 : 1 - (k - 1) / TAIL);
+  }
+  return masks.flatMap((mask, x) => mask ? [{
+    x, y: 0, glyph: String.fromCodePoint(0x2800 + mask), glow: glows[x]!,
+  }] : []);
 }
 
-/** Draws the track in shades of `color`; returns the x after it. */
+/** Draws the meteor on row y in shades of `color`; returns the x after it. */
 export function drawMeteor(buf: CellBuffer, x: number, y: number, color: number, now = performance.now()): number {
-  for (let i = 0; i < METEOR_WIDTH; i++) {
-    const { glyph, glow } = meteorCell(i, now);
-    const fg = glow > 1 ? mix(color, 0xffffff, (glow - 1) * 1.2) : mix(palette.faint, color, 0.15 + 0.85 * glow);
-    x = buf.text(x, y, glyph, { fg });
+  for (const c of meteorCells(now)) {
+    const fg = c.glow > 1 ? mix(color, 0xffffff, (c.glow - 1) * 1.2) : mix(palette.faint, color, 0.15 + 0.85 * c.glow);
+    buf.text(x + c.x, y + c.y, c.glyph, { fg });
   }
-  return x;
+  return x + METEOR_WIDTH;
 }

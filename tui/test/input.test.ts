@@ -5,7 +5,7 @@ import { InputParser, keyId, type InputEvent } from "../src/term/input";
 const enc = new TextEncoder();
 const ids = (events: InputEvent[]) =>
   events.map((e) =>
-    e.type === "key" ? keyId(e) : e.type === "mouse" ? `mouse:${e.action}` : e.type === "osc" ? `osc:${e.data}` : `${e.type}:${e.text}`,
+    e.type === "key" ? keyId(e) : e.type === "mouse" ? `mouse:${e.action}` : (e.type === "osc" || e.type === "apc") ? `${e.type}:${e.data}` : `${e.type}:${e.text}`,
   );
 
 function parse(...chunks: string[]): string[] {

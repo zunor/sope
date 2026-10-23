@@ -5,10 +5,13 @@ import { CliError, parseArgs } from "../src/cli";
 import { agentOptions, loadConfig, parseEnvFile } from "../src/config";
 
 test("parses flags and the prompt", () => {
-  expect(parseArgs([])).toEqual({ print: false, allowAll: false, images: [], version: false, help: false });
+  expect(parseArgs([])).toEqual({ print: false, images: [], version: false, help: false });
   expect(parseArgs(["-i", "a.png", "--image=b.jpg", "why?"])).toMatchObject({ images: ["a.png", "b.jpg"], prompt: "why?" });
   const o = parseArgs(["-p", "--model=glm-4", "--allow-all", "fix", "the", "bug"]);
-  expect(o).toMatchObject({ print: true, model: "glm-4", allowAll: true, prompt: "fix the bug" });
+  expect(o).toMatchObject({ print: true, model: "glm-4", permissions: "full", prompt: "fix the bug" });
+  expect(parseArgs(["--permissions", "ask"]).permissions).toBe("ask");
+  expect(parseArgs(["--permissions=auto"]).permissions).toBe("auto");
+  expect(() => parseArgs(["--permissions", "maybe"])).toThrow(CliError);
   expect(parseArgs(["--", "-p", "is", "text"]).prompt).toBe("-p is text");
   expect(() => parseArgs(["--model"])).toThrow(CliError);
   expect(() => parseArgs(["--nope"])).toThrow(CliError);
@@ -94,8 +97,11 @@ test("shows todo lists", () => {
   expect(todosOf({})).toBeNull();
 });
 
-test("permission mode reaches the agent", () => {
+test("the permission mode defaults to Approve for me; the agent always asks the host", () => {
   const mock = loadConfig({}, {}, {});
+  expect(mock.permissions).toBe("auto");
+  expect(loadConfig({}, { SOPE_PERMISSIONS: "full" }, {}).permissions).toBe("full");
+  expect(loadConfig({ permissions: "ask" }, { SOPE_PERMISSIONS: "full" }, {}).permissions).toBe("ask");
+  expect(loadConfig({}, { SOPE_PERMISSIONS: "bogus" }, {}).permissions).toBe("auto");
   expect(agentOptions(mock).permissions).toBe("ask");
-  expect(agentOptions(mock, "deny").permissions).toBe("deny");
 });

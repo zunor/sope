@@ -14,10 +14,13 @@
 //   SOPE_COMPACT_THRESHOLD  compact the history past this many tokens (0: never)
 //   SOPE_MOUSE              0 leaves the mouse to the terminal (default: the TUI
 //                           takes it for wheel scrolling and drag-to-copy)
+//   SOPE_PERMISSIONS        ask | auto | full: who approves edits, commands and
+//                           fetches (default auto, "Approve for me")
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { DEFAULT_MODE, parseMode, type PermissionMode } from "./agent/permissions";
 
 export const DEFAULT_BASE_URL = "https://api-taas.moi.matrixorigin.cn/v1";
 export const DEFAULT_MODEL = "glm-5.3";
@@ -34,9 +37,11 @@ export interface Config {
   apiKey?: string;
   compactThreshold: number;
   mouse: boolean;
+  /** Who approves built-in tools that change things (agent/permissions.ts). */
+  permissions: PermissionMode;
 }
 
-export type Overrides = Partial<Pick<Config, "provider" | "model" | "baseUrl">>;
+export type Overrides = Partial<Pick<Config, "provider" | "model" | "baseUrl" | "permissions">>;
 
 export function configPath(env: Record<string, string | undefined> = process.env): string {
   return join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "sope", "config");
@@ -85,6 +90,7 @@ export function loadConfig(
     apiKey,
     compactThreshold: Number.isFinite(threshold) && threshold >= 0 ? threshold : DEFAULT_COMPACT_THRESHOLD,
     mouse: !/^(0|false|off|no)$/i.test(get("SOPE_MOUSE") ?? ""),
+    permissions: overrides.permissions ?? parseMode(get("SOPE_PERMISSIONS") ?? "") ?? DEFAULT_MODE,
   };
 }
 
@@ -95,7 +101,7 @@ export function systemPrompt(cwd = process.cwd(), now = new Date()): string {
     `Platform: ${process.platform}. Today is ${now.toDateString()}.`,
     "",
     "Use the tools to look things up instead of guessing: read, glob and grep are free to use.",
-    "write, edit, bash and web_fetch need the user's approval each time, so batch work sensibly and explain briefly what you are about to change.",
+    "write, edit, bash and web_fetch may need the user's approval. Explain briefly what you are about to change; if a call is refused, do not retry it as is: ask the user or take another way.",
     "Read a file before editing it. Prefer small, verifiable steps, and check your work (run the tests or the program) when you can.",
     "For work with several steps, keep a todo list with todo_write so the user can follow along.",
     "For broad investigations, launch subagents with the agent tool, several at once when the parts are independent.",
@@ -105,11 +111,12 @@ export function systemPrompt(cwd = process.cwd(), now = new Date()): string {
 
 /**
  * Agent options for a config; secrets stay out of anything that gets
- * displayed. permissions: whether built-in tools that change things ask
- * first (the TUI answers), run freely (--allow-all), or are refused.
+ * displayed. Built-in tools that change things always ask: the host
+ * answers each request by the permission mode (agent/permissions.ts), so a
+ * new mode applies at once, even to requests already waiting.
  */
-export function agentOptions(c: Config, permissions: "ask" | "allow" | "deny" = "ask"): Record<string, string> {
-  const options: Record<string, string> = { provider: c.provider, system: systemPrompt(), permissions };
+export function agentOptions(c: Config): Record<string, string> {
+  const options: Record<string, string> = { provider: c.provider, system: systemPrompt(), permissions: "ask" };
   if (c.model) options.model = c.model;
   if (c.imageModel && c.imageModel !== c.model) options.image_model = c.imageModel;
   if (c.compactThreshold) options["compact.threshold"] = String(c.compactThreshold);

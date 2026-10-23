@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Command-line parsing for the sope executable. Pure: no terminal, no libsope.
 
+import { parseMode, type PermissionMode } from "./agent/permissions";
+
 export interface CliOptions {
   print: boolean;
   prompt?: string;
   model?: string;
   provider?: string;
   baseUrl?: string;
-  allowAll: boolean;
+  /** --permissions, or --allow-all (full). */
+  permissions?: PermissionMode;
   /** --image files, attached to the prompt. */
   images: string[];
   version: boolean;
@@ -25,19 +28,23 @@ Options:
       --provider <name>  openai or mock (default: openai when an API key is set)
       --base-url <url>   OpenAI-compatible endpoint (default: $SOPE_BASE_URL)
   -i, --image <file>     attach an image to the prompt (PNG, JPEG, GIF, WebP; repeatable)
-      --allow-all        run edits and shell commands without asking
+      --permissions <m>  who approves edits, commands and fetches:
+                           ask   ask for approval every time
+                           auto  approve for me: only risky steps ask (default)
+                           full  full access: nothing asks
+      --allow-all        same as --permissions full
   -v, --version          print versions and exit
   -h, --help             show this help
 
 Configuration: ~/.config/sope/config (KEY=VALUE lines) or environment
 variables: SOPE_API_KEY, SOPE_MODEL, SOPE_IMAGE_MODEL (default kimi-k3 on the
 default endpoint; "off" sends images to SOPE_MODEL), SOPE_BASE_URL,
-SOPE_PROVIDER, SOPE_COMPACT_THRESHOLD, SOPE_DB. SOPE_LIB loads a different libsope.`;
+SOPE_PROVIDER, SOPE_PERMISSIONS, SOPE_COMPACT_THRESHOLD, SOPE_DB. SOPE_LIB loads a different libsope.`;
 
 export class CliError extends Error {}
 
 export function parseArgs(argv: string[]): CliOptions {
-  const opts: CliOptions = { print: false, allowAll: false, images: [], version: false, help: false };
+  const opts: CliOptions = { print: false, images: [], version: false, help: false };
   const words: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -67,8 +74,15 @@ export function parseArgs(argv: string[]): CliOptions {
       case "--image":
         opts.images.push(value());
         break;
+      case "--permissions": {
+        const v = value();
+        const mode = parseMode(v);
+        if (!mode) throw new CliError(`unknown permission mode ${v} (ask, auto or full)`);
+        opts.permissions = mode;
+        break;
+      }
       case "--allow-all":
-        opts.allowAll = true;
+        opts.permissions = "full";
         break;
       case "-v":
       case "--version":

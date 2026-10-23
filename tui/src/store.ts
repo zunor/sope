@@ -6,6 +6,7 @@
 //             history is what the model remembers (sope_agent_history),
 //             time_deleted marks one closed from its tab (kept, hidden)
 //   message   the transcript as the TUI shows it, one row per entry
+//   model     models picked in the model popup, for its Recent section
 //
 // WAL lets several sope processes in the same directory share the file.
 
@@ -36,6 +37,10 @@ CREATE TABLE IF NOT EXISTS message (
   seq           INTEGER NOT NULL,
   data          TEXT NOT NULL,
   PRIMARY KEY (session_id, seq)
+);
+CREATE TABLE IF NOT EXISTS model (
+  id            TEXT PRIMARY KEY,
+  time_used     INTEGER NOT NULL
 );`;
 
 export function defaultDbPath(env = process.env): string {
@@ -148,6 +153,16 @@ export class Store {
   /** Closes a session for good as far as the tabs go; the rows stay. */
   delete(id: string, now = Date.now()): void {
     this.#db.query("UPDATE session SET time_deleted = ? WHERE id = ?").run(now, id);
+  }
+
+  /** Models picked lately, most recent first. */
+  recentModels(limit = 5): string[] {
+    const rows = this.#db.query("SELECT id FROM model ORDER BY time_used DESC, rowid DESC LIMIT ?").all(limit) as Array<{ id: string }>;
+    return rows.map((r) => r.id);
+  }
+
+  usedModel(id: string, now = Date.now()): void {
+    this.#db.query("INSERT INTO model (id, time_used) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET time_used = excluded.time_used").run(id, now);
   }
 
   close(): void {

@@ -51,6 +51,7 @@ interface Span {
 
 interface Line {
   spans: Span[];
+  fold?: "connector" | "control";
   /** First line of a message: draws the gutter glyph. */
   head?: boolean;
 }
@@ -78,13 +79,19 @@ function markdownLines(text: string, width: number): Line[] {
   return wrapText(styled.text, width).map((row) => ({ spans: slice(styled, row.start, row.end, {}) }));
 }
 
-/** Up to `max` lines of a tool or subagent result, behind a ⎿ marker. */
-function resultLines(text: string, width: number, ok: boolean | undefined, max = RESULT_LINES): Line[] {
+/** A tool or subagent result, with a clickable preview when longer than `max`. */
+function resultLines(text: string, width: number, ok: boolean | undefined, expanded: boolean, max = RESULT_LINES): Line[] {
   const lines = textLines(text || "(empty)", width, { fg: ok === false ? palette.error : palette.muted }, [marker, blank]);
   if (lines.length <= max) return lines;
+  lines[0]!.fold = "connector";
+  const control: Line = {
+    fold: "control",
+    spans: [blank, { text: expanded ? "⌃ show fewer lines" : `… ${lines.length - max} more lines`, style: { fg: palette.faint } }],
+  };
   return [
     ...lines.slice(0, max),
-    { spans: [blank, { text: `… ${lines.length - max} more lines`, style: { fg: palette.faint } }] },
+    control,
+    ...(expanded ? [...lines.slice(max), control] : []),
   ];
 }
 
@@ -119,7 +126,7 @@ function titleLine(title: string, color: number, rest: string, width: number): L
   };
 }
 
-function linesFor(m: Message, width: number, showThinking: boolean): Line[] {
+function linesFor(m: Message, width: number, showThinking: boolean, expanded: boolean): Line[] {
   let lines: Line[];
   switch (m.role) {
     case "user":
@@ -144,7 +151,7 @@ function linesFor(m: Message, width: number, showThinking: boolean): Line[] {
     }
     case "tool":
       lines = [titleLine(m.title ?? "tool", palette.tool, summarizeInput(m.detail), width)];
-      if (!m.streaming) lines.push(...resultLines(m.text, width, m.ok));
+      if (!m.streaming) lines.push(...resultLines(m.text, width, m.ok, expanded));
       break;
     case "subagent": {
       lines = [titleLine(`agent · ${m.title ?? ""}`, palette.accent, m.detail ?? "", width)];
@@ -166,7 +173,7 @@ function linesFor(m: Message, width: number, showThinking: boolean): Line[] {
         const tail = (m.tail ?? "").trim().split("\n").at(-1) ?? "";
         lines.push({ spans: [blank, { text: tail ? truncate(tail, width - 2) : `working · ${seconds(m)}`, style: { fg: palette.faint, italic: true } }] });
       } else {
-        lines.push(...resultLines(m.text, width, m.ok, RESULT_LINES));
+        lines.push(...resultLines(m.text, width, m.ok, expanded));
       }
       break;
     }
@@ -205,6 +212,10 @@ export class ChatView {
   #maxScroll = 0;
   #height = 0;
   #lastLayout = { lines: 0, width: 0 };
+  #expanded = new WeakSet<Message>();
+  #foldHits: Array<{ x0: number; x1: number; y: number; row: number; msg: Message; fold: NonNullable<Line["fold"]> }> = [];
+  #pointer: { x: number; y: number } | null = null;
+  #foldAnchor: { msg: Message; fold: NonNullable<Line["fold"]>; row: number } | null = null;
   showThinking = false;
 
   /** The transcript, oldest first. */
@@ -231,6 +242,37 @@ export class ChatView {
   clear(): void {
     this.#messages = [];
     this.#scroll = 0;
+    this.#lastLayout = { lines: 0, width: 0 };
+    this.#foldAnchor = null;
+    this.resetInteractions();
+  }
+
+  hover(point: { x: number; y: number } | null): void {
+    this.#pointer = point;
+  }
+
+  /** Forget targets when an overlay or a tiny terminal hides the transcript. */
+  resetInteractions(): void {
+    this.#foldHits = [];
+    this.#pointer = null;
+  }
+
+  toggleAt(x: number, y: number): boolean {
+    const hit = this.#foldAt(x, y);
+    if (!hit) return false;
+    const opening = !this.#expanded.has(hit.msg);
+    if (opening) this.#expanded.add(hit.msg);
+    else this.#expanded.delete(hit.msg);
+    // Keep the clicked control in view. Make room for newly revealed output
+    // when the control was near the bottom of the viewport.
+    const row = opening ? Math.min(hit.row, Math.floor(this.#height / 2)) : hit.row;
+    this.#foldAnchor = { msg: hit.msg, fold: hit.fold, row };
+    this.#foldHits = []; // a second queued click must not hit the old layout
+    return true;
+  }
+
+  #foldAt(x: number, y: number) {
+    return this.#foldHits.find((h) => h.y === y && x >= h.x0 && x < h.x1);
   }
 
   scrollBy(rows: number): void {
@@ -246,6 +288,7 @@ export class ChatView {
   }
 
   render(buf: CellBuffer, r: Rect, spin: string): void {
+    this.#foldHits = [];
     const contentWidth = Math.max(1, r.w - GUTTER);
     const all: Array<{ line: Line; msg: Message | null }> = [];
     for (const m of this.#messages) {
@@ -258,8 +301,27 @@ export class ChatView {
     this.#lastLayout = { lines: all.length, width: contentWidth };
     this.#height = r.h;
     this.#maxScroll = Math.max(0, all.length - r.h);
-    this.#scroll = Math.min(this.#scroll, this.#maxScroll);
+    if (this.#foldAnchor) {
+      const anchor = this.#foldAnchor;
+      const index = all.findIndex(({ line, msg }) => msg === anchor.msg && line.fold === anchor.fold);
+      if (index >= 0) this.#scroll = this.#maxScroll - (index - anchor.row);
+      this.#foldAnchor = null;
+    }
+    this.#scroll = Math.max(0, Math.min(this.#scroll, this.#maxScroll));
     const first = this.#maxScroll - this.#scroll;
+
+    // Build only visible targets, clipped to the chat pane (including trace mode).
+    const scrollLabel = this.#scroll > 0 ? ` ↓ ${this.#scroll} more ` : "";
+    for (let row = 0; row < r.h && first + row < all.length; row++) {
+      const { line, msg } = all[first + row]!;
+      if (!line.fold || !msg) continue;
+      const x0 = r.x + GUTTER + (line.fold === "control" ? 2 : 0);
+      const width = line.fold === "control" ? stringWidth(line.spans[1]!.text) : 2;
+      const end = r.x + r.w - (row === r.h - 1 ? scrollLabel.length : 0);
+      const x1 = Math.min(end, x0 + width);
+      if (x1 > x0) this.#foldHits.push({ x0, x1, y: r.y + row, row, msg, fold: line.fold });
+    }
+    const hovered = this.#pointer ? this.#foldAt(this.#pointer.x, this.#pointer.y)?.msg : undefined;
 
     for (let row = 0; row < r.h && first + row < all.length; row++) {
       const { line, msg } = all[first + row]!;
@@ -269,22 +331,26 @@ export class ChatView {
         buf.text(r.x, y, g.text, g.style);
       }
       let x = r.x + GUTTER;
-      for (const s of line.spans) x = buf.text(x, y, s.text, s.style, r.x + r.w);
+      for (let i = 0; i < line.spans.length; i++) {
+        const s = line.spans[i]!;
+        const highlight = msg === hovered && (line.fold === "connector" ? i === 0 : line.fold === "control" && i === 1);
+        x = buf.text(x, y, s.text, highlight ? { ...s.style, fg: palette.accent, bold: true } : s.style, r.x + r.w);
+      }
     }
 
     if (this.#scroll > 0) {
-      const label = ` ↓ ${this.#scroll} more `;
-      buf.text(r.x + r.w - label.length, r.y + r.h - 1, label, { fg: palette.muted, inverse: true });
+      buf.text(r.x + r.w - scrollLabel.length, r.y + r.h - 1, scrollLabel, { fg: palette.muted, inverse: true });
     }
   }
 
   #linesFor(m: Message, width: number): Line[] {
     // Running thinking/subagent messages show a live clock, so they are never cached.
     const live = m.streaming && (m.role === "thinking" || m.role === "subagent");
-    const key = `${width}:${m.version}:${this.showThinking ? 1 : 0}`;
+    const expanded = this.#expanded.has(m);
+    const key = `${width}:${m.version}:${this.showThinking ? 1 : 0}:${expanded ? 1 : 0}`;
     const hit = this.#cache.get(m);
     if (!live && hit?.key === key) return hit.lines;
-    const lines = linesFor(m, width, this.showThinking);
+    const lines = linesFor(m, width, this.showThinking, expanded);
     this.#cache.set(m, { key, lines });
     return lines;
   }

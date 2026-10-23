@@ -26,7 +26,8 @@ export type MouseEvent = {
 } & Mods;
 /** A reply to an OSC query, without the ESC ] and the terminator, e.g. "11;rgb:1e1e/1e1e/1e1e". */
 export type OscEvent = { type: "osc"; data: string };
-export type InputEvent = KeyEvent | TextEvent | PasteEvent | MouseEvent | OscEvent;
+export type ApcEvent = { type: "apc"; data: string };
+export type InputEvent = KeyEvent | TextEvent | PasteEvent | MouseEvent | OscEvent | ApcEvent;
 
 const PASTE_END = "\x1b[201~";
 
@@ -125,6 +126,12 @@ function parseEscape(s: string, i: number, final: boolean): Parsed {
   if (i + 1 >= s.length) return final ? { event: key("escape"), end: i + 1 } : null;
   const next = s[i + 1]!;
   if (next === "[") return parseCsi(s, i, final);
+  if (next === "_") {
+    // Kitty graphics replies use APC, terminated by ST. Never treat them as typing.
+    const end = s.indexOf("\x1b\\", i + 2);
+    if (end < 0) return final ? { end: s.length } : null;
+    return { event: { type: "apc", data: s.slice(i + 2, end) }, end: end + 2 };
+  }
   if (next === "]") {
     // OSC reply, ended by BEL or ST (ESC \). Unterminated at flush: dropped.
     const bel = s.indexOf("\x07", i + 2);

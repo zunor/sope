@@ -5,6 +5,7 @@
 // half-drawn frame.
 
 import { BOLD, CellBuffer, DIM, INVERSE, ITALIC, UNDERLINE } from "./buffer";
+import type { KittyGraphics, PixelImage } from "./graphics";
 import { to256 } from "./color";
 
 export interface Cursor {
@@ -15,12 +16,14 @@ export interface Cursor {
 
 export class Renderer {
   #front: CellBuffer | null = null;
+  image: PixelImage | null = null;
   #back: CellBuffer;
   cursor: Cursor = { x: 0, y: 0, visible: false };
 
   constructor(
     private readonly write: (s: string) => void,
     private readonly truecolor: boolean,
+    private readonly graphics?: KittyGraphics,
   ) {
     this.#back = new CellBuffer(0, 0);
   }
@@ -30,6 +33,7 @@ export class Renderer {
     if (this.#back.width !== width || this.#back.height !== height) this.#back.resize(width, height);
     else this.#back.clear();
     this.cursor = { x: 0, y: 0, visible: false };
+    this.image = null;
     return this.#back;
   }
 
@@ -90,6 +94,7 @@ export class Renderer {
       }
     }
 
+    out += this.graphics?.render(this.image, full) ?? "";
     out += "\x1b[0m";
     if (this.cursor.visible) out += `\x1b[${this.cursor.y + 1};${this.cursor.x + 1}H\x1b[?25h`;
     out += "\x1b[?2026l";

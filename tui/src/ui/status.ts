@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 // The line above the input while a turn runs:
 //
-//   ──━━✦ Thinking… (1m 4s · 38 tok/s · tip: ctrl+t shows the ABI trace)
+//   ⠉⠉ Thinking… (1m 4s · 38 tok/s · tip: ctrl+t shows the ABI trace)
 //
-// A meteor streaks by in front (meteor.ts), the verb shimmers (a highlight sweeps
+// One row: a meteor circles a tiny Braille square (meteor.ts), the verb shimmers (a highlight sweeps
 // across it), the time counts up in seconds, the rate is the model's recent
 // output speed, and a tip shows up now and then.
 
 import type { CellBuffer } from "../render/buffer";
 import { mix } from "../render/color";
 import { palette } from "../theme";
-import { drawMeteor } from "./meteor";
+import { drawMeteor, METEOR_WIDTH } from "./meteor";
 import { stringWidth, truncate } from "../unicode/width";
 
 const SHIMMER_MS_PER_CELL = 70;
@@ -30,7 +30,8 @@ export const TIPS = [
   "/compact frees context when the conversation grows long",
   "ctrl+j inserts a newline",
   "pgup/pgdn or the wheel scroll the transcript",
-  "a in a permission prompt allows that tool for the session",
+  "shift+tab switches who approves edits and commands",
+  "alt+m or /model picks another model",
 ];
 
 /** 4s, 2m 4s, 1h 2m. */
@@ -60,7 +61,7 @@ export class TokenRate {
   #samples: Array<{ at: number; tokens: number }> = [];
   #burstStart = 0;
 
-  add(text: string, now = performance.now()): void {
+  add(text: string, now = performance.now(), pixel = false): void {
     const last = this.#samples.at(-1);
     if (!last || now - last.at > RATE_IDLE_MS) this.#burstStart = now;
     this.#samples.push({ at: now, tokens: estimateTokens(text) });
@@ -113,9 +114,10 @@ export function shimmerAt(i: number, len: number, now: number): number {
   return d >= SHIMMER_BAND ? 0 : (1 + Math.cos((Math.PI * d) / SHIMMER_BAND)) / 2;
 }
 
-export function drawStatus(buf: CellBuffer, x: number, y: number, width: number, s: Status, now = performance.now()): void {
+/** Draws the meteor and status text together on row y. */
+export function drawStatus(buf: CellBuffer, x: number, y: number, width: number, s: Status, now = performance.now(), pixel = false): void {
   const end = x + width;
-  x = drawMeteor(buf, x, y, s.color, now) + 1;
+  x = (pixel ? x + METEOR_WIDTH : drawMeteor(buf, x, y, s.color, now)) + 1;
 
   const verb = `${s.verb}…`;
   const bright = mix(s.color, 0xffffff, 0.6);
