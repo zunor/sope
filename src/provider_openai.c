@@ -308,11 +308,11 @@ static void trace_request(oa_state *s, const char *phase)
     sope__call_log(s->call, SOPE_LOG_DEBUG,
         "{\"event\":\"provider.%s\",\"round\":%llu,\"compaction\":%d,\"attempt\":%d,"
         "\"status\":%ld,\"elapsed_ms\":%lld,\"request_bytes\":%zu,\"received_bytes\":%zu,"
-        "\"complete\":%d,\"failed\":%d,\"failure_kind\":%d,\"delay_ms\":%d,\"remaining_ms\":%lld,\"logical_ms\":%lld,"
+        "\"complete\":%d,\"failed\":%d,\"finish_state\":%d,\"stream_done\":%d,\"failure_kind\":%d,\"delay_ms\":%d,\"remaining_ms\":%lld,\"logical_ms\":%lld,"
         "\"text_bytes\":%zu,\"thinking_bytes\":%zu,\"tool_calls\":%zu,\"tool_argument_bytes\":%zu}",
         phase, (unsigned long long)sope__call_round(s->call), sope__call_is_compaction(s->call),
         s->attempts, s->status, (long long)(trace_now() - s->started_ms), s->body.len,
-        s->received, s->call->complete, s->call->failed, s->failure, s->delay_ms,
+        s->received, s->call->complete, s->call->failed, s->finish, s->saw_done, s->failure, s->delay_ms,
         (long long)(s->deadline_ms > trace_now() ? s->deadline_ms - trace_now() : 0),
         (long long)(trace_now() - s->request_started_ms), s->call->text.len,
         s->thinking_bytes, tool_calls, tool_bytes);

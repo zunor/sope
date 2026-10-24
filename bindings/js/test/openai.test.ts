@@ -39,7 +39,8 @@ beforeAll(() => {
         let timer: ReturnType<typeof setInterval> | undefined;
         const stream = new ReadableStream({
           start(controller) {
-            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(delta({ content: "partial" }))}\n\n`));
+            const finish = new URL(req.url).pathname.includes("finished") ? "stop" : null;
+            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(delta({ content: "partial" }, finish))}\n\n`));
             if (heartbeat) {
               timer = setInterval(() => controller.enqueue(new TextEncoder().encode(": keepalive\n\n")), 15);
               heartbeatTimers.add(timer);
@@ -167,7 +168,8 @@ test("retries transient failures before any output", async () => {
   expect(telemetry.filter((event) => event.event === "provider.start").map((event) => [event.round, event.attempt])).toEqual([[1, 1], [1, 2], [2, 1]]);
   expect(telemetry.find((event) => event.event === "provider.retry")).toMatchObject({status: 503, complete: 0, attempt: 1});
   expect(telemetry.filter((event) => event.event === "provider.end").every((event) => event.status === 200 && event.complete === 1 && event.elapsed_ms >= 0 && event.received_bytes > 0)).toBe(true);
-  expect(telemetry.find(event => event.event === "provider.end")).toMatchObject({ text_bytes: 13, thinking_bytes: 19, tool_calls: 1, tool_argument_bytes: 18 });
+  expect(telemetry.find(event => event.event === "provider.end")).toMatchObject({ text_bytes: 13, thinking_bytes: 19, tool_calls: 1, tool_argument_bytes: 18, finish_state: 2, stream_done: 1 });
+  expect(telemetry.filter(event => event.event === "provider.end").at(-1)).toMatchObject({ finish_state: 1, stream_done: 1 });
   expect(JSON.stringify(telemetry)).not.toContain("test-key");
 });
 
@@ -207,9 +209,10 @@ for (const [name, calls, finish] of [
 }
 
 
-for (const [name, prefix, idle, total, expected] of [
-  ["silent partial stream", "/stall/idle", 150, 2000, "idle"],
-  ["keepalives cannot extend request lifetime", "/stall/heartbeat", 200, 400, "request"],
+for (const [name, prefix, idle, total, expected, finish] of [
+  ["silent partial stream", "/stall/idle", 150, 2000, "idle", 0],
+  ["finish reason without stream terminator remains incomplete", "/stall/finished", 150, 2000, "idle", 1],
+  ["keepalives cannot extend request lifetime", "/stall/heartbeat", 200, 400, "request", 0],
 ] as const) test(name, async () => {
   agent = openaiAgent("test-key", prefix);
   agent.setOption("openai.max_retries", "0");
@@ -222,7 +225,9 @@ for (const [name, prefix, idle, total, expected] of [
   expect(events.some((ev) => ev.type === "error" && ev.message.includes(`${expected} deadline exceeded`))).toBe(true);
   expect(events.filter((ev) => ev.type === "text_delta").map((ev) => ev.text).join("")).toBe("partial");
   expect(requests).toHaveLength(1);
-  expect(events.some((ev) => ev.type === "log" && ev.message.includes('"event":"provider.timeout"'))).toBe(true);
+  const timeout = events.find((ev) => ev.type === "log" && ev.message.includes('"event":"provider.timeout"'));
+  expect(timeout?.type).toBe("log");
+  if (timeout?.type === "log") expect(JSON.parse(timeout.message)).toMatchObject({ finish_state: finish, stream_done: 0, complete: 0 });
 });
 
 test("request deadline includes retry backoff", async () => {

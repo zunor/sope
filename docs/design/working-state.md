@@ -20,16 +20,17 @@ These are different sources of information: the request is user-authored;
 todos are model-authored assertions; execution receipts are native observations.
 An exit status does not certify test assertions, coverage, source freshness or
 correctness. Compaction transcripts keep native call IDs attached to their
-invocations and retain provider IDs linking each result to its call. Old plans remain visible across turns, but only a plan updated in
-the current turn participates in completion reconciliation.
+invocations and retain provider IDs linking each result to its call. Old plans
+remain visible across turns, but only a plan updated in the current turn
+participates in completion reconciliation.
 
 `evidence({session_id, call_id, offset, limit})` reads an original committed tool result
 from the durable journal, scoped to the calling session and agent. Bare call
 IDs or a different session ID are rejected; unrelated runs can reuse the same
 call number. Working state and receipts carry session/agent/turn provenance;
 recent execution entries include the exact bounded command, or explicitly mark
-it omitted. A directory listing cannot stand in for a cited test invocation. Results remain available
-after compaction and reopening. This is paginated historical retrieval, not
+it omitted. A directory listing cannot stand in for a cited test invocation.
+Results remain available after compaction and reopening. This is paginated historical retrieval, not
 reexecution or a cache hit asserting current file validity. Offsets and limits
 are bytes; pages preserve UTF-8 boundaries and return `next_offset`. Without
 arguments the tool still returns the bounded execution receipt ledger. A
@@ -49,6 +50,12 @@ read may be justified by a changed file or missing detail. No semantic shell
 analysis, automatic cross-file read suppression, or external model judge is
 introduced. Summary fingerprints and closure events support investigation;
 the journal remains the source for exact content comparisons.
+
+Provider diagnostics distinguish `finish_state` (0: pending, 1: text stop,
+2: tool batch) from `stream_done` (protocol terminal event received). A response
+can stop producing text before its terminal event arrives; neither a completed
+todo list nor a plausible final paragraph establishes protocol completion.
+Timeout/retry/end records retain these numeric states without exposing payloads.
 
 Limits: this is not an autonomous whole-task scheduler. Host wall-clock budgets
 remain external. Only the current request's text is restored verbatim after

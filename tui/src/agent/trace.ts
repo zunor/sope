@@ -8,7 +8,7 @@ import type { SopeEvent } from "sope";
 type Fields = Record<string, string | number | boolean>;
 const PROVIDER_EVENTS = new Set(["provider.start", "provider.first_byte", "provider.retry", "provider.progress", "provider.timeout", "provider.end"]);
 const PROVIDER_FIELDS = ["round", "compaction", "attempt", "status", "elapsed_ms", "request_bytes", "received_bytes", "complete", "failed"];
-const RETRY_FIELDS = ["failure_kind", "delay_ms", "remaining_ms", "logical_ms", "text_bytes", "thinking_bytes", "tool_calls", "tool_argument_bytes"];
+const RETRY_FIELDS = ["finish_state", "stream_done", "failure_kind", "delay_ms", "remaining_ms", "logical_ms", "text_bytes", "thinking_bytes", "tool_calls", "tool_argument_bytes"];
 
 export class ExecutionTrace {
   readonly id = crypto.randomUUID();

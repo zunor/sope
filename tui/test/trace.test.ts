@@ -15,7 +15,7 @@ test("trace correlates parallel spans without persisting payloads or token event
     for (let i = 0; i < 10000; i++) trace.event({ ...origin, type: "thinking_delta", text: "secret-thought" });
     trace.event({ ...origin, type: "log", level: "debug", message: "secret-log" });
     trace.event({ ...origin, type: "error", code: -1, message: "secret-error" });
-    trace.event({ ...origin, type: "log", level: "debug", message: JSON.stringify({ event: "provider.start", round: 1, compaction: 0, attempt: 1, status: 0, elapsed_ms: 0, request_bytes: 123, received_bytes: 0, complete: 0, failed: 0, failure_kind: 2, delay_ms: 900, remaining_ms: 2000, logical_ms: 30, text_bytes: 0, thinking_bytes: 42, tool_calls: 1, tool_argument_bytes: 256, secret: "secret-provider" }) });
+    trace.event({ ...origin, type: "log", level: "debug", message: JSON.stringify({ event: "provider.start", round: 1, compaction: 0, attempt: 1, status: 0, elapsed_ms: 0, request_bytes: 123, received_bytes: 0, complete: 0, failed: 0, finish_state: 2, stream_done: 0, failure_kind: 2, delay_ms: 900, remaining_ms: 2000, logical_ms: 30, text_bytes: 0, thinking_bytes: 42, tool_calls: 1, tool_argument_bytes: 256, secret: "secret-provider" }) });
     for (const agentId of [9, 0]) trace.event({ ...origin, agentId, type: "tool_end", callId: 4, name: "bash", result: "secret-result", isError: false });
     trace.event({ ...origin, type: "turn_end", stopReason: "end_turn" });
     await trace.close();
@@ -23,7 +23,7 @@ test("trace correlates parallel spans without persisting payloads or token event
     expect(raw).not.toContain("secret");
     const rows = raw.trim().split("\n").map((line) => JSON.parse(line));
     expect(rows).toHaveLength(10);
-    expect(rows.find(r => r.type === "provider.start")).toMatchObject({ failure_kind: 2, delay_ms: 900, remaining_ms: 2000, logical_ms: 30, thinking_bytes: 42, tool_argument_bytes: 256 });
+    expect(rows.find(r => r.type === "provider.start")).toMatchObject({ finish_state: 2, stream_done: 0, failure_kind: 2, delay_ms: 900, remaining_ms: 2000, logical_ms: 30, thinking_bytes: 42, tool_argument_bytes: 256 });
     expect(rows.filter((r) => r.type === "tool_end").every((r) => r.durationMs >= 0 && !r.unmatched)).toBe(true);
     expect(rows.at(-1)).toMatchObject({ type: "trace.end", activeSpans: 0, thinkingBytes: 140000 });
     expect(statSync(trace.path).mode & 0o777).toBe(0o600);
