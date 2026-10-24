@@ -151,6 +151,33 @@ static void test_failed_operation_retry_after_edit(void)
     sope__pending_free(p); sope_agent_free(a);
 }
 
+static void test_work_state_survives_history_replacement(void)
+{
+    sope_agent_t *a=NULL,*b=NULL;
+    CHECK(sope_agent_new(&a)==SOPE_OK && sope_agent_new(&b)==SOPE_OK);
+    msg_node request={.turn_id=7,.text="Exact task: preserve source",.len=27};
+    request.len=strlen(request.text);
+    a->turn.msg=b->turn.msg=&request;
+    a->turn.max_rounds=b->turn.max_rounds=20;
+    const char *input="{\"todos\":[{\"content\":\"Verify\",\"status\":\"pending\"}]}";
+    sope_tool_use u={.name="todo_write",.input=(char *)input,.input_len=strlen(input)};
+    pending_call *p=calloc(1,sizeof *p);
+    p->kind=PENDING_BUILTIN;p->name=sope__strdup(u.name);p->call_id=1;p->turn_id=7;
+    CHECK(sope__harness_admit(a,p,&u));sope__harness_observe(a,p);sope__pending_free(p);
+    sope_message *summary=sope__message_new(SOPE__MSG_USER,"Everything is done",18);
+    summary->is_summary=1;sope__history_append(&a->history,summary);
+    CHECK(sope__harness_context(a));
+    CHECK(strstr(a->turn.work_context,request.text) && strstr(a->turn.work_context,"pending"));
+    CHECK(sope__harness_finish(a)==1);
+    char *saved=sope__harness_json(a);CHECK(saved && sope__harness_load(b,saved));free(saved);
+    CHECK(sope__harness_finish(b)==1 && sope__harness_finish(b)==-1);
+    CHECK(sope__harness_context(b));CHECK(strstr(b->turn.work_context,"pending"));
+    CHECK(!sope__harness_load(b,"{\"todo_call\":1,\"todo_turn\":7,\"todos\":{\"todos\":[{\"content\":\"x\",\"status\":\"blocked\"}]}}"));
+    free(a->turn.work_context);a->turn.work_context=NULL;
+    free(b->turn.work_context);b->turn.work_context=NULL;
+    a->turn.msg=b->turn.msg=NULL;sope_agent_free(a);sope_agent_free(b);
+}
+
 int main(void)
 {
     test_transcript_budget_and_utf8();
@@ -158,5 +185,6 @@ int main(void)
     test_request_accounting();
     test_harness_checkpoint();
     test_failed_operation_retry_after_edit();
+    test_work_state_survives_history_replacement();
     return failures ? 1 : 0;
 }

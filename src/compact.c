@@ -15,7 +15,7 @@
 
 const char sope__compact_system[] =
     "You summarize conversations between a user and an AI assistant so that the assistant can continue the work "
-    "from a summary and retained recent messages. Be faithful and specific; never invent details.";
+    "from a summary and retained recent messages. Be faithful and specific; never invent details. A summary is fallible working memory, not execution evidence.";
 
 static const char INSTRUCTIONS[] =
     "Write a concise handoff summary of the older conversation transcript below. Recent original messages may "
@@ -24,7 +24,8 @@ static const char INSTRUCTIONS[] =
     "1. The user's requests and intent, in order, quoting key wording.\n"
     "2. Key facts, decisions and constraints established so far.\n"
     "3. Files, commands, code and tool results that still matter, with exact names, paths and values.\n"
-    "4. Errors encountered and how they were resolved.\n"
+    "4. Errors encountered and how they were resolved. Preserve failed, cancelled, pending and unverified states; "
+    "never promote them to success. Separate observations, hypotheses and model-written claims.\n"
     "5. Work completed, work in progress, and the next step (if the latest request is unfinished).\n"
     "Scale the summary to the conversation: a short exchange needs only a few lines. Reply with the summary only.\n";
 
@@ -127,7 +128,7 @@ char *sope__compact_summary(const char *summary, size_t n, int mid_turn, size_t 
 {
     sope_buf b = { 0 };
     sope__buf_appends(&b,
-                      "This conversation was compacted to save context. Summary of everything before this point:\n\n");
+                      "This conversation was compacted to save context. Fallible model summary (verify claims):\n\n");
     sope__buf_append(&b, summary, n);
     if (mid_turn) sope__buf_appends(&b, "\n\nContinue with the current task from where it left off.");
     if (b.oom) {

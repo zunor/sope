@@ -39,7 +39,8 @@ export interface HostTool {
 export interface Todo {
   content: string;
   activeForm?: string;
-  status: "pending" | "in_progress" | "completed";
+  status: "pending" | "in_progress" | "completed" | "blocked";
+  reason?: string;
 }
 
 const PREVIEW_LINES = 8;
@@ -168,14 +169,15 @@ export function todosOf(input: Record<string, unknown>): Todo[] | null {
     .map((t) => ({
       content: str(t.content),
       activeForm: t.activeForm ? str(t.activeForm) : undefined,
-      status: t.status === "completed" || t.status === "in_progress" ? t.status : "pending",
+      status: t.status === "completed" || t.status === "in_progress" || t.status === "blocked" ? t.status : "pending",
+      reason: t.reason ? str(t.reason) : undefined,
     }));
 }
 
 export function formatTodos(todos: Todo[]): string {
   if (!todos.length) return "(the todo list is empty)";
-  const mark = { pending: "☐", in_progress: "◐", completed: "☒" } as const;
-  return todos.map((t) => `${mark[t.status]} ${t.status === "in_progress" && t.activeForm ? t.activeForm : t.content}`).join("\n");
+  const mark = { pending: "☐", in_progress: "◐", completed: "☒", blocked: "⊘" } as const;
+  return todos.map((t) => `${mark[t.status]} ${t.status === "in_progress" && t.activeForm ? t.activeForm : t.content}${t.status === "blocked" && t.reason ? ` — ${t.reason}` : ""}`).join("\n");
 }
 
 const stringInput = (description: string) => ({

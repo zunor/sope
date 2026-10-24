@@ -87,7 +87,8 @@ static uint64_t specs_tokens(const sope_tool_spec *specs, size_t n)
 uint64_t sope__request_tokens(const sope_agent_t *a)
 {
     const turn_state *t = &a->turn;
-    return add(add(system_tokens(t->system), specs_tokens(t->specs, t->n_specs)), sope__history_tokens(&a->history));
+    return add(add(add(system_tokens(t->system), specs_tokens(t->specs, t->n_specs)), sope__history_tokens(&a->history)),
+        t->work_context ? add(12, sope__text_tokens(t->work_context, strlen(t->work_context))) : 0);
 }
 
 /* The provider's count of the last request, plus what was added since. */
@@ -205,6 +206,9 @@ static void context_json(const sope_agent_t *a, const sope_history *h, const cha
             if (m->role == SOPE__MSG_ASSISTANT) asst = m;
         }
     }
+    uint64_t working = a && a->turn.work_context ? 12 + sope__text_tokens(a->turn.work_context, strlen(a->turn.work_context)) : 0;
+    if (working) n_messages++;
+    messages = add(messages, working); /* derived user-role context participates in the budget */
     estimate = add(add(add(sys, tools), add(summary, messages)), add(results, images));
     sope__buf_appendf(b,
         "{\"state\":\"%s\",\"used\":%" PRIu64 ",\"estimate\":%" PRIu64 ",\"window\":%" PRIu64

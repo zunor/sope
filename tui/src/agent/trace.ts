@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Metadata-only diagnostics. Journals, not traces, own recoverable state.
 import { createWriteStream, mkdirSync, openSync, type WriteStream } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { createHmac, randomBytes } from "node:crypto";
 import type { SopeEvent } from "sope";
 
 type Fields = Record<string, string | number | boolean>;
@@ -25,6 +26,9 @@ export class ExecutionTrace {
   #disabled = false;
   #closing?: Promise<void>;
   #seq = 0;
+  readonly #salt = randomBytes(32);
+  readonly #cwd = process.cwd();
+  readonly #reads = new Map<string, { callId: number; count: number }>();
 
   constructor(directory: string, private readonly limit = 64 * 1024 * 1024,
     private readonly warn: () => void = () => console.error("sope: diagnostic trace incomplete (storage error or size limit)")) {
@@ -88,6 +92,9 @@ export class ExecutionTrace {
     switch (ev.type) {
       case "log": {
         // Only the native numeric schema is allowed. Never serialize arbitrary logs.
+        if (ev.message === '{"event":"work.closure","outstanding":1}') {
+          type = "work.closure"; fields.outstanding = 1; break;
+        }
         if (!ev.message.startsWith('{"event":"provider.')) return;
         let value;
         try { value = JSON.parse(ev.message); } catch { return; }
@@ -111,6 +118,25 @@ export class ExecutionTrace {
       case "tool_call": case "tool_start": case "permission":
         fields.callId = ev.callId; fields.name = ev.name.slice(0, 128);
         fields.inputBytes = Buffer.byteLength(ev.input);
+        if (ev.type !== "permission" && ev.name === "read" && fields.inputBytes <= 65536) {
+          try {
+            const args = JSON.parse(ev.input);
+            if (typeof args.file_path === "string") {
+              // Per-trace keyed fingerprints cannot be used to dictionary-match
+              // sensitive paths. Exact requests only: no claim of stale output.
+              const key = createHmac("sha256", this.#salt).update(JSON.stringify([
+                ev.agentId, ev.turnId, resolve(this.#cwd, args.file_path),
+                args.offset ?? 1, args.limit ?? 2000,
+              ])).digest("hex");
+              const prior = this.#reads.get(key);
+              fields.readFingerprint = key;
+              fields.readCount = (prior?.count ?? 0) + 1;
+              if (prior) fields.previousReadCallId = prior.callId;
+              if (!prior && this.#reads.size >= 1024) this.#reads.delete(this.#reads.keys().next().value!);
+              this.#reads.set(key, { callId: ev.callId, count: Number(fields.readCount) });
+            }
+          } catch { /* Invalid arguments remain observable through tool errors. */ }
+        }
         break;
       case "tool_end":
         fields.callId = ev.callId; fields.name = ev.name.slice(0, 128);
@@ -122,7 +148,9 @@ export class ExecutionTrace {
       case "turn_end": fields.stopReason = ev.stopReason; break;
       case "error": fields.code = ev.code; break;
       case "usage": fields.inputTokens = ev.inputTokens; fields.outputTokens = ev.outputTokens; break;
-      case "compact": fields.trigger = ev.trigger; fields.summaryBytes = Buffer.byteLength(ev.summary); break;
+      case "compact":
+        fields.trigger = ev.trigger; fields.summaryBytes = Buffer.byteLength(ev.summary);
+        fields.summaryFingerprint = createHmac("sha256", this.#salt).update(ev.summary).digest("hex"); break;
     }
     const group = ev.type.startsWith("subagent_") ? "subagent" : ev.type.startsWith("turn_") ? "turn" : "tool";
     const key = `${ev.agentId}:${ev.turnId}:${group}:${"callId" in ev ? ev.callId : 0}`;

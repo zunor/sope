@@ -303,6 +303,7 @@ static void finish_turn(sope_agent_t *a, int32_t stop)
     free_specs(t);
     free(t->system);
     free(t->cwd);
+    free(t->work_context);
     sope__msg_node_free(t->msg);
     memset(t, 0, sizeof *t);
     a->last_stop = stop;
@@ -339,6 +340,14 @@ static sope_next start_call(sope_agent_t *a)
         char msg[64];
         snprintf(msg, sizeof msg, "stopped after %d model rounds (max_rounds)", (int)t->max_rounds);
         turn_error(a, SOPE_ERROR, msg);
+        finish_turn(a, SOPE_STOP_ERROR);
+        return next(SOPE__NEXT_CONTINUE);
+    }
+    pthread_mutex_lock(a->mu);
+    int context_ok = sope__harness_context(a);
+    pthread_mutex_unlock(a->mu);
+    if (!context_ok) {
+        turn_error(a, SOPE_ENOMEM, "Cannot render runtime working state.");
         finish_turn(a, SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);
     }
@@ -560,6 +569,19 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
     t->call = NULL;
 
     if (!asst->n_tool_uses) {
+        pthread_mutex_lock(a->mu);
+        int closure = sope__harness_finish(a);
+        pthread_mutex_unlock(a->mu);
+        if (closure) {
+            sope__push_event(a, SOPE_EVENT_LOG, sope__turn_id(a), 0, SOPE_LOG_INFO, NULL, 0,
+                "{\"event\":\"work.closure\",\"outstanding\":1}", strlen("{\"event\":\"work.closure\",\"outstanding\":1}"));
+            if (closure < 0) {
+                turn_error(a, SOPE_ERROR, "Task plan still has outstanding items after two completion reconciliations; completion not established.");
+                finish_turn(a, SOPE_STOP_ERROR);
+                return next(SOPE__NEXT_CONTINUE);
+            }
+            return start_call(a);
+        }
         sope_buf facts = {0}, combined = {0};
         pthread_mutex_lock(a->mu);
         sope__harness_evidence(a, &facts, 1);
@@ -968,6 +990,7 @@ static sope_next suspend_agent(sope_agent_t *a)
     pthread_mutex_unlock(a->mu);
     sope__shells_free(a);
     free_specs(t); free(t->system); free(t->cwd);
+    free(t->work_context);
     if (t->held) sope__message_free(t->held);
     sope__msg_node_free(t->msg);
     memset(t, 0, sizeof *t);

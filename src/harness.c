@@ -18,6 +18,9 @@ struct sope_harness {
     unsigned next;
     char *receipts[RECEIPTS];
     unsigned count;
+    char *todos; /* latest successful native todo_write input; model assertions */
+    uint64_t todo_call, todo_turn;
+    unsigned closure_checks;
 };
 
 static struct sope_harness *state(sope_agent_t *a)
@@ -31,6 +34,7 @@ void sope__harness_clear(sope_agent_t *a)
     if (!a->harness) return;
     for (size_t i = 0; i < KEYS; i++) free(a->harness->ops[i].key);
     for (size_t i = 0; i < a->harness->count; i++) free(a->harness->receipts[i]);
+    free(a->harness->todos);
     free(a->harness); a->harness = NULL;
 }
 
@@ -38,7 +42,7 @@ static void begin(struct sope_harness *h, uint64_t turn)
 {
     if (h->turn == turn) return;
     for (size_t i = 0; i < KEYS; i++) { free(h->ops[i].key); memset(&h->ops[i], 0, sizeof h->ops[i]); }
-    h->turn = turn; h->calls = h->searches = h->blocked = h->shells = h->next = 0;
+    h->turn = turn; h->calls = h->searches = h->blocked = h->shells = h->next = 0; h->closure_checks = 0;
 }
 
 static unsigned limit(sope_agent_t *a, const char *key, unsigned fallback)
@@ -127,6 +131,15 @@ void sope__harness_observe(sope_agent_t *a, pending_call *p)
         if (p->is_error) op->failures++;
         else op->failures = 0;
     }
+    /* Commit the plan with the successful native result, not tool admission.
+     * Parallel replacements resolve by call ID, independent of completion order. */
+    if (!p->is_error && !p->harness_blocked && p->kind == PENDING_BUILTIN &&
+        !strcmp(p->name, "todo_write") && p->harness_key && p->call_id > h->todo_call) {
+        const char *input = strchr(p->harness_key, ':');
+        char *copy = input ? sope__strdup(input + 1) : NULL;
+        if (!copy) { sope__storage_fail_locked(a, "Cannot retain task plan."); return; }
+        free(h->todos); h->todos = copy; h->todo_call = p->call_id; h->todo_turn = p->turn_id;
+    }
     /* Native file mutations establish a reason to retry a failed check.
      * A successful shell/check alone is not evidence that the cause changed. */
     if (!p->is_error && (!strcmp(p->name,"write") || !strcmp(p->name,"edit")))
@@ -161,7 +174,10 @@ char *sope__harness_json(sope_agent_t *a)
     }
     sope__buf_appends(&b,"],\"receipts\":[");
     for (unsigned i=0;i<h->count;i++) { if(i)sope__buf_appends(&b,",");sope__buf_appends(&b,h->receipts[i]); }
-    sope__buf_appends(&b,"]}");
+    sope__buf_appendf(&b, "],\"todo_call\":%" PRIu64 ",\"todo_turn\":%" PRIu64 ",\"closure_checks\":%u,\"todos\":",
+        h->todo_call, h->todo_turn, h->closure_checks);
+    sope__buf_appends(&b, h->todos ? h->todos : "null");
+    sope__buf_appends(&b, "}");
     if(b.oom){sope__buf_free(&b);return NULL;}return b.ptr;
 }
 
@@ -178,7 +194,9 @@ int sope__harness_load(sope_agent_t *a, const char *text)
     if (!v || v->type != SOPE_JSON_OBJECT) { sope__json_free(v); return 0; }
     if (!unsigned_field(v, "turn", 9007199254740991ULL) ||
         !unsigned_field(v, "calls", UINT32_MAX) || !unsigned_field(v, "searches", UINT32_MAX) ||
-        !unsigned_field(v, "blocked", UINT32_MAX) || !unsigned_field(v, "shells", UINT32_MAX)) {
+        !unsigned_field(v, "blocked", UINT32_MAX) || !unsigned_field(v, "shells", UINT32_MAX) ||
+        !unsigned_field(v, "todo_call", 9007199254740991ULL) || !unsigned_field(v, "todo_turn", 9007199254740991ULL) ||
+        !unsigned_field(v, "closure_checks", 2)) {
         sope__json_free(v); return 0;
     }
     sope__harness_clear(a);
@@ -207,6 +225,24 @@ int sope__harness_load(sope_agent_t *a, const char *text)
         sope_buf b={0};ok=sope__json_canonical(&b,p,0)&&!b.oom&&b.len<=70000;
         if(ok)h->receipts[h->count++]=b.ptr;else sope__buf_free(&b);
     }
+    h->todo_call=(uint64_t)sope__json_number(sope__json_get(v,"todo_call"),0);
+    h->todo_turn=(uint64_t)sope__json_number(sope__json_get(v,"todo_turn"),0);
+    h->closure_checks=(unsigned)sope__json_number(sope__json_get(v,"closure_checks"),0);
+    const sope_json *todos=sope__json_get(v,"todos");
+    if (ok && todos && todos->type != SOPE_JSON_NULL) {
+        sope_buf b={0};
+        const sope_json *items=sope__json_get(todos,"todos");
+        ok=todos->type==SOPE_JSON_OBJECT && items && items->type==SOPE_JSON_ARRAY && items->count<=64 && h->todo_call && h->todo_turn;
+        for(const sope_json *p=ok?items->child:NULL;ok&&p;p=p->next) {
+            const char *content=sope__json_string(sope__json_get(p,"content"),NULL);
+            const char *status=sope__json_string(sope__json_get(p,"status"),NULL);
+            const char *reason=sope__json_string(sope__json_get(p,"reason"),NULL);
+            ok=content && *content && (!status || !strcmp(status,"pending") || !strcmp(status,"in_progress") ||
+                !strcmp(status,"completed") || (!strcmp(status,"blocked") && reason && *reason));
+        }
+        ok=ok && sope__json_canonical(&b,todos,0) && !b.oom && b.len<=16000;
+        if(ok)h->todos=b.ptr;else sope__buf_free(&b);
+    }
     sope__json_free(v);return ok;
 }
 
@@ -234,7 +270,117 @@ void sope__harness_evidence(sope_agent_t *a, sope_buf *out, int summary)
 
 static sope_next evidence(tool_run *r)
 {
-    pthread_mutex_lock(r->agent->mu);sope__harness_evidence(r->agent,&r->out,0);pthread_mutex_unlock(r->agent->mu);
+    const sope_json *id = sope__json_get(r->input, "call_id");
+    if (id) {
+        if (!unsigned_field(r->input,"call_id",9007199254740991ULL) || id->num < 1 ||
+            !unsigned_field(r->input,"offset",UINT32_MAX) || !unsigned_field(r->input,"limit",8192))
+            return sope__run_fail(r,"call_id must be a positive integer; offset >= 0; limit 4..8192 bytes");
+        size_t offset=(size_t)sope__json_number(sope__json_get(r->input,"offset"),0);
+        size_t max=(size_t)sope__json_number(sope__json_get(r->input,"limit"),8192);
+        if(max<4)return sope__run_fail(r,"limit must be at least 4 bytes");
+        pthread_mutex_lock(r->agent->mu);
+        int rc=sope__journal_recall(r->agent,(uint64_t)id->num,offset,max,&r->out);
+        pthread_mutex_unlock(r->agent->mu);
+        if(rc!=SOPE_OK)return sope__run_fail(r,"No readable committed result for this agent/call; historical recall requires durable execution. Nothing was rerun.");
+    } else {
+        pthread_mutex_lock(r->agent->mu);sope__harness_evidence(r->agent,&r->out,0);pthread_mutex_unlock(r->agent->mu);
+    }
     return sope__run_done(r);
 }
-const sope_builtin sope__builtin_evidence={"evidence","Returns the last 32 native execution receipts, preserved across compaction and durable reopen. These are historical execution facts, not model assertions or proof of coverage/current source correctness.","{\"type\":\"object\",\"properties\":{}}",0,evidence,NULL};
+const sope_builtin sope__builtin_evidence={"evidence",
+    "With no arguments, returns the last 32 native execution receipts across compaction and reopen. "
+    "With call_id, retrieves a page of that agent's original committed tool result from durable execution "
+    "without rerunning it. offset and limit are UTF-8 byte offsets (default limit 8192); use next_offset to continue. "
+    "Historical observations do not prove current file contents, coverage or correctness.",
+    "{\"type\":\"object\",\"properties\":{\"call_id\":{\"type\":\"integer\"},\"offset\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}}}",0,evidence,NULL};
+
+/* The plan is model-authored; only its persisted status is a fact. A bounded
+ * reconciliation prevents silent success with outstanding items, not false
+ * assertions that the work itself is correct. No synthetic user turn. */
+int sope__harness_finish(sope_agent_t *a)
+{
+    struct sope_harness *h = a->harness;
+    if (!h || !h->todos || h->todo_turn != sope__turn_id(a)) return 0;
+    sope_json *v = sope__json_parse(h->todos, strlen(h->todos));
+    const sope_json *todos = sope__json_get(v, "todos");
+    if (!v || !todos || todos->type != SOPE_JSON_ARRAY) {
+        sope__json_free(v);
+        sope__storage_fail_locked(a, "Cannot read the task plan; completion not established.");
+        return -1;
+    }
+    unsigned outstanding = 0;
+    for (const sope_json *p = todos ? todos->child : NULL; p; p = p->next) {
+        const char *status = sope__json_string(sope__json_get(p, "status"), NULL);
+        if (!status || !strcmp(status, "pending") || !strcmp(status, "in_progress")) outstanding++;
+    }
+    sope__json_free(v);
+    if (!outstanding) return 0;
+    if (h->closure_checks >= 2) return -1;
+    h->closure_checks++;
+    return sope__journal_harness(a) ? 1 : -1;
+}
+
+int sope__harness_context(sope_agent_t *a)
+{
+    struct sope_harness *h = a->harness;
+    turn_state *t = &a->turn;
+    if (h && t->msg && !t->msg->compact) begin(h, t->msg->turn_id);
+    sope_buf b = {0};
+    const msg_node *request = t->msg;
+    int summarized = 0, present = 0;
+    for (const sope_message *m = a->history.head; m; m = m->next) {
+        summarized |= m->is_summary;
+        if (request && m->role == SOPE__MSG_USER && !m->is_summary &&
+            m->content_len == request->len && !memcmp(m->content, request->text, request->len)) present = 1;
+    }
+    int task = summarized && request && !request->compact && !present;
+    if (task || (h && (h->todos || h->count))) {
+        sope__buf_appends(&b, "Runtime working state (derived data, not a new user request). "
+            "Summaries may be lossy: use the original request and recorded observations below to resolve conflicts. "
+            "Todos are model assertions, not verified completion. Receipts prove process outcomes only; "
+            "source freshness, coverage and correctness require assessment. Reuse known evidence; reread only the needed "
+            "range when a specific uncertainty or source change requires it. Finish the requested deliverables and "
+            "reconcile the plan before answering; mark a genuinely blocked item with its reason, never as completed.\n");
+        sope__buf_appendf(&b, "{\"round\":%" PRIu64 ",\"remaining_rounds\":%" PRIu64,
+            t->round, t->max_rounds > (int64_t)t->round ? (uint64_t)t->max_rounds - t->round : 0);
+        if (task) {
+            sope__buf_appends(&b, ",\"original_current_request\":");
+            sope__buf_append_json_string(&b, request->text, request->len);
+        }
+        if (h) {
+            unsigned calls = limit(a, "harness.max_calls", 128), searches = limit(a, "harness.max_searches", 16);
+            sope__buf_appendf(&b, ",\"remaining_tool_calls\":%u,\"remaining_searches\":%u,\"closure_checks\":%u",
+                calls > h->calls ? calls-h->calls : 0, searches > h->searches ? searches-h->searches : 0, h->closure_checks);
+            if (h->todos) {
+                sope__buf_appendf(&b, ",\"plan_call_id\":%" PRIu64 ",\"plan_turn_id\":%" PRIu64 ",\"plan\":", h->todo_call,h->todo_turn);
+                sope__buf_appends(&b, h->todos);
+            }
+            sope__buf_appends(&b, ",\"recent_executions\":[");
+            unsigned start = h->count > 8 ? h->count-8 : 0;
+            for (unsigned i=start;i<h->count;i++) {
+                sope_json *r=sope__json_parse(h->receipts[i],strlen(h->receipts[i]));
+                if(i>start)sope__buf_appends(&b,",");
+                sope__buf_appendf(&b,"{\"call_id\":%.0f,\"exit_code\":%.0f,\"outcome\":",
+                    sope__json_number(sope__json_get(r,"call_id"),0),sope__json_number(sope__json_get(r,"exit_code"),-1));
+                const char *outcome=sope__json_string(sope__json_get(r,"outcome"),NULL);
+                sope__buf_append_json_string(&b,outcome ? outcome : "unknown",outcome ? strlen(outcome) : 7);
+                sope__buf_appends(&b,"}");sope__json_free(r);
+            }
+            sope__buf_appends(&b,"],\"recent_reads\":[");
+            uint64_t before=UINT64_MAX;
+            for(unsigned n=0;n<12;n++) {
+                struct operation *best=NULL;
+                for(size_t i=0;i<KEYS;i++) if(h->ops[i].key && !strncmp(h->ops[i].key,"read:",5) &&
+                    h->ops[i].last < before && (!best || h->ops[i].last>best->last)) best=&h->ops[i];
+                if(!best)break;
+                if(n)sope__buf_appends(&b,",");
+                sope__buf_appendf(&b,"{\"call_id\":%" PRIu64 ",\"input\":",best->last);
+                sope__buf_appends(&b,strlen(best->key+5)<=1024?best->key+5:"null");
+                sope__buf_appends(&b,"}");before=best->last;
+            }
+            sope__buf_appends(&b,"],\"execution_details\":\"Use evidence(call_id) for exact historical tool results; evidence() for execution receipts. A read call may have failed; inspect its result.\"}");
+        } else sope__buf_appends(&b,"}");
+    }
+    if(b.oom){sope__buf_free(&b);return 0;}
+    free(t->work_context);t->work_context=b.ptr;return 1;
+}

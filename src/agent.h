@@ -139,6 +139,7 @@ typedef struct turn_state {
     int compact_retries, overflow_retried;
     int compact_failed; /* suppress repeated proactive failures for this turn */
     int terminal_committed;
+    char *work_context; /* derived request data, never summarized or journaled */
     char *cwd;                  /* option cwd: where built-in tools work */
     permit_mode permit;         /* option permissions */
 } turn_state;
@@ -234,6 +235,8 @@ char *sope__harness_json(sope_agent_t *a);
 int sope__harness_load(sope_agent_t *a, const char *json);
 void sope__harness_clear(sope_agent_t *a);
 void sope__harness_evidence(sope_agent_t *a, sope_buf *out, int summary);
+int sope__harness_context(sope_agent_t *a);
+int sope__harness_finish(sope_agent_t *a); /* 0: resolved, 1: reconcile, -1: incomplete */
 
 /* The turn running now; only while a->turn.active. */
 static inline uint64_t sope__turn_id(const sope_agent_t *a)
@@ -267,6 +270,7 @@ char *sope__identity(void);
 int sope__journal_checkpoint(sope_agent_t *a, const char *kind, int terminal);
 int sope__journal_result(sope_agent_t *a, pending_call *p);
 int sope__journal_subagent_result(sope_agent_t *a, pending_call *p, int32_t stop);
+int sope__journal_recall(sope_agent_t *a, uint64_t call, size_t offset, size_t limit, sope_buf *out);
 int sope__journal_artifact(sope_agent_t *a, uint64_t call, const char *path);
 int sope__storage_fail_locked(sope_agent_t *a, const char *message);
 void sope__journal_close(sope_agent_t *a);

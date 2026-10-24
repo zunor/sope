@@ -55,3 +55,24 @@ test("slow trace output drops bounded records and reports the gap", async () => 
     expect(rows.length).toBeLessThan(2000);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("trace identifies repeated read ranges and closure without exposing paths or summaries", async()=>{
+ const dir=mkdtempSync(join(tmpdir(),"sope-trace-"));
+ try {
+  const trace=new ExecutionTrace(dir);
+  const emit=(callId:number,input:object)=>trace.event({...origin,type:"tool_start",callId,name:"read",input:JSON.stringify(input)});
+  emit(1,{file_path:"secret-file"});emit(2,{limit:2000,offset:1,file_path:"./secret-file"});
+  emit(3,{file_path:"secret-file",offset:2});
+  trace.event({...origin,type:"compact",trigger:"auto",summary:"secret-summary"});
+  trace.event({...origin,type:"log",level:"info",message:'{"event":"work.closure","outstanding":1}'});
+  await trace.close();const raw=readFileSync(trace.path,"utf8");expect(raw).not.toContain("secret");
+  const rows=raw.trim().split("\n").map(x=>JSON.parse(x));
+  const reads=rows.filter(x=>x.type==="tool_start");
+  expect(reads.map(x=>x.readCount)).toEqual([1,2,1]);expect(reads[1].previousReadCallId).toBe(1);
+  expect(reads[1].readFingerprint).toBe(reads[0].readFingerprint);
+  expect(rows.find(x=>x.type==="compact").summaryFingerprint).toHaveLength(64);
+  expect(rows.some(x=>x.type==="work.closure")).toBe(true);
+  const other=new ExecutionTrace(dir);other.event({...origin,type:"tool_start",callId:1,name:"read",input:'{"file_path":"secret-file"}'});await other.close();
+  expect(JSON.parse(readFileSync(other.path,"utf8").trim().split("\n")[1]!).readFingerprint).not.toBe(reads[0].readFingerprint);
+ } finally {rmSync(dir,{recursive:true,force:true});}
+});

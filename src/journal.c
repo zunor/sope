@@ -362,6 +362,7 @@ int sope_agent_open(sope_agent_t **out, const char *directory)
         "CREATE TABLE IF NOT EXISTS outcomes(turn INTEGER PRIMARY KEY,payload TEXT NOT NULL);"
         "CREATE TABLE IF NOT EXISTS harness(agent INTEGER PRIMARY KEY,payload TEXT NOT NULL);"
         "CREATE INDEX IF NOT EXISTS stream_origin ON stream(agent,turn,type,seq);"
+        "CREATE INDEX IF NOT EXISTS result_origin ON events(agent,call) WHERE kind='result';"
         "PRAGMA user_version=2;")) goto bad;
     if (!sql(j->db, "INSERT OR IGNORE INTO runtime VALUES(1,%Q,NULL)", a->session_id)) goto bad;
     sqlite3_stmt *identity = NULL;
@@ -637,4 +638,35 @@ int sope_agent_outcome(sope_agent_t *a, uint64_t id, const char **json, size_t *
     }
     sqlite3_finalize(s); pthread_mutex_unlock(a->mu);
     return rc;
+}
+
+/* Read a committed result belonging to this agent. This is historical evidence,
+ * never a rerun or a claim that the current file contents are unchanged. *mu held. */
+int sope__journal_recall(sope_agent_t *a, uint64_t call, size_t offset, size_t limit, sope_buf *out)
+{
+    if (!a->root->journal) return SOPE_ENOTFOUND;
+    sqlite3_stmt *s = NULL;
+    const char *query = "SELECT r.payload FROM results r WHERE r.call=? AND EXISTS "
+        "(SELECT 1 FROM events e WHERE e.kind='result' AND e.call=r.call AND e.agent=?)";
+    if (sqlite3_prepare_v2(a->root->journal->db, query, -1, &s, NULL) != SQLITE_OK) return SOPE_ERROR;
+    sqlite3_bind_int64(s, 1, (sqlite3_int64)call);
+    sqlite3_bind_int64(s, 2, (sqlite3_int64)a->agent_id);
+    int step = sqlite3_step(s), rc = SOPE_ENOTFOUND;
+    if (step == SQLITE_ROW) {
+        sope_history h = {0};
+        if (!parse_history(&h, s, 0) || h.count != 1) rc = SOPE_ERROR;
+        else {
+            const sope_message *m = h.head;
+            size_t start = offset < m->content_len ? offset : m->content_len;
+            while (start < m->content_len && ((unsigned char)m->content[start] & 0xc0) == 0x80) start++;
+            size_t end = m->content_len-start > limit ? start+limit : m->content_len;
+            while (end > start && end < m->content_len && ((unsigned char)m->content[end] & 0xc0) == 0x80) end--;
+            sope__buf_appendf(out,"{\"call_id\":%" PRIu64 ",\"is_error\":%s,\"offset\":%zu,\"next_offset\":%zu,\"total_bytes\":%zu,\"historical\":true,\"content\":",
+                call,m->is_error?"true":"false",start,end,m->content_len);
+            sope__buf_append_json_string(out,m->content+start,end-start);
+            sope__buf_appends(out,"}");rc=out->oom?SOPE_ENOMEM:SOPE_OK;
+        }
+        sope__history_clear(&h);
+    } else if (step != SQLITE_DONE) rc = SOPE_ERROR;
+    sqlite3_finalize(s);return rc;
 }

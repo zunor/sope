@@ -454,6 +454,16 @@ static void test_execution_receipts(void)
         if (ev.type == SOPE_EVENT_TURN_END) break;
     }
     REQUIRE(seen == 1);
+    send_text(a, "!evidence {\"call_id\":1,\"limit\":8192}");
+    seen=0;
+    for (;;) {
+        sope_event_t ev=poll_event(a);
+        if(ev.type==SOPE_EVENT_TOOL_END) {
+            REQUIRE(!ev.code && strstr(ev.data,"\"historical\":true") && strstr(ev.data,"\"is_error\":true") && strstr(ev.data,"process_failed"));seen++;
+        }
+        if(ev.type==SOPE_EVENT_TURN_END)break;
+    }
+    REQUIRE(seen==1);
     REQUIRE(sope_agent_reset(a) == SOPE_OK);
     sope_agent_free(a);
     a = open_agent(dir);

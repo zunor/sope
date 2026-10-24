@@ -72,7 +72,7 @@ test("treats negative attempts as zero", () => expect(retryDelay(-1)).toBe(250))
 
 const call = (id: string, name: string, input: Record<string, unknown>): ToolCall => ({ id, name, input });
 function response(messages: Message[]): { text: string; calls?: ToolCall[] } {
-  const userIndex = messages.findLastIndex((m) => m.role === "user");
+  const userIndex = messages.findLastIndex((m) => m.role === "user" && !m.content?.startsWith("Runtime working state ("));
   const prompt = messages[userIndex]?.content ?? "";
   const results = messages.slice(userIndex + 1).filter((m) => m.role === "tool");
   const has = (id: string) => results.some((m) => m.tool_call_id === id);

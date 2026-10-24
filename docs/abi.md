@@ -159,7 +159,7 @@ Every agent comes with tools executed by the library; the host does not need to 
 | `edit` | Replace exact text; errors if `old_string` is not unique unless `replace_all` is set. An empty `old_string` creates a file | Yes |
 | `bash` | Run a command with `/bin/bash -o pipefail -c`, returning merged stdout/stderr and the exit code; `timeout` defaults to 2 minutes, up to 10 minutes; `run_in_background` enables background execution | Yes |
 | `check` | Run a program with literal `argv`, bounded output, a deadline and a durable execution receipt; no implicit shell chaining | Yes |
-| `evidence` | Retrieve the last 32 native execution receipts for this agent | No |
+| `evidence` | Retrieve execution receipts, or a page of a historical committed tool result by `call_id` | No |
 | `bash_output` | Read new output from a background command since the last call, and report whether it is still running | No |
 | `bash_kill` | Stop a background command and all its child processes | No |
 | `web_fetch` | Fetch an HTTP(S) URL: convert HTML to text with headings, lists, and links (page images become `![alt](url)`); return text and JSON unchanged; send image URLs' images directly to the model. Follows redirects; paginate long pages with `offset` (about 40000 bytes per page) | Yes |
@@ -510,7 +510,22 @@ same transaction as its tool result. Unknown/cancelled outcomes do not become
 successful receipts. Host tools replacing these builtins cannot supply trusted
 receipts. Background shells currently have no completion receipts.
 
-`evidence` retrieves the ledger. A deterministic footer on normal completion
+`evidence()` retrieves the ledger. With `call_id`, it retrieves that agent's
+original committed tool result from durable execution; optional byte `offset`
+and `limit` (4–8192, default 8192) paginate via `next_offset`, preserving UTF-8.
+This does not rerun a tool or assert that an earlier file read is still current.
+No durable journal or no matching result produces an explicit tool error.
+
+The latest successful native todo list (64 items / 16,000 JSON bytes) survives
+compaction and reopen. Statuses are `pending`, `in_progress`, `completed` and
+`blocked`; blocked items require `reason`. Runtime working state supplies that
+plan, process outcomes, read references and the current request after compaction
+to both wire APIs, within the context budget. Pending current-turn items trigger
+at most two completion reconciliations; unresolved work ends with `SOPE_STOP_ERROR`.
+Plans are model assertions and do not establish that deliverables are correct.
+See [working-state.md](design/working-state.md).
+
+A deterministic footer on normal completion
 shows up to eight recent receipts, even if the model omits failures. These are
 historical observations; **exit zero does not establish test success**. Receipts
 do not verify assertion quality, coverage, test count, current source freshness

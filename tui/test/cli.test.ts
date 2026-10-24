@@ -140,3 +140,8 @@ test("reasoning effort: --effort, SOPE_REASONING_EFFORT and the option sent", ()
   expect(agentOptions(loadConfig({}, {}, {}))["reasoning.effort"]).toBeUndefined();
   expect([effortLabel("xhigh"), effortLabel(""), effortLabel("minimal")]).toEqual(["Extra high", "Default", "Minimal"]);
 });
+
+test("blocked todos retain their reason and never render as completed", () => {
+  const todos = todosOf({ todos: [{ content: "Run verification", status: "blocked", reason: "Dependency unavailable" }] })!;
+  expect(formatTodos(todos)).toBe("⊘ Run verification — Dependency unavailable");
+});

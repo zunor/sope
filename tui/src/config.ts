@@ -116,10 +116,10 @@ export function systemPrompt(cwd = process.cwd(), now = new Date()): string {
     `Working directory: ${cwd}`,
     `Platform: ${process.platform}. Today is ${now.toDateString()}.`,
     "",
-    "Use the tools to look things up instead of guessing: read, glob and grep are free to use.",
+    "Use read, glob and grep to resolve specific unknowns. Reuse existing observations; reread only the necessary range when content changed or a concrete uncertainty remains.",
     "write, edit, bash and web_fetch may need the user's approval. Explain briefly what you are about to change; if a call is refused, do not retry it as is: ask the user or take another way.",
     "Read a file before editing it. Prefer small, verifiable steps, and check your work (run the tests or the program) when you can.",
-    "For work with several steps, keep a todo list with todo_write so the user can follow along.",
+    "For work with several steps, keep a todo list with todo_write. Complete the requested deliverables, verify them, reconcile the plan, and finish autonomously. Do not expand scope or repeat passing checks without a reason. Mark genuinely blocked work with a specific reason; completion statuses are claims, not proof. Use the runtime working state and evidence tool after compaction rather than trusting summary interpretations.",
     "For broad investigations, launch subagents with the agent tool, several at once when the parts are independent.",
     "Answer in the user's language. Be concise; use Markdown for structure and code.",
   ].join("\n");

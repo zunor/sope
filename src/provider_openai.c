@@ -184,6 +184,12 @@ static void build_body(sope_call *c, sope_buf *b, const char *model)
         sope__buf_appends(b, "}");
         if (m->role == SOPE__MSG_TOOL && (!m->next || m->next->role != SOPE__MSG_TOOL)) append_tool_images(b, tools, m);
     }
+    if (!c->compaction && c->agent->turn.work_context) {
+        if (!first) sope__buf_appends(b, ",");
+        sope__buf_appends(b, "{\"role\":\"user\",");
+        put_string(b, "content", c->agent->turn.work_context, strlen(c->agent->turn.work_context));
+        sope__buf_appends(b, "}");
+    }
     sope__buf_appends(b, "]");
 
     if (n) {
@@ -261,6 +267,12 @@ static void build_responses(sope_call *c, sope_buf *b, const char *model)
                 put_string(b, "arguments", u->input, u->input_len); sope__buf_appends(b, "}");
             }
         }
+    }
+    if (!c->compaction && c->agent->turn.work_context) {
+        if (!first) sope__buf_appends(b, ",");
+        sope__buf_appends(b, "{\"role\":\"user\",");
+        put_string(b, "content", c->agent->turn.work_context, strlen(c->agent->turn.work_context));
+        sope__buf_appends(b, "}");
     }
     sope__buf_appends(b, "]");
     size_t n = sope__call_tool_count(c);
