@@ -129,11 +129,34 @@ static void test_harness_checkpoint(void)
     sope_agent_free(a); sope_agent_free(b);
 }
 
+static void test_failed_operation_retry_after_edit(void)
+{
+    sope_agent_t *a = NULL;
+    CHECK(sope_agent_new(&a) == SOPE_OK);
+    sope_tool_use u = { .name = "host_operation", .input = "{}", .input_len = 2 };
+    for (int i = 0; i < 3; i++) {
+        pending_call *p = calloc(1, sizeof *p);
+        p->name = sope__strdup(u.name); p->call_id = (uint64_t)i + 1; p->turn_id = 1;
+        CHECK(sope__harness_admit(a, p, &u));
+        CHECK(p->harness_blocked == (i == 2));
+        p->is_error = 1; sope__harness_observe(a, p); sope__pending_free(p);
+    }
+    /* A known file mutation creates a reason to retry, without opening a new
+     * user turn or resetting the aggregate and blocked-call budgets. */
+    pending_call mutation = { .name = "edit" };
+    sope__harness_observe(a, &mutation);
+    pending_call *p = calloc(1, sizeof *p);
+    p->name = sope__strdup(u.name); p->call_id = 5; p->turn_id = 1;
+    CHECK(sope__harness_admit(a, p, &u) && !p->harness_blocked);
+    sope__pending_free(p); sope_agent_free(a);
+}
+
 int main(void)
 {
     test_transcript_budget_and_utf8();
     test_suffix_groups();
     test_request_accounting();
     test_harness_checkpoint();
+    test_failed_operation_retry_after_edit();
     return failures ? 1 : 0;
 }
