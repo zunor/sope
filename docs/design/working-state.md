@@ -51,6 +51,19 @@ analysis, automatic cross-file read suppression, or external model judge is
 introduced. Summary fingerprints and closure events support investigation;
 the journal remains the source for exact content comparisons.
 
+For durable native text reads, successful results also commit a bounded content
+fingerprint and size in the operation ledger. After `harness.max_repeats` full
+deliveries of an identical request (default two), a fresh matching read returns
+a qualified reference to a committed full result instead of emitting duplicate
+contents. Shell commands and unrelated writes cannot reset these observations.
+Changed contents reopen delivery even when size and mtime are unchanged. This
+uses the file tool's existing non-cryptographic fingerprint; it is not an
+adversarial content-integrity guarantee or a filesystem cache. File I/O still
+occurs, and explicit historical retrieval remains available. Failed reads do
+not commit observations. Ephemeral agents, images, different argument forms
+and evicted operation entries do not receive this duplicate-content treatment.
+New user turns reset the operation ledger and its read allowances.
+
 Provider diagnostics distinguish `finish_state` (0: pending, 1: text stop,
 2: tool batch) from `stream_done` (protocol terminal event received). A response
 can stop producing text before its terminal event arrives; neither a completed

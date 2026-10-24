@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type SopeEvent } from "../src";
@@ -160,4 +160,49 @@ test("receipt identity cannot join a different session's test claim to an unrela
  expect(ownSession).not.toBe(ledger.session_id);
  expect(working(requests.at(-1)!)).toContain('"argv":["/bin/echo","directory listing is not a test"]');
  expect(JSON.parse(recalls[2]!.result)).toMatchObject({session_id:ownSession,call_id:1});
+});
+
+
+test("unchanged reads survive compaction and unrelated commands; changed bytes reopen delivery",async()=>{
+ const dir=mkdtempSync(join(tmpdir(),"sope-read-memory-"));dirs.push(dir);
+ const path=join(dir,"note.txt");writeFileSync(path,"one\n");const st=statSync(path);
+ const a=create(join(dir,"execution"),{"compact.threshold":"14000","compact.retain_tokens":"0"});
+ a.registerTool({name:"bulk",description:"context pressure",inputSchema:{type:"object"}});
+ const db=new Database(join(dir,"execution","execution.sqlite"),{readonly:true});
+ const session=(db.query("select session_id from runtime").get() as {session_id:string}).session_id;db.close();
+ let round=0;
+ respond=r=>{
+  if(isCompact(r))return text("All earlier file contents have been forgotten.");
+  switch(++round){
+   case 1:case 3:case 7:return tools({name:"read",input:{file_path:path}});
+   case 2:case 6:return tools({name:"check",input:{argv:["/usr/bin/true"]}});
+   case 4:return tools({name:"bulk",input:{}});
+   case 5:return tools({name:"write",input:{file_path:join(dir,"unrelated.txt"),content:"unrelated"}});
+   case 8:writeFileSync(path,"two\n");utimesSync(path,st.atime,st.mtime);return tools({name:"read",input:{file_path:path}});
+   case 9:return tools({name:"evidence",input:{session_id:session,call_id:3}});
+   default:return text("done");
+  }
+ };
+ a.send("Read local notes and recover exact evidence after compaction");
+ const events=await drain(a,e=>a.toolResult(e.callId,"context ".repeat(10000)));
+ expect(events.at(-1)).toMatchObject({stopReason:"end_turn"});
+ expect(events.some(e=>e.type==="compact")).toBe(true);
+ const reads=events.filter(e=>e.type==="tool_end"&&e.name==="read");
+ expect(reads).toHaveLength(4);
+ for(const i of [0,1])expect(reads[i]).toMatchObject({isError:false,result:expect.stringContaining("one")});
+ if(reads[2]?.type==="tool_end"){
+  expect(reads[2].isError).toBe(false);
+  expect(reads[2].result).toContain("Repeated read:");
+  expect(reads[2].result).toContain('"call_id":3');
+ }
+ expect(reads[3]).toMatchObject({isError:false,result:expect.stringContaining("two")});
+ const recall=events.find(e=>e.type==="tool_end"&&e.name==="evidence");
+ expect(recall).toMatchObject({isError:false,result:expect.stringContaining("one")});
+ a.free();agents.splice(agents.indexOf(a),1);
+ const reopened=create(join(dir,"execution"));round=0;
+ respond=()=>++round===1?tools({name:"read",input:{file_path:path}}):text("new turn done");
+ reopened.send("Read the file again in a new user turn");
+ const again=await drain(reopened);
+ expect(again.at(-1)).toMatchObject({stopReason:"end_turn"});
+ expect(again.find(e=>e.type==="tool_end"&&e.name==="read")).toMatchObject({isError:false,result:expect.stringContaining("two")});
 });

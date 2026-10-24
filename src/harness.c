@@ -10,7 +10,12 @@
 #define KEYS 64
 #define RECEIPTS 32
 #define KEY_BYTES 16384
-struct operation { char *key; unsigned reads, runs, failures; uint64_t last; };
+struct operation {
+    char *key; unsigned reads, runs, failures; uint64_t last;
+    uint64_t read_digest;
+    size_t read_size;
+    int read_observed;
+};
 struct sope_harness {
     uint64_t turn;
     unsigned calls, searches, blocked, shells;
@@ -96,6 +101,7 @@ int sope__harness_admit(sope_agent_t *a, pending_call *p, const sope_tool_use *u
     /* Polling and evidence retrieval are not repeated execution. */
     int exempt = !strcmp(u->name, "bash_output") || !strcmp(u->name, "bash_kill") || !strcmp(u->name, "evidence");
     int execution = !strcmp(u->name, "bash") || !strcmp(u->name, "check");
+    int native_read = p->kind == PENDING_BUILTIN && !strcmp(u->name, "read");
     int search = !strcmp(u->name, "grep") || !strcmp(u->name, "glob");
     p->harness_key = sope__harness_identity(u);
     struct operation *op = find(h, p->harness_key, 1);
@@ -104,7 +110,7 @@ int sope__harness_admit(sope_agent_t *a, pending_call *p, const sope_tool_use *u
     if (h->blocked >= 3) why = "turn execution circuit is open";
     else if (++h->calls > limit(a, "harness.max_calls", 128)) why = "tool-call budget exhausted";
     else if (search && ++h->searches > limit(a, "harness.max_searches", 16)) why = "search budget exhausted";
-    else if (!exempt && op && (op->failures >= repeats || (readonly(u->name) && op->reads >= repeats) || (execution && op->runs >= repeats)))
+    else if (!native_read && !exempt && op && (op->failures >= repeats || (readonly(u->name) && op->reads >= repeats) || (execution && op->runs >= repeats)))
         why = "repeated operation budget exhausted";
     if (why) {
         sope_buf b = {0};
@@ -115,11 +121,35 @@ int sope__harness_admit(sope_agent_t *a, pending_call *p, const sope_tool_use *u
         h->blocked++;
         return b.oom ? 0 : 1;
     }
-    if (op && readonly(u->name)) op->reads++;
+    if (op && readonly(u->name) && !native_read) op->reads++;
     if (op && execution) op->runs++;
-    if (op) op->last = p->call_id;
+    if (op && !native_read) op->last = p->call_id;
     if (!strcmp(u->name, "bash")) h->shells++;
     return 1;
+}
+
+/* Runs after actual file I/O, outside the agent lock. This is a bounded
+ * content fingerprint, not a filesystem cache: changed bytes always reopen
+ * the allowance, including same-size edits with restored timestamps. */
+int sope__harness_read(tool_run *r, uint64_t digest, size_t size)
+{
+    sope_agent_t *a = r->agent;
+    pthread_mutex_lock(a->mu);
+    pending_call *p = sope__pending_find_locked(a, r->call_id, PENDING_BUILTIN);
+    struct operation *op = p && a->harness ? find(a->harness, p->harness_key, 0) : NULL;
+    r->read_observed = 1; r->read_digest = digest; r->read_size = size;
+    int reuse = a->root->journal && op && op->read_observed && op->last &&
+        op->read_digest == digest && op->read_size == size &&
+        op->reads >= limit(a, "harness.max_repeats", 2);
+    if (reuse) {
+        sope__buf_appendf(&r->out, "Repeated read: file size and content fingerprint match the prior read of this exact request. "
+            "The file was checked again; duplicate content is omitted. Retrieve the original result with "
+            "evidence({\"session_id\":\"%s\",\"call_id\":%" PRIu64 "}), or request the specific range needed. "
+            "The prior result may contain an artifact link for clipped content.", a->root->session_id, op->last);
+        r->read_reused = 1;
+    }
+    pthread_mutex_unlock(a->mu);
+    return reuse;
 }
 
 void sope__harness_observe(sope_agent_t *a, pending_call *p)
@@ -130,6 +160,11 @@ void sope__harness_observe(sope_agent_t *a, pending_call *p)
     if (op && !p->harness_blocked) {
         if (p->is_error) op->failures++;
         else op->failures = 0;
+        if (!p->is_error && p->read_observed) {
+            if (!op->read_observed || op->read_digest != p->read_digest || op->read_size != p->read_size) op->reads = 0;
+            op->read_observed = 1; op->read_digest = p->read_digest; op->read_size = p->read_size;
+            if (!p->read_reused) { op->reads++; op->last = p->call_id; }
+        }
     }
     /* Commit the plan with the successful native result, not tool admission.
      * Parallel replacements resolve by call ID, independent of completion order. */
@@ -144,9 +179,10 @@ void sope__harness_observe(sope_agent_t *a, pending_call *p)
      * A successful shell/check alone is not evidence that the cause changed. */
     if (!p->is_error && (!strcmp(p->name,"write") || !strcmp(p->name,"edit")))
         for (size_t i = 0; i < KEYS; i++) h->ops[i].failures = h->ops[i].runs = 0;
-    /* Arbitrary programs may change what reads see; this is not a cache. */
+    /* Text reads check actual bytes themselves. Arbitrary programs still
+     * invalidate other read/search counters, not content observations. */
     if (!p->is_error && (!strcmp(p->name,"write") || !strcmp(p->name,"edit") || !strcmp(p->name,"bash") || !strcmp(p->name,"check")))
-        for (size_t i = 0; i < KEYS; i++) h->ops[i].reads = 0;
+        for (size_t i = 0; i < KEYS; i++) if (!h->ops[i].read_observed) h->ops[i].reads = 0;
     if (p->receipt) {
         char *copy = sope__strdup(p->receipt);
         if (!copy) { sope__storage_fail_locked(a, "Cannot retain check receipt."); return; }
@@ -170,7 +206,9 @@ char *sope__harness_json(sope_agent_t *a)
         struct operation *op = &h->ops[i];
         sope__buf_appends(&b, comma++ ? ",{" : "{");
         sope__buf_appends(&b,"\"key\":"); sope__buf_append_json_string(&b,op->key,strlen(op->key));
-        sope__buf_appendf(&b,",\"reads\":%u,\"runs\":%u,\"failures\":%u,\"last\":%" PRIu64 "}",op->reads,op->runs,op->failures,op->last);
+        sope__buf_appendf(&b,",\"reads\":%u,\"runs\":%u,\"failures\":%u,\"last\":%" PRIu64,op->reads,op->runs,op->failures,op->last);
+        if (op->read_observed) sope__buf_appendf(&b,",\"read_digest\":\"%016" PRIx64 "\",\"read_size\":%zu",op->read_digest,op->read_size);
+        sope__buf_appends(&b,"}");
     }
     sope__buf_appends(&b,"],\"receipts\":[");
     for (unsigned i=0;i<h->count;i++) { if(i)sope__buf_appends(&b,",");sope__buf_appends(&b,h->receipts[i]); }
@@ -219,6 +257,14 @@ int sope__harness_load(sope_agent_t *a, const char *text)
         op->runs=(unsigned)sope__json_number(sope__json_get(p,"runs"),0);
         op->failures=(unsigned)sope__json_number(sope__json_get(p,"failures"),0);
         op->last=(uint64_t)sope__json_number(sope__json_get(p,"last"),0);
+        const sope_json *fingerprint=sope__json_get(p,"read_digest");
+        if (fingerprint) {
+            const char *hex=sope__json_string(fingerprint,NULL); char *end=NULL;
+            if (!hex || strlen(hex)!=16 || strspn(hex,"0123456789abcdef")!=16 ||
+                !sope__json_get(p,"read_size") || !unsigned_field(p,"read_size",9007199254740991ULL)) { ok=0; break; }
+            op->read_digest=strtoull(hex,&end,16); op->read_observed=1;
+            op->read_size=(size_t)sope__json_number(sope__json_get(p,"read_size"),0);
+        }
     }
     for(const sope_json *p=receipts?receipts->child:NULL;ok&&p;p=p->next){
         if (p->type != SOPE_JSON_OBJECT) { ok=0; break; }
@@ -347,6 +393,8 @@ int sope__harness_context(sope_agent_t *a)
             "Todos are model assertions, not verified completion. Call IDs are scoped to this session and agent; "
             "numbers cited in files from other runs are not these receipts. Never associate a test claim with an "
             "unrelated command. Receipts prove process outcomes only; "
+            "the runtime does not interpret test frameworks. Inspect original output for reported PASS/FAIL, "
+            "and assess assertion quality separately. "
             "source freshness, coverage and correctness require assessment. Reuse known evidence; reread only the needed "
             "range when a specific uncertainty or source change requires it. Finish the requested deliverables and "
             "reconcile the plan before answering; mark a genuinely blocked item with its reason, never as completed.\n");
@@ -389,7 +437,7 @@ int sope__harness_context(sope_agent_t *a)
             uint64_t before=UINT64_MAX;
             for(unsigned n=0;n<12;n++) {
                 struct operation *best=NULL;
-                for(size_t i=0;i<KEYS;i++) if(h->ops[i].key && !strncmp(h->ops[i].key,"read:",5) &&
+                for(size_t i=0;i<KEYS;i++) if(h->ops[i].key && h->ops[i].last && !strncmp(h->ops[i].key,"read:",5) &&
                     h->ops[i].last < before && (!best || h->ops[i].last>best->last)) best=&h->ops[i];
                 if(!best)break;
                 if(n)sope__buf_appends(&b,",");

@@ -47,6 +47,8 @@ static const char READ_DESC[] =
     "- Output uses `cat -n` format: the line number, a tab, then the line. Lines longer than 2000 characters "
     "are truncated.\n"
     "- It reads files, not directories: use glob, or ls through bash, for those.\n"
+    "- Repeated unchanged text requests may return a qualified reference instead of duplicate contents. "
+    "Use evidence with that session/call ID to recover the original result, or read the specific range needed.\n"
     "- Images (PNG, JPEG, GIF, WebP) are shown to you as images, so you can read screenshots and diagrams.\n"
     "- You must read a file before changing it with edit or write.\n"
     "- Read several files at once with parallel calls when you need several.";
@@ -409,6 +411,12 @@ static sope_next tool_read(tool_run *r)
     }
     if (offset < 1) offset = 1;
     if (limit < 1) limit = READ_MAX_LINES;
+    if (sope__harness_read(r, digest_bytes(data.ptr, data.len), data.len)) {
+        files_record(r, path, data.ptr, data.len);
+        free(path);
+        sope__buf_free(&data);
+        return sope__run_done(r);
+    }
     total = count_lines(data.ptr, data.len);
 
     while (pos < data.len) {

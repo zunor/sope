@@ -92,6 +92,9 @@ typedef struct pending_call {
     char *harness_key;
     int harness_blocked;
     char *receipt; /* native check fact, never supplied by the model */
+    uint64_t read_digest;
+    size_t read_size;
+    int read_observed, read_reused;
 } pending_call;
 
 typedef enum { PHASE_START, PHASE_CALL, PHASE_TOOLS, PHASE_COMPACT } turn_phase;

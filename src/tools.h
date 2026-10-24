@@ -45,6 +45,9 @@ struct tool_run {
     char *file_path; /* canonical target, fixed at admission */
     file_state expected_file; /* revision seen when this call was admitted */
     int expected_read;
+    uint64_t read_digest;
+    size_t read_size;
+    int read_observed, read_reused;
     struct file_gate *file_gate;
 
     sope_buf out; /* the result the model sees */
@@ -118,6 +121,8 @@ const char *sope__display_path(tool_run *r, const char *path);
 /* tool_file.c: forgets which files the agent has read (history reset, teardown). */
 void sope__files_clear(sope_agent_t *a);
 int sope__file_prepare(tool_run *r);
+/* Checks a freshly read text fingerprint against committed observations. */
+int sope__harness_read(tool_run *r, uint64_t digest, size_t size);
 sope_next sope__file_step(tool_run *r);
 void sope__file_release(tool_run *r);
 /* Native execution fact; call only after process exit and a complete archive. */

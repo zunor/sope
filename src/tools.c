@@ -234,6 +234,8 @@ static void run_closed(sope_task *task)
         r->images = NULL;
         r->n_images = 0;
         p->receipt = r->receipt; r->receipt = NULL;
+        p->read_digest = r->read_digest; p->read_size = r->read_size;
+        p->read_observed = r->read_observed; p->read_reused = r->read_reused;
         p->done = sope__journal_result(a, p);
         p->reported = 1;
         r->out.ptr = NULL;
