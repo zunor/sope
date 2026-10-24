@@ -171,7 +171,14 @@ static const sope_tool_use *find_use(sope_agent_t *a, uint64_t id)
 static int commit_result(sope_agent_t *a, pending_call *p, uint32_t type, int32_t code)
 {
     if (a->root->journal_failed) return 0;
+    if (!p->is_error && p->kind == PENDING_BUILTIN && !strcmp(p->name, "report") &&
+        !sope__report_current(a, p->content, p->len)) {
+        char *error = sope__strdup("Evidence changed during report submission. Resubmit report against current observations.");
+        if (!error) return fail(a);
+        free(p->content); p->content = error; p->len = strlen(error); p->is_error = 1;
+    }
     sope__harness_observe(a, p);
+    if (type == SOPE_EVENT_TOOL_END) code = p->is_error;
     if (a->root->journal_failed) return 0;
     ev_node event = { .type = type, .agent_id = a->agent_id, .turn_id = p->turn_id,
         .call_id = p->call_id, .code = code, .data = p->content, .data_len = p->len,
@@ -190,6 +197,7 @@ static int commit_result(sope_agent_t *a, pending_call *p, uint32_t type, int32_
         int ok = body && sql(db, "BEGIN IMMEDIATE") && audit(a, "result", p->turn_id, p->call_id, body) &&
             sql(db, "INSERT INTO results(call,payload) VALUES(%lld,%Q)", (long long)p->call_id, body) &&
             stream_event(a, &event);
+        if (ok && p->observation) ok = sql(db, "INSERT INTO observations VALUES(%lld,%lld,%lld,%Q)", (long long)p->call_id, (long long)a->agent_id, (long long)p->turn_id, p->observation);
         if (ok) ok = save_harness(a);
         if (ok) ok = sql(db, "COMMIT");
         if (!ok) { sql(db, "ROLLBACK"); a->root->event_sequence = sequence; }
@@ -361,6 +369,7 @@ int sope_agent_open(sope_agent_t **out, const char *directory)
         "CREATE TABLE IF NOT EXISTS stream(seq INTEGER PRIMARY KEY AUTOINCREMENT,type INTEGER NOT NULL,agent INTEGER NOT NULL,turn INTEGER NOT NULL,call INTEGER NOT NULL,code INTEGER NOT NULL,name TEXT NOT NULL,data TEXT NOT NULL);"
         "CREATE TABLE IF NOT EXISTS outcomes(turn INTEGER PRIMARY KEY,payload TEXT NOT NULL);"
         "CREATE TABLE IF NOT EXISTS harness(agent INTEGER PRIMARY KEY,payload TEXT NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS observations(call INTEGER PRIMARY KEY,agent INTEGER NOT NULL,turn INTEGER NOT NULL,payload TEXT NOT NULL);"
         "CREATE INDEX IF NOT EXISTS stream_origin ON stream(agent,turn,type,seq);"
         "CREATE INDEX IF NOT EXISTS result_origin ON events(agent,call) WHERE kind='result';"
         "PRAGMA user_version=2;")) goto bad;
@@ -534,6 +543,9 @@ int sope__journal_terminal(sope_agent_t *a, int stop)
     uint64_t id = sope__turn_id(a);
     sope__buf_appendf(&b, "{\"turn_id\":\"%" PRIu64 "\",\"stop\":%d,\"final\":", id, stop);
     sope__buf_append_json_string(&b, last && last->content ? last->content : "", last ? last->content_len : 0);
+    sope__buf_appends(&b, ",\"acceptance\":");
+    const char *report=sope__harness_report(a);
+    sope__buf_appends(&b, stop==SOPE_STOP_END_TURN && !a->turn.msg->compact && report ? report : "null");
     sope__buf_appends(&b, "}");
     ev_node event = { .type = SOPE_EVENT_TURN_END, .turn_id = id, .code = stop };
     int ok = !b.oom && sql(a->journal->db, "INSERT INTO outcomes VALUES(%lld,%Q)", (long long)id, b.ptr) && stream_event(a, &event);
@@ -643,14 +655,17 @@ int sope_agent_outcome(sope_agent_t *a, uint64_t id, const char **json, size_t *
 /* Read a committed result belonging to this agent. This is historical evidence,
  * never a rerun or a claim that the current file contents are unchanged. *mu held. */
 int sope__journal_recall(sope_agent_t *a, uint64_t call, size_t offset, size_t limit, sope_buf *out)
+{ return sope__journal_recall_agent(a, a->agent_id, call, offset, limit, out); }
+
+int sope__journal_recall_agent(sope_agent_t *a, uint64_t agent, uint64_t call, size_t offset, size_t limit, sope_buf *out)
 {
-    if (!a->root->journal) return SOPE_ENOTFOUND;
+    if (!sope__journal_access(a,agent,0)) return SOPE_ENOTFOUND;
     sqlite3_stmt *s = NULL;
     const char *query = "SELECT r.payload FROM results r WHERE r.call=? AND EXISTS "
         "(SELECT 1 FROM events e WHERE e.kind='result' AND e.call=r.call AND e.agent=?)";
     if (sqlite3_prepare_v2(a->root->journal->db, query, -1, &s, NULL) != SQLITE_OK) return SOPE_ERROR;
     sqlite3_bind_int64(s, 1, (sqlite3_int64)call);
-    sqlite3_bind_int64(s, 2, (sqlite3_int64)a->agent_id);
+    sqlite3_bind_int64(s, 2, (sqlite3_int64)agent);
     int step = sqlite3_step(s), rc = SOPE_ENOTFOUND;
     if (step == SQLITE_ROW) {
         sope_history h = {0};
@@ -662,11 +677,65 @@ int sope__journal_recall(sope_agent_t *a, uint64_t call, size_t offset, size_t l
             size_t end = m->content_len-start > limit ? start+limit : m->content_len;
             while (end > start && end < m->content_len && ((unsigned char)m->content[end] & 0xc0) == 0x80) end--;
             sope__buf_appendf(out,"{\"session_id\":\"%s\",\"agent_id\":%" PRIu64 ",\"call_id\":%" PRIu64 ",\"is_error\":%s,\"offset\":%zu,\"next_offset\":%zu,\"total_bytes\":%zu,\"historical\":true,\"content\":",
-                a->root->session_id,a->agent_id,call,m->is_error?"true":"false",start,end,m->content_len);
+                a->root->session_id,agent,call,m->is_error?"true":"false",start,end,m->content_len);
             sope__buf_append_json_string(out,m->content+start,end-start);
             sope__buf_appends(out,"}");rc=out->oom?SOPE_ENOMEM:SOPE_OK;
         }
         sope__history_clear(&h);
     } else if (step != SQLITE_DONE) rc = SOPE_ERROR;
     sqlite3_finalize(s);return rc;
+}
+
+/* A parent can inspect its direct delegated work after the child is freed.
+ * Native start events establish lineage; model-supplied IDs cannot grant it. */
+int sope__journal_access(sope_agent_t *a, uint64_t agent, int current)
+{
+    if (!a->root->journal) return 0;
+    if (agent == a->agent_id) return 1;
+    sqlite3_stmt *s=NULL;
+    const char *q="SELECT 1 FROM stream WHERE type=? AND agent=? AND call=? AND (?=0 OR turn=?) LIMIT 1";
+    if(sqlite3_prepare_v2(a->root->journal->db,q,-1,&s,NULL)!=SQLITE_OK)return 0;
+    sqlite3_bind_int(s,1,SOPE_EVENT_SUBAGENT_START);sqlite3_bind_int64(s,2,(sqlite3_int64)a->agent_id);
+    sqlite3_bind_int64(s,3,(sqlite3_int64)agent);sqlite3_bind_int(s,4,current);
+    sqlite3_bind_int64(s,5,(sqlite3_int64)sope__turn_id(a));
+    int ok=sqlite3_step(s)==SQLITE_ROW;sqlite3_finalize(s);return ok;
+}
+
+char *sope__journal_observation(sope_agent_t *a, uint64_t agent, uint64_t call)
+{
+    if(!sope__journal_access(a,agent,0))return NULL;
+    sqlite3_stmt *s=NULL;char *result=NULL;
+    if(sqlite3_prepare_v2(a->root->journal->db,"SELECT payload FROM observations WHERE agent=? AND call=? AND (?<>? OR turn=?)",-1,&s,NULL)!=SQLITE_OK)return NULL;
+    sqlite3_bind_int64(s,1,(sqlite3_int64)agent);sqlite3_bind_int64(s,2,(sqlite3_int64)call);
+    sqlite3_bind_int64(s,3,(sqlite3_int64)agent);sqlite3_bind_int64(s,4,(sqlite3_int64)a->agent_id);
+    sqlite3_bind_int64(s,5,(sqlite3_int64)sope__turn_id(a));
+    if(sqlite3_step(s)==SQLITE_ROW)result=sope__strdup((const char *)sqlite3_column_text(s,0));
+    sqlite3_finalize(s);return result;
+}
+
+int sope__journal_observations(sope_agent_t *a, uint64_t agent, sope_buf *out)
+{
+    if(!sope__journal_access(a,agent,0))return 0;
+    sqlite3_stmt *s=NULL;
+    if(sqlite3_prepare_v2(a->root->journal->db,"SELECT payload FROM observations WHERE agent=? ORDER BY call DESC LIMIT 32",-1,&s,NULL)!=SQLITE_OK)return 0;
+    sqlite3_bind_int64(s,1,(sqlite3_int64)agent);int step,comma=0;
+    sope__buf_appendf(out,"{\"session_id\":\"%s\",\"agent_id\":%llu,\"scope\":\"historical native observations\",\"receipts\":[",a->root->session_id,(unsigned long long)agent);
+    while((step=sqlite3_step(s))==SQLITE_ROW){
+        const char *raw=(const char *)sqlite3_column_text(s,0);sope_json *v=sope__json_parse(raw,strlen(raw));
+        if(comma++)sope__buf_appends(out,",");
+        sope__json_canonical(out,sope__json_get(v,"receipt"),0);sope__json_free(v);
+    }
+    sope__buf_appends(out,"]}");sqlite3_finalize(s);return step==SQLITE_DONE&&!out->oom;
+}
+
+/* Conservative invalidation for known workspace-mutating tools, including
+ * overlapping attempts. Contract check programs are trusted verifier inputs;
+ * arbitrary side effects within them are outside this freshness test. */
+int sope__journal_stale(sope_agent_t *a, uint64_t call)
+{
+    if(!a->root->journal)return 1;
+    sqlite3_stmt *s=NULL;
+    const char *q="SELECT 1 FROM stream WHERE type IN (12,13) AND name IN ('write','edit','bash') AND seq>(SELECT MIN(seq) FROM stream WHERE type=12 AND call=?) LIMIT 1";
+    if(sqlite3_prepare_v2(a->root->journal->db,q,-1,&s,NULL)!=SQLITE_OK)return 1;
+    sqlite3_bind_int64(s,1,(sqlite3_int64)call);int step=sqlite3_step(s);sqlite3_finalize(s);return step!=SQLITE_DONE;
 }

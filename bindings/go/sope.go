@@ -319,10 +319,21 @@ type Status struct {
 	LastSequence uint64 `json:"last_sequence,string"`
 	Sealed       bool   `json:"sealed"`
 }
+// AcceptanceReport contains native predicates, not a model's success claim.
+type AcceptanceReport struct {
+	SessionID string          `json:"session_id"`
+	AgentID   uint64          `json:"agent_id"`
+	TurnID    uint64          `json:"turn_id"`
+	Scope     string          `json:"scope"`
+	Status    string          `json:"status"`
+	Criteria  json.RawMessage `json:"criteria"`
+}
+
 type Outcome struct {
 	TurnID uint64 `json:"turn_id,string"`
 	Stop   int    `json:"stop"`
 	Final  string `json:"final"`
+	Acceptance *AcceptanceReport `json:"acceptance"`
 }
 // ContextUsage is sope_agent_context's report; tokens, 0 when unknown.
 type ContextUsage struct {

@@ -15,7 +15,7 @@ import { langFor } from "../ui/highlight";
 export const ASKING_TOOLS = ["write", "edit", "bash", "check", "web_fetch"];
 
 /** Built-in tools that read only. */
-export const READ_TOOLS = ["read", "evidence", "artifact_read", "glob", "grep", "bash_output", "bash_kill", "todo_write"];
+export const READ_TOOLS = ["read", "report", "evidence", "artifact_read", "glob", "grep", "bash_output", "bash_kill", "todo_write"];
 
 /** One line of a permission preview. */
 export interface PreviewLine {

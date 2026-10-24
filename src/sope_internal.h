@@ -61,6 +61,7 @@ void sope__buf_appendf(sope_buf *b, const char *fmt, ...) SOPE_PRINTF(2, 3);
 /* Makes b valid UTF-8 text from byte `from` on: invalid sequences become
  * U+FFFD, ANSI escape sequences and control characters other than \n and
  * \t are dropped, \r\n becomes \n. */
+int sope__utf8_valid(const char *text, size_t size);
 void sope__buf_sanitize(sope_buf *b, size_t from);
 /* Cuts the middle out of b when it is longer than max bytes, keeping the
  * start and the end on UTF-8 boundaries. */

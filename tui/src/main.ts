@@ -6,6 +6,7 @@
 // embedded copy is used unless SOPE_LIB points elsewhere. In the repo,
 // bindings/js finds build/libsope.* on its own.
 
+import { readFileSync } from "node:fs";
 import { libraryPath, useLibrary, version } from "sope";
 import { readImageFile, type ImageFile } from "./agent/images";
 import { CliError, parseArgs, USAGE } from "./cli";
@@ -45,6 +46,12 @@ async function main(): Promise<number> {
   const config = loadConfig({ provider: opts.provider, model: opts.model, baseUrl: opts.baseUrl, permissions: opts.permissions, effort: opts.effort });
   let images: ImageFile[];
   try {
+    if ((opts.acceptanceFile || opts.executionDir) && !opts.print)
+      throw new CliError("--acceptance and --execution-dir require -p");
+    if (opts.acceptanceFile && !opts.executionDir)
+      throw new CliError("--acceptance requires --execution-dir to retain original evidence");
+    if (opts.acceptanceFile) config.acceptanceContract = readFileSync(opts.acceptanceFile, "utf8");
+    config.executionDirectory = opts.executionDir;
     images = opts.images.map((path) => readImageFile(path));
   } catch (err) {
     console.error(`sope: ${(err as Error).message}`);

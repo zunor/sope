@@ -65,6 +65,7 @@ set(SOPE_SOURCES
   src/subagent.c
   src/tool_bash.c
   src/tool_check.c
+  src/tool_report.c
   src/harness.c
   src/tool_file.c
   src/tool_search.c

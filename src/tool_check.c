@@ -2,6 +2,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tools.h"
 #include <inttypes.h>
+#include <errno.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -36,6 +38,28 @@ static int command(tool_run *r, sope_buf *cmd)
     return 1;
 }
 
+/* Snapshot complete bounded output before committing the observation. Later
+ * artifact edits cannot change what report validation observes. */
+static void snapshot(tool_run *r)
+{
+    sope_buf out={0},record={0};struct stat st;int complete=0;
+    int fd=sope__open_regular_read(r->check_archive);
+    if(fd>=0){
+        if(fstat(fd,&st)==0 && st.st_size>=0 && st.st_size<=1024*1024){
+            char bytes[8192];ssize_t n;
+            while((n=read(fd,bytes,sizeof bytes))>0){sope__buf_append(&out,bytes,(size_t)n);if(out.oom || out.len>1024*1024)break;}
+            complete=n==0&&!out.oom&&out.len==(size_t)st.st_size&&sope__utf8_valid(out.ptr,out.len);
+        }
+        close(fd);
+    }
+    sope__buf_appends(&record,"{\"receipt\":");sope__buf_appends(&record,r->receipt);
+    sope__buf_appendf(&record,",\"output_complete\":%s,\"output\":",complete?"true":"false");
+    if(complete)sope__buf_append_json_string(&record,out.ptr?out.ptr:"",out.len);else sope__buf_appends(&record,"null");
+    sope__buf_appends(&record,"}");sope__buf_free(&out);
+    if(record.oom){sope__buf_free(&record);pthread_mutex_lock(r->agent->mu);sope__storage_fail_locked(r->agent,"Cannot retain native output snapshot.");pthread_mutex_unlock(r->agent->mu);}
+    else r->observation=record.ptr;
+}
+
 void sope__execution_receipt(tool_run *r, int status)
 {
     sope_buf b = {0};
@@ -62,6 +86,7 @@ void sope__execution_receipt(tool_run *r, int status)
         return;
     }
     r->receipt = b.ptr;
+    snapshot(r);
     sope__buf_appends(&r->out, "\n[sope execution receipt; test assertions and coverage unverified]\n");
     sope__buf_appendf(&r->out,
         "{\"session_id\":\"%s\",\"agent_id\":%" PRIu64 ",\"call_id\":%" PRIu64 ",\"outcome\":\"%s\",\"exit_code\":%d,\"test_verdict\":\"unverified\"}",

@@ -103,7 +103,7 @@ test("runs subagents and tags their events", () => {
   const childCall = events.find((e) => e.type === "tool_call");
   expect(childCall).toMatchObject({ agentId: (start as { callId: number }).callId, name: "echo" });
   expect(events.find((e) => e.type === "subagent_end")).toMatchObject({ stopReason: "end_turn" });
-  expect(text(events)).toContain("`agent` returned: `echo` returned: pong"); // the final message only
+  expect(text(events)).toContain('"model_report_unverified":"`echo` returned: pong"'); // prose is explicitly separated from native evidence
 });
 
 test("stops one subagent while its sibling and the parent go on", () => {

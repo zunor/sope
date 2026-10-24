@@ -120,7 +120,7 @@ void sope__call_text(sope_call *c, const char *s, size_t n)
         if (!c->failed) sope__call_error(c, SOPE_ENOMEM, "out of memory while collecting model output");
         return;
     }
-    if (c->compaction) return; /* the summary is delivered with SOPE_EVENT_COMPACT */
+    if (c->compaction || c->agent->turn.report_mode) return; /* acceptance mode publishes only the native evaluated final report */
     sope__push_event(c->agent, SOPE_EVENT_TEXT_DELTA, sope__turn_id(c->agent), 0, 0, NULL, 0, s, n);
 }
 

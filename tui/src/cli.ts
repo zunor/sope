@@ -6,6 +6,8 @@ import { parseMode, type PermissionMode } from "./agent/permissions";
 
 export interface CliOptions {
   print: boolean;
+  acceptanceFile?: string;
+  executionDir?: string;
   prompt?: string;
   model?: string;
   provider?: string;
@@ -38,6 +40,8 @@ Options:
                            auto  approve for me: only risky steps ask (default)
                            full  full access: nothing asks
       --allow-all        same as --permissions full
+      --acceptance <file> host acceptance contract JSON (-p; requires --execution-dir)
+      --execution-dir <dir> durable execution and evidence directory (-p)
   -v, --version          print versions and exit
   -h, --help             show this help
 
@@ -68,6 +72,12 @@ export function parseArgs(argv: string[]): CliOptions {
       case "-m":
       case "--model":
         opts.model = value();
+        break;
+      case "--acceptance":
+        opts.acceptanceFile = value();
+        break;
+      case "--execution-dir":
+        opts.executionDir = value();
         break;
       case "--provider":
         opts.provider = value();

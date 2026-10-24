@@ -145,3 +145,8 @@ test("blocked todos retain their reason and never render as completed", () => {
   const todos = todosOf({ todos: [{ content: "Run verification", status: "blocked", reason: "Dependency unavailable" }] })!;
   expect(formatTodos(todos)).toBe("⊘ Run verification — Dependency unavailable");
 });
+
+test("print mode accepts explicit durable acceptance inputs",()=>{
+ expect(parseArgs(["-p","--acceptance=contract.json","--execution-dir","/tmp/run","verify"])).toMatchObject({print:true,acceptanceFile:"contract.json",executionDir:"/tmp/run",prompt:"verify"});
+ expect(()=>parseArgs(["--acceptance"])).toThrow();
+});

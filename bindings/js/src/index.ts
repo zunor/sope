@@ -38,6 +38,39 @@ export interface ExecutionPolicy {
   environment?: Record<string, string>;
 }
 
+export interface AcceptanceCriterion {
+  id: string;
+  description: string;
+  cwd: string;
+  argv: string[];
+  exit_code: number;
+  output?: { empty: true } | { contains: string };
+}
+export interface AcceptanceReport {
+  session_id: string;
+  agent_id: number;
+  turn_id: number;
+  scope: string;
+  status: "accepted" | "rejected" | "incomplete";
+  criteria: Array<{
+    expected: AcceptanceCriterion;
+    verdict: "satisfied" | "failed" | "unverified";
+    observation?: Record<string, unknown>;
+    stale?: boolean;
+    output_complete?: boolean;
+    output_bytes?: number;
+    output_excerpt?: string;
+    reason?: string;
+    unverified_interpretation?: string;
+  }>;
+}
+export interface Outcome {
+  turn_id: string;
+  stop: number;
+  final: string;
+  acceptance: AcceptanceReport | null;
+}
+
 /** agentId is 0 for the agent itself, else the callId of the subagent_start that launched the subagent. */
 type Origin = { turnId: number; agentId: number; sequence: number };
 
@@ -194,6 +227,13 @@ export class Agent {
       agent.free();
       throw error;
     }
+  }
+
+  /** Durable terminal result. end_turn alone does not mean acceptance succeeded. */
+  outcome(turnId: number | bigint): Outcome {
+    const ptr = new BigUint64Array(1), len = new BigUint64Array(1);
+    check(C().sope_agent_outcome(this.#ptr(), turnId, ptr, len), "sope_agent_outcome");
+    return JSON.parse(readString(Number(ptr[0]), Number(len[0]))) as Outcome;
   }
 
   recovery(): RecoveryState {

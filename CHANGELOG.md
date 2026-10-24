@@ -4,6 +4,10 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
+- Evaluate host-defined acceptance criteria against original native check observations; publish structured verdicts, preserve contracts through compaction, and prevent unsupported prose or todo completion from establishing acceptance.
+- Return qualified native subagent results and let parents recall direct-child evidence after exit/reopen; record acceptance counts in traces.
+- Add print-mode `--acceptance` and `--execution-dir`, and expose durable acceptance outcomes in JS/Go.
+
 - Retain content-aware native text-read observations across compaction and unrelated commands; return qualified historical-result references for repeated unchanged payloads while still detecting changed file contents.
 - Distinguish provider finish reasons from stream terminal events in diagnostic traces.
 

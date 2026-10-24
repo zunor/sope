@@ -38,6 +38,9 @@ export const DEFAULT_COMPACT_THRESHOLD = 100_000;
 export const AUTO_COMPACT_SHARE = 0.8;
 
 export interface Config {
+  /** Explicit print-mode durable execution and host acceptance contract. */
+  executionDirectory?: string;
+  acceptanceContract?: string;
   provider: string;
   model: string;
   /** Used once a conversation holds an image (option image_model); "" for the main model. */
@@ -143,6 +146,7 @@ export function contextOptions(c: Config, window = 0): Record<"context.window" |
  */
 export function agentOptions(c: Config): Record<string, string> {
   const options: Record<string, string> = { provider: c.provider, system: systemPrompt(), permissions: "ask" };
+  if (c.acceptanceContract) options["acceptance.contract"] = c.acceptanceContract;
   if (c.model) options.model = c.model;
   if (c.imageModel && c.imageModel !== c.model) options.image_model = c.imageModel;
   if (c.effort) options["reasoning.effort"] = c.effort;

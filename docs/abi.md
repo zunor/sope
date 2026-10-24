@@ -264,7 +264,7 @@ Static assertions in `src/agent.c` enforce this layout.
 
 ## 9. Options and providers
 
-Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an option. Options are read at the start of each turn, so changes take effect on the next turn. Subagents inherit all parent options.
+Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an option. Options are read at the start of each turn, so changes take effect on the next turn. Subagents inherit parent options except `acceptance.contract`, which belongs to the parent task.
 
 | Key | Description | Default |
 |---|---|---|
@@ -283,6 +283,7 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 | `cwd` | Working directory for built-in tools | Process's current directory |
 | `permissions` | `ask`: built-in tools requiring permission emit `PERMISSION` first; `allow`: execute immediately; `deny`: reject immediately | `ask` |
 | `subagents` | `off` hides the built-in `agent` tool | — |
+| `acceptance.contract` | Immutable host criteria JSON for evidence-backed closure; requires durable execution. See [acceptance design](design/acceptance.md). | unset |
 | `compact.threshold` | Full request token threshold for automatic compaction (see 5.1); `0` disables it | `0` |
 | `context.window` | Full model context capacity, including reserved output; `0` means unknown | `0` |
 | `context.reserve` | Minimum output reservation and default normal response output limit | `4096` |
@@ -587,3 +588,5 @@ Provider trace fields add `failure_kind` (0 none, 1 rate limit, 2 server,
 attempt progress (tool fragment counters currently describe Chat Completions);
 they reveal whether an otherwise silent call is building a tool invocation. Error bodies, URLs, headers
 and credentials are excluded from the diagnostic trace.
+
+Evidence-backed acceptance and structured subagent result semantics are specified in [acceptance design](design/acceptance.md). A terminal outcome includes `acceptance` (null without a delivered native report); `end_turn` alone is not acceptance success.

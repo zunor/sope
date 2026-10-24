@@ -141,6 +141,16 @@ export class ExecutionTrace {
       case "tool_end":
         fields.callId = ev.callId; fields.name = ev.name.slice(0, 128);
         fields.isError = ev.isError; fields.resultBytes = Buffer.byteLength(ev.result);
+        if (ev.name === "report" && !ev.isError) {
+          try {
+            const report = JSON.parse(ev.result);
+            if (["accepted", "rejected", "incomplete"].includes(report.status) && Array.isArray(report.criteria)) {
+              fields.reportStatus = report.status;
+              for (const verdict of ["satisfied", "failed", "unverified"])
+                fields[verdict] = report.criteria.filter((c: { verdict?: string }) => c.verdict === verdict).length;
+            }
+          } catch { /* No payload or arbitrary model prose is included in the trace. */ }
+        }
         break;
       case "subagent_start":
         fields.callId = ev.callId; fields.subagentType = ev.subagentType.slice(0, 128); break;

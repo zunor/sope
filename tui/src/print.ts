@@ -37,6 +37,8 @@ export async function runPrint(config: Config, prompt: string, images: ImageFile
         if (!v.allow && config.permissions === "auto") err(`sope: refused ${ev.name}: ${v.reason}, and -p cannot ask (--permissions full runs it)`);
         else if (!v.allow) err(`sope: refused ${ev.name}: ${modeLabel(config.permissions)} is on, and -p cannot ask (--permissions auto or full)`);
         bridge.agent.permit(ev.callId, v.allow, v.allow ? "" : `Automatic permission policy (${config.permissions}): ${v.reason}. This noninteractive run cannot ask for approval; adjust the operation to the allowed scope.`);
+      } else if (ev.type === "tool_end" && ev.name === "report" && ev.isError) {
+        err(`sope: acceptance report: ${ev.result}`);
       } else if (ev.agentId) {
         continue; // subagents: only their tool calls matter here
       } else if (ev.type === "text_delta") {
@@ -45,7 +47,7 @@ export async function runPrint(config: Config, prompt: string, images: ImageFile
       } else if (ev.type === "model_retry") {
         const notice = `Model request interrupted (${ev.reason}); retrying attempt ${ev.attempt} in ${(ev.delayMs / 1000).toFixed(1)}s.`;
         err(`sope: ${notice}`);
-        if (ev.discardedTextBytes && !ev.compaction && !outputClosed) {
+        if (ev.discardedTextBytes && !config.acceptanceContract && !ev.compaction && !outputClosed) {
           process.stdout.write(`\n[${notice} Previous attempt output was discarded.]\n`);
           endedWithNewline = true;
         }
@@ -56,10 +58,12 @@ export async function runPrint(config: Config, prompt: string, images: ImageFile
       } else if (ev.type === "turn_end") {
         if (!endedWithNewline && !outputClosed) process.stdout.write("\n");
         exitCode = ev.stopReason === "end_turn" ? 0 : 1;
+        if (config.acceptanceContract && ev.stopReason === "end_turn")
+          exitCode = bridge.agent.outcome(ev.turnId).acceptance?.status === "accepted" ? 0 : 1;
         finish();
       }
     }
-  });
+  }, config.executionDirectory);
   for (const tool of tools) bridge.agent.registerTool(tool);
   const runner = new HostToolRunner(bridge.agent, tools);
 

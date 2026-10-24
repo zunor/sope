@@ -491,7 +491,8 @@ static void test_subagent_basic(void)
     CHECK(log.sub_starts == 1 && log.sub_ends == 1);
     CHECK(log.sub_end_before_turn_end);
     CHECK(strstr(log.sub_text, "You said: summarize the repo") != NULL);
-    CHECK(strstr(log.text, "`agent` returned: You said: summarize the repo") != NULL);
+    CHECK(strstr(log.text, "\"model_report_unverified\":\"You said: summarize the repo") != NULL);
+    CHECK(strstr(log.text, "\"completed\":true") != NULL);
     CHECK(log.stop == SOPE_STOP_END_TURN);
     sope_agent_free(a);
 }
@@ -541,7 +542,7 @@ static void test_subagent_calls_host_tool(void)
     CHECK(sope_send(a, "!agent !echo from child", 23, NULL) == SOPE_OK);
     CHECK(drain_turn(a, &log, 1) == 0);
     CHECK(log.sub_tool_calls == 1 && log.tool_calls == 0);
-    CHECK(strstr(log.text, "got {\"input\":\"from child\"}") != NULL);
+    CHECK(strstr(log.text, "got {\\\"input\\\":\\\"from child\\\"}") != NULL);
     sope_agent_free(a);
 }
 

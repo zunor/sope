@@ -208,6 +208,16 @@ static size_t utf8_valid(const unsigned char *s, size_t n)
     return len;
 }
 
+int sope__utf8_valid(const char *text, size_t size)
+{
+    for (size_t i = 0; i < size;) {
+        size_t n = utf8_valid((const unsigned char *)text + i, size - i);
+        if (!n) return 0;
+        i += n;
+    }
+    return 1;
+}
+
 void sope__buf_sanitize(sope_buf *b, size_t from)
 {
     sope_buf out = { 0 };

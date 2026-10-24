@@ -76,3 +76,8 @@ test("trace identifies repeated read ranges and closure without exposing paths o
   expect(JSON.parse(readFileSync(other.path,"utf8").trim().split("\n")[1]!).readFingerprint).not.toBe(reads[0].readFingerprint);
  } finally {rmSync(dir,{recursive:true,force:true});}
 });
+
+test("trace records acceptance counts without evidence or interpretations",async()=>{
+ const dir=mkdtempSync(join(tmpdir(),"sope-report-trace-"));
+ try {const trace=new ExecutionTrace(dir);trace.event({...origin,type:"tool_end",name:"report",callId:4,isError:false,result:JSON.stringify({status:"rejected",criteria:[{verdict:"failed",observation:"secret"},{verdict:"satisfied",unverified_interpretation:"secret"},{verdict:"unverified"}]})});await trace.close();const raw=readFileSync(trace.path,"utf8");expect(raw).not.toContain("secret");expect(raw).toContain('"reportStatus":"rejected"');expect(raw).toContain('"failed":1');}finally{rmSync(dir,{recursive:true,force:true});}
+});

@@ -61,6 +61,7 @@ struct tool_run {
     int64_t timeout_ms;
     int timed_out;
     char *receipt;
+    char *observation;
     char *check_archive;
     /* web_fetch */
     sope_http *http;
@@ -86,7 +87,7 @@ extern const sope_builtin sope__builtin_bash, sope__builtin_bash_output, sope__b
 extern const sope_builtin sope__builtin_web_fetch;
 extern const sope_builtin sope__builtin_todo_write;
 extern const sope_builtin sope__builtin_artifact_read;
-extern const sope_builtin sope__builtin_check, sope__builtin_evidence;
+extern const sope_builtin sope__builtin_check, sope__builtin_evidence, sope__builtin_report;
 
 /* tools.c: the registry */
 size_t sope__builtin_count(void);

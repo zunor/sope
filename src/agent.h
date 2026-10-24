@@ -92,6 +92,7 @@ typedef struct pending_call {
     char *harness_key;
     int harness_blocked;
     char *receipt; /* native check fact, never supplied by the model */
+    char *observation; /* immutable native process output snapshot */
     uint64_t read_digest;
     size_t read_size;
     int read_observed, read_reused;
@@ -120,6 +121,7 @@ typedef struct bg_shell { /* bash run_in_background */
 
 typedef struct turn_state {
     int active;
+    int report_mode; /* host acceptance contract: only native final report is published */
     int failed; /* teardown must wait for dispatched work before reporting error */
     msg_node *msg;
     turn_phase phase;
@@ -239,6 +241,15 @@ int sope__harness_load(sope_agent_t *a, const char *json);
 void sope__harness_clear(sope_agent_t *a);
 void sope__harness_evidence(sope_agent_t *a, sope_buf *out, int summary);
 int sope__harness_context(sope_agent_t *a);
+const char *sope__harness_contract(sope_agent_t *a);
+const char *sope__harness_report(sope_agent_t *a);
+int sope__report_current(sope_agent_t *a, const char *raw, size_t len);
+int sope__report_contract_valid(const sope_json *contract);
+int sope__journal_access(sope_agent_t *a, uint64_t agent, int current);
+char *sope__journal_observation(sope_agent_t *a, uint64_t agent, uint64_t call);
+int sope__journal_observations(sope_agent_t *a, uint64_t agent, sope_buf *out);
+int sope__journal_stale(sope_agent_t *a, uint64_t call);
+int sope__journal_recall_agent(sope_agent_t *a, uint64_t agent, uint64_t call, size_t offset, size_t limit, sope_buf *out);
 int sope__harness_finish(sope_agent_t *a); /* 0: resolved, 1: reconcile, -1: incomplete */
 
 /* The turn running now; only while a->turn.active. */

@@ -98,6 +98,12 @@ static int add_builtin_specs_locked(sope_agent_t *a, turn_state *t)
     size_t i;
     for (i = 0; i < sope__builtin_count(); i++) {
         const sope_builtin *b = sope__builtin_at(i);
+        if (!strcmp(b->name, "report")) {
+            char *contract = sope__option_dup_locked(a, "acceptance.contract");
+            int enabled = contract || sope__harness_contract(a);
+            free(contract);
+            if (!enabled) continue;
+        }
         const tool_def *td;
         int replaced = 0;
         for (td = a->tools; td; td = td->next)
@@ -576,11 +582,22 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
             sope__push_event(a, SOPE_EVENT_LOG, sope__turn_id(a), 0, SOPE_LOG_INFO, NULL, 0,
                 "{\"event\":\"work.closure\",\"outstanding\":1}", strlen("{\"event\":\"work.closure\",\"outstanding\":1}"));
             if (closure < 0) {
-                turn_error(a, SOPE_ERROR, "Task plan still has outstanding items after two completion reconciliations; completion not established.");
+                turn_error(a, SOPE_ERROR, "Task plan or acceptance report still has outstanding items after two completion reconciliations; completion not established.");
                 finish_turn(a, SOPE_STOP_ERROR);
                 return next(SOPE__NEXT_CONTINUE);
             }
             return start_call(a);
+        }
+        if(t->report_mode) {
+            pthread_mutex_lock(a->mu);
+            const char *report=sope__harness_report(a);
+            char *copy=report?sope__strdup(report):NULL;
+            pthread_mutex_unlock(a->mu);
+            if(!copy){turn_error(a,SOPE_ERROR,"No committed acceptance report");finish_turn(a,SOPE_STOP_ERROR);return next(SOPE__NEXT_CONTINUE);}
+            free(asst->content);asst->content=copy;asst->content_len=strlen(copy);
+            free(asst->response_items);asst->response_items=NULL;
+            sope__push_event(a,SOPE_EVENT_TEXT_DELTA,sope__turn_id(a),0,0,NULL,0,copy,strlen(copy));
+            finish_turn(a,SOPE_STOP_END_TURN);return next(SOPE__NEXT_CONTINUE);
         }
         sope_buf facts = {0}, combined = {0};
         pthread_mutex_lock(a->mu);

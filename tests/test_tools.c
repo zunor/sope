@@ -631,6 +631,29 @@ static void test_special_files(const char *executable)
     unlink(fifo); unlink(ignored); rmdir(ignore_dir);
 }
 
+static void test_acceptance_closure(void)
+{
+    char execution[512], contract[2048];
+    snprintf(execution, sizeof execution, "%s/acceptance", dir);
+    sope_agent_t *a = NULL;
+    CHECK(sope_agent_open(&a, execution) == SOPE_OK);
+    CHECK(sope_agent_set_option(a, "mock.delay_ms", "0") == SOPE_OK);
+    snprintf(contract, sizeof contract,
+        "{\"criteria\":[{\"id\":\"check\",\"description\":\"Verify\",\"cwd\":\"%s\","
+        "\"argv\":[\"true\"],\"exit_code\":0}]}", dir);
+    CHECK(sope_agent_set_option(a, "acceptance.contract", contract) == SOPE_OK);
+    run_log log;
+    run(a, "!report {\"entries\":[{\"id\":\"check\",\"unverified\":\"Not executed\"}],\"status\":\"accepted\"}", &log, ALLOW, NULL);
+    CHECK(log.stop == SOPE_STOP_END_TURN);
+    CHECK(strstr(log.text, "\"status\":\"incomplete\"") != NULL);
+    CHECK(strstr(log.text, "\"status\":\"accepted\"") == NULL);
+    CHECK(strstr(log.text, "returned:") == NULL);
+    run(a, "Declare all done without checking", &log, ALLOW, NULL);
+    CHECK(log.stop == SOPE_STOP_ERROR && !log.text[0]);
+    sope_agent_free(a);
+}
+
+
 int main(int argc, char **argv)
 {
     if (argc == 5 && !strcmp(argv[1], "--special-file")) {
@@ -667,6 +690,7 @@ int main(int argc, char **argv)
     test_bash();
     test_background_shell();
     test_todo_and_subagents();
+    test_acceptance_closure();
 
     CHECK(sope_shutdown() == SOPE_OK);
     {

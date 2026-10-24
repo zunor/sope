@@ -149,7 +149,7 @@ int sope__subagent_spec_locked(const sope_agent_t *a, sope_buf *desc, sope_buf *
                       "one response.\n"
                       "- The subagent cannot see this conversation: give it a complete, self-contained task.\n"
                       "- Its final report comes back to you as the tool result and is not shown to the user, so "
-                      "summarize what matters.");
+                      "summarize what matters. Results are structured envelopes: child prose is unverified; use evidence with the returned session_id and agent_id to inspect original observations, even after completion.");
 
     sope__buf_appends(schema,
                       "{\"type\":\"object\",\"properties\":{"
@@ -176,6 +176,7 @@ static int copy_options_locked(sope_agent_t *dst, const sope_agent_t *src)
 {
     const option_kv *kv;
     for (kv = src->options; kv; kv = kv->next) {
+        if (!strcmp(kv->key,"acceptance.contract")) continue; /* parent criteria are not a child contract */
         option_kv *c = calloc(1, sizeof *c);
         if (!c || !(c->key = sope__strdup(kv->key)) || !(c->value = sope__strdup(kv->value))) {
             if (c) free(c->key);
@@ -332,6 +333,15 @@ static void child_closed(sope_task *task)
     if (!result.len) sope__buf_appends(&result, "(no output)");
 
     pthread_mutex_lock(child->mu);
+    sope_buf envelope={0},observations={0};
+    sope__buf_appendf(&envelope,"{\"session_id\":\"%s\",\"agent_id\":%llu,\"stop_reason\":%d,\"completed\":%s,\"model_report_unverified\":",child->root->session_id,(unsigned long long)child->agent_id,stop,stop==SOPE_STOP_END_TURN?"true":"false");
+    sope__buf_append_json_string(&envelope,result.ptr?result.ptr:"",result.len);
+    sope__buf_appends(&envelope,",\"evidence\":");
+    if(sope__journal_observations(child,child->agent_id,&observations))sope__buf_append(&envelope,observations.ptr,observations.len);
+    else sope__buf_appends(&envelope,"null");
+    sope__buf_appends(&envelope,"}");sope__buf_free(&observations);
+    if(result.oom)envelope.oom=1;
+    sope__buf_free(&result);result=envelope;
     p = sope__pending_find_locked(child, child->agent_id, PENDING_SUBAGENT);
     if (p && !result.oom) {
         p->content = result.ptr; /* ownership moves to the pending entry */
