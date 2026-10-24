@@ -36,7 +36,7 @@ export async function runPrint(config: Config, prompt: string, images: ImageFile
         const v = judge(config.permissions, ev.name, parseInput(ev.input));
         if (!v.allow && config.permissions === "auto") err(`sope: refused ${ev.name}: ${v.reason}, and -p cannot ask (--permissions full runs it)`);
         else if (!v.allow) err(`sope: refused ${ev.name}: ${modeLabel(config.permissions)} is on, and -p cannot ask (--permissions auto or full)`);
-        bridge.agent.permit(ev.callId, v.allow);
+        bridge.agent.permit(ev.callId, v.allow, v.allow ? "" : `Automatic permission policy (${config.permissions}): ${v.reason}. This noninteractive run cannot ask for approval; adjust the operation to the allowed scope.`);
       } else if (ev.agentId) {
         continue; // subagents: only their tool calls matter here
       } else if (ev.type === "text_delta") {

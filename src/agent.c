@@ -550,9 +550,9 @@ int sope_permit(sope_agent_t *a, uint64_t call_id, int allow, const char *messag
 
     if (!a || (!message && len)) return sope__set_error(SOPE_EINVAL, "sope_permit: invalid argument");
     if (!allow) {
-        sope__buf_appends(&why, "The user denied this tool call, so it did not run.");
+        sope__buf_appends(&why, "Tool execution was denied, so it did not run.");
         if (len) {
-            sope__buf_appends(&why, " They said: ");
+            sope__buf_appends(&why, " Reason: ");
             sope__buf_append(&why, message, len);
         } else {
             sope__buf_appends(&why, " Do not retry it as is: adjust your approach, or ask the user how to proceed.");
