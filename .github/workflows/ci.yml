@@ -1,0 +1,139 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/**']
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+env:
+  SOPE_API_KEY: ''
+  SOPE_GRAPHICS: '0'
+  XDG_CONFIG_HOME: ${{ github.workspace }}/build-ci/config
+  XDG_DATA_HOME: ${{ github.workspace }}/build-ci/data
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Version and tracked-file checks
+        run: python3 scripts/ci/check-metadata.py
+      - name: Workflow syntax
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          actionlint -color
+      - name: Scan all reachable history for secrets
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          gitleaks git . --log-opts=--all --redact=100 --no-banner
+  test:
+    name: test-${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            curl: bundled
+            lib: libsope.so
+          - platform: darwin-arm64
+            runner: macos-15
+            curl: system
+            lib: libsope.dylib
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      CC: clang
+      SOPE_LIB: ${{ github.workspace }}/build/${{ matrix.lib }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DSOPE_CURL=${{ matrix.curl }}
+          cmake --build build --parallel 3
+          python3 scripts/ci/check-ctest.py build
+      - name: Native and Go tests
+        run: ctest --test-dir build --output-on-failure --timeout 120
+      - name: JS bindings and TUI
+        run: bun test
+      - name: TypeScript
+        run: bun run typecheck
+      - name: Native failure logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ctest-${{ matrix.platform }}
+          path: build/Testing/Temporary/*.log
+          retention-days: 7
+          if-no-files-found: ignore
+  sanitizer:
+    name: sanitizer-${{ matrix.sanitizer }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: ['address,undefined', thread]
+    env:
+      CC: clang
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang libcurl4-openssl-dev
+      - name: TSan address space
+        if: matrix.sanitizer == 'thread'
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+      - name: Build and test native code
+        run: |
+          cmake -S . -B build-sanitize -DCMAKE_BUILD_TYPE=Debug \
+            -DSOPE_SANITIZE='${{ matrix.sanitizer }}' -DSOPE_BUILD_EXAMPLES=OFF
+          cmake --build build-sanitize --parallel 3
+          ctest --test-dir build-sanitize --output-on-failure --timeout 120
+      - name: Failure logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sanitizer-${{ strategy.job-index }}
+          path: build-sanitize/Testing/Temporary/*.log
+          retention-days: 7
+          if-no-files-found: ignore
+  ci:
+    if: always()
+    needs: [metadata, test, sanitizer]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every check
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          assert all(job['result'] == 'success' for job in results.values()), results
+          PY

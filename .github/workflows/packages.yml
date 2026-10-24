@@ -1,0 +1,64 @@
+name: Packages
+on:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: packages-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  SOPE_API_KEY: ''
+  SOPE_GRAPHICS: '0'
+  XDG_CONFIG_HOME: ${{ github.workspace }}/build-ci/config
+  XDG_DATA_HOME: ${{ github.workspace }}/build-ci/data
+jobs:
+  package:
+    name: package-${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-24.04
+          - platform: darwin-arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CC: clang
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Check metadata
+        run: python3 scripts/ci/check-metadata.py
+      - name: Build, test and package
+        run: |
+          bash scripts/release.sh
+          python3 scripts/ci/check-ctest.py build-release
+      - name: Verify archive and installation
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          python3 scripts/ci/check-package.py dist/sope-*-${{ matrix.platform }}.tar.gz
+      - name: Upload verified packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sope-${{ matrix.platform }}-${{ github.sha }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Native failure logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-logs-${{ matrix.platform }}
+          path: build-release/Testing/Temporary/*.log
+          retention-days: 7
+          if-no-files-found: ignore

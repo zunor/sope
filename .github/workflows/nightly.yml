@@ -1,0 +1,78 @@
+name: Nightly
+on:
+  schedule:
+    - cron: '17 19 * * *' # 03:17 Asia/Shanghai
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  SOPE_API_KEY: ''
+  SOPE_GRAPHICS: '0'
+  XDG_CONFIG_HOME: ${{ github.workspace }}/build-ci/config
+  XDG_DATA_HOME: ${{ github.workspace }}/build-ci/data
+jobs:
+  extended:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            curl: bundled
+            lib: libsope.so
+          - platform: darwin-x64
+            runner: macos-15-intel
+            curl: system
+            lib: libsope.dylib
+          - platform: darwin-arm64
+            runner: macos-15
+            curl: system
+            lib: libsope.dylib
+    name: extended-${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CC: clang
+      SOPE_LIB: ${{ github.workspace }}/build/${{ matrix.lib }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Build and test
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DSOPE_CURL=${{ matrix.curl }}
+          cmake --build build --parallel 3
+          python3 scripts/ci/check-ctest.py build
+          ctest --test-dir build --output-on-failure --timeout 120
+          bun test
+          bun run typecheck
+      - name: macOS leak checks
+        if: matrix.platform == 'darwin-arm64'
+        run: |
+          leaks --atExit -- ./build/test_agent
+          leaks --atExit -- ./build/test_tools
+      - name: PTY interaction and performance record
+        run: |
+          python3 -m venv build-ci/venv
+          build-ci/venv/bin/pip install pyte==0.8.2
+          build-ci/venv/bin/python scripts/ci/tui-smoke.py
+          bun scripts/bench-tui-review.ts | tee build-ci/benchmark.txt
+      - name: Diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nightly-${{ matrix.platform }}
+          path: |
+            build/Testing/Temporary/*.log
+            build-ci/*.txt
+          if-no-files-found: ignore
+          retention-days: 7
+  packages:
+    uses: ./.github/workflows/packages.yml

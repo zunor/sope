@@ -20,6 +20,43 @@ See [the build reference](abi.md#12-building-and-dependencies) for `-DSOPE_CURL=
 cmake -S . -B build-thread -DSOPE_SANITIZE=thread && cmake --build build-thread && ./build-thread/test_agent
 ```
 
+## Continuous integration
+
+[GitHub Actions](https://github.com/zunor/sope/actions) supplies the Linux and
+macOS machines; a local Linux installation is not required.
+
+- **CI** runs on pull requests and pushes to `main` or `codex/**`. It checks
+  versions and tracked files, validates workflows, scans reachable Git history
+  with Gitleaks, and runs native/Go/JS tests plus TypeScript checking on Linux
+  x64 (bundled curl) and macOS arm64 (system curl). Separate Linux jobs run
+  ASan/UBSan and TSan. The final `ci` job fails if any required job fails or is
+  skipped; use it as the required branch-protection check.
+- **Packages** is manually triggered. It runs `scripts/release.sh` on Linux x64
+  and macOS arm64, verifies each archive and checksum, scans packaged files,
+  installs into a temporary prefix and exercises the embedded executable outside
+  the checkout. Verified archives and checksums are retained as Actions artifacts
+  for 14 days. This workflow has read-only repository permissions and does not
+  create tags or publish/overwrite GitHub Releases.
+- **Nightly** runs daily at 19:17 UTC (03:17 Asia/Shanghai) or manually. It tests
+  Linux arm64 and Intel macOS, checks macOS arm64 for leaks, exercises the real
+  TUI in a PTY, records rendering benchmarks, and calls Packages. Benchmarks are
+  observations, not timing gates on shared runners. Diagnostics last seven days.
+
+Trigger the extra checks with GitHub's **Run workflow** button, or:
+
+```sh
+gh workflow run packages.yml --ref main
+gh workflow run nightly.yml --ref main
+```
+
+All jobs use offline providers or local HTTP fixtures; no model API key is
+configured in Actions. Bun and Go versions are pinned in the setup action;
+third-party actions are pinned by commit. Dependency downloads are cached, but
+build directories are fresh. Native CTest registration is checked explicitly
+so a missing Go installation cannot silently omit the SDK tests. TSan reduces
+Linux ASLR entropy inside its disposable runner for its shadow-memory mapping.
+Real-model checks remain an explicit local release step.
+
 ## Live compaction evaluation
 
 After building the native library and configuring `SOPE_API_KEY`, `SOPE_MODEL`
