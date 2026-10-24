@@ -291,6 +291,7 @@ int sope__journal_restore(sope_agent_t *a)
         if (answered(asst, u)) continue;
         pending_call *p = calloc(1, sizeof *p);
         if (!p || !(p->name = sope__strdup(u->name))) { free(p); goto out; }
+        p->harness_key = sope__harness_identity(u);
         p->owner = a; p->kind = PENDING_TOOL; p->call_id = u->call_id; p->turn_id = active;
         p->next = a->pending; a->pending = p;
         if (sqlite3_prepare_v2(db, "SELECT payload FROM results WHERE call=?", -1, &s, NULL) != SQLITE_OK) goto out;

@@ -271,7 +271,7 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 | `max_rounds` | Maximum model calls per turn | `32` |
 | `harness.max_calls` | All tool admissions per agent/user turn | `128` |
 | `harness.max_searches` | Native grep/glob admissions per agent/user turn | `16` |
-| `harness.max_repeats` | Identical read admissions or failed operation results before rejection | `2` |
+| `harness.max_repeats` | Identical read/program admissions or failed operation results before rejection | `2` |
 | `cwd` | Working directory for built-in tools | Process's current directory |
 | `permissions` | `ask`: built-in tools requiring permission emit `PERMISSION` first; `allow`: execute immediately; `deny`: reject immediately | `ask` |
 | `subagents` | `off` hides the built-in `agent` tool | — |
@@ -470,14 +470,14 @@ home-directory expansion. A policy is capability routing, not an OS sandbox.
 The native harness bounds work independently of model history. Canonical JSON
 arguments identify operations (object key order and bash/check `description`
 do not distinguish calls). It tracks at most 64 identities of at most 16 KiB
-each. Two identical read/search admissions or two identical failures exhaust
+each. Two identical read/search/program admissions or two identical failures exhaust
 that operation's default budget. A third attempt returns an error without
 executing; three blocked calls end the turn with `SOPE_STOP_ERROR`. Later calls
 in that batch are also blocked; already admitted work drains normally. All
 calls count toward the total budget, including polling and evidence retrieval.
 The three `harness.*` options accept integers 1–10000; invalid values use defaults.
 
-Successful native writes/edits reopen failure budgets. Successful writes,
+Successful native writes/edits reopen failure and program-repeat budgets. Successful writes,
 edits, foreground/background shell admission results and checks reopen read
 budgets because they may change files. This is a budget, **not a result cache**:
 blocked calls never assert that an earlier result is still current. Differently

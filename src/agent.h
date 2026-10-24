@@ -223,6 +223,7 @@ struct sope_agent {
 };
 
 /* harness.c; all access is under *mu. */
+char *sope__harness_identity(const sope_tool_use *u);
 int sope__harness_admit(sope_agent_t *a, pending_call *p, const sope_tool_use *u);
 void sope__harness_observe(sope_agent_t *a, pending_call *p);
 int sope__harness_exhausted(sope_agent_t *a);

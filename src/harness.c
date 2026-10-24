@@ -10,7 +10,7 @@
 #define KEYS 64
 #define RECEIPTS 32
 #define KEY_BYTES 16384
-struct operation { char *key; unsigned reads, failures; uint64_t last; };
+struct operation { char *key; unsigned reads, runs, failures; uint64_t last; };
 struct sope_harness {
     uint64_t turn;
     unsigned calls, searches, blocked, shells;
@@ -55,7 +55,7 @@ static int readonly(const char *name)
     return !strcmp(name, "read") || !strcmp(name, "grep") || !strcmp(name, "glob") || !strcmp(name, "artifact_read");
 }
 
-static char *identity(const sope_tool_use *u)
+char *sope__harness_identity(const sope_tool_use *u)
 {
     sope_json *v = sope__json_parse(u->input, u->input_len);
     if (!v || v->type != SOPE_JSON_OBJECT) { sope__json_free(v); return NULL; }
@@ -91,15 +91,16 @@ int sope__harness_admit(sope_agent_t *a, pending_call *p, const sope_tool_use *u
     begin(h, p->turn_id);
     /* Polling and evidence retrieval are not repeated execution. */
     int exempt = !strcmp(u->name, "bash_output") || !strcmp(u->name, "bash_kill") || !strcmp(u->name, "evidence");
+    int execution = !strcmp(u->name, "bash") || !strcmp(u->name, "check");
     int search = !strcmp(u->name, "grep") || !strcmp(u->name, "glob");
-    p->harness_key = identity(u);
+    p->harness_key = sope__harness_identity(u);
     struct operation *op = find(h, p->harness_key, 1);
     unsigned repeats = limit(a, "harness.max_repeats", 2);
     const char *why = NULL;
     if (h->blocked >= 3) why = "turn execution circuit is open";
     else if (++h->calls > limit(a, "harness.max_calls", 128)) why = "tool-call budget exhausted";
     else if (search && ++h->searches > limit(a, "harness.max_searches", 16)) why = "search budget exhausted";
-    else if (!exempt && op && (op->failures >= repeats || (readonly(u->name) && op->reads >= repeats)))
+    else if (!exempt && op && (op->failures >= repeats || (readonly(u->name) && op->reads >= repeats) || (execution && op->runs >= repeats)))
         why = "repeated operation budget exhausted";
     if (why) {
         sope_buf b = {0};
@@ -111,6 +112,7 @@ int sope__harness_admit(sope_agent_t *a, pending_call *p, const sope_tool_use *u
         return b.oom ? 0 : 1;
     }
     if (op && readonly(u->name)) op->reads++;
+    if (op && execution) op->runs++;
     if (op) op->last = p->call_id;
     if (!strcmp(u->name, "bash")) h->shells++;
     return 1;
@@ -128,7 +130,7 @@ void sope__harness_observe(sope_agent_t *a, pending_call *p)
     /* Native file mutations establish a reason to retry a failed check.
      * A successful shell/check alone is not evidence that the cause changed. */
     if (!p->is_error && (!strcmp(p->name,"write") || !strcmp(p->name,"edit")))
-        for (size_t i = 0; i < KEYS; i++) h->ops[i].failures = 0;
+        for (size_t i = 0; i < KEYS; i++) h->ops[i].failures = h->ops[i].runs = 0;
     /* Arbitrary programs may change what reads see; this is not a cache. */
     if (!p->is_error && (!strcmp(p->name,"write") || !strcmp(p->name,"edit") || !strcmp(p->name,"bash") || !strcmp(p->name,"check")))
         for (size_t i = 0; i < KEYS; i++) h->ops[i].reads = 0;
@@ -155,7 +157,7 @@ char *sope__harness_json(sope_agent_t *a)
         struct operation *op = &h->ops[i];
         sope__buf_appends(&b, comma++ ? ",{" : "{");
         sope__buf_appends(&b,"\"key\":"); sope__buf_append_json_string(&b,op->key,strlen(op->key));
-        sope__buf_appendf(&b,",\"reads\":%u,\"failures\":%u,\"last\":%" PRIu64 "}",op->reads,op->failures,op->last);
+        sope__buf_appendf(&b,",\"reads\":%u,\"runs\":%u,\"failures\":%u,\"last\":%" PRIu64 "}",op->reads,op->runs,op->failures,op->last);
     }
     sope__buf_appends(&b,"],\"receipts\":[");
     for (unsigned i=0;i<h->count;i++) { if(i)sope__buf_appends(&b,",");sope__buf_appends(&b,h->receipts[i]); }
@@ -191,11 +193,12 @@ int sope__harness_load(sope_agent_t *a, const char *text)
     int ok=(!ops || (ops->type==SOPE_JSON_ARRAY && ops->count<=KEYS)) && (!receipts || (receipts->type==SOPE_JSON_ARRAY && receipts->count<=RECEIPTS));
     for(const sope_json *p=ops?ops->child:NULL;ok&&p;p=p->next){
         if (p->type != SOPE_JSON_OBJECT || !unsigned_field(p, "reads", UINT32_MAX) ||
-            !unsigned_field(p, "failures", UINT32_MAX) || !unsigned_field(p, "last", 9007199254740991ULL)) { ok=0; break; }
+            !unsigned_field(p, "runs", UINT32_MAX) || !unsigned_field(p, "failures", UINT32_MAX) || !unsigned_field(p, "last", 9007199254740991ULL)) { ok=0; break; }
         const char *key=sope__json_string(sope__json_get(p,"key"),NULL);
         struct operation *op=key&&strlen(key)<=KEY_BYTES?find(h,key,1):NULL;
         if(!op){ok=0;break;}
         op->reads=(unsigned)sope__json_number(sope__json_get(p,"reads"),0);
+        op->runs=(unsigned)sope__json_number(sope__json_get(p,"runs"),0);
         op->failures=(unsigned)sope__json_number(sope__json_get(p,"failures"),0);
         op->last=(uint64_t)sope__json_number(sope__json_get(p,"last"),0);
     }
@@ -217,6 +220,7 @@ void sope__harness_evidence(sope_agent_t *a, sope_buf *out, int summary)
     } else sope__buf_appends(out,"{\"retention\":32,\"scope\":\"historical execution facts; no claim of current source validity\",\"receipts\":[");
     unsigned count=h?h->count:0;
     unsigned start=summary && count>8 ? count-8:0;
+    if (summary) sope__buf_appendf(out,"Showing latest %u of %u retained executions (retention: 32).\n",count-start,count);
     for(unsigned i=start;i<count;i++){
         if(!summary){if(i)sope__buf_appends(out,",");sope__buf_appends(out,h->receipts[i]);continue;}
         sope_json *r=sope__json_parse(h->receipts[i],strlen(h->receipts[i]));

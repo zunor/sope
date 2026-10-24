@@ -529,6 +529,10 @@ static void test_execution_guard(void)
     /* A fresh user request is a new budget. */
     run(a, "!grep {\"path\":\"guard.txt\",\"pattern\":\"needle\"}", &log, NO_ANSWER, NULL);
     CHECK(log.n == 1 && !log.is_error[0]);
+    run(a, "!bash {\"command\":\"grep needle guard.txt\",\"description\":\"one\"} ;; !bash {\"description\":\"two\",\"command\":\"grep needle guard.txt\"} ;; !bash {\"command\":\"grep needle guard.txt\"}", &log, NO_ANSWER, NULL);
+    blocked = 0;
+    for (int i = 0; i < log.n; i++) blocked += log.is_error[i] && strstr(log.result[i], "operation did not run") != NULL;
+    CHECK(log.n == 3 && blocked == 1);
     CHECK(sope_agent_set_option(a, "harness.max_calls", "1") == SOPE_OK);
     run(a, "!read {\"file_path\":\"guard.txt\"} ;; !read {} ;; !read {} ;; !read {} ;; !bash {\"command\":\"touch forbidden-effect\"}", &log, NO_ANSWER, NULL);
     CHECK(log.n == 5 && log.stop == SOPE_STOP_ERROR && slurp("forbidden-effect") == NULL);

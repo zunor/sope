@@ -63,7 +63,9 @@ void sope__execution_receipt(tool_run *r, int status)
     }
     r->receipt = b.ptr;
     sope__buf_appends(&r->out, "\n[sope execution receipt; test assertions and coverage unverified]\n");
-    sope__buf_appends(&r->out, r->receipt);
+    sope__buf_appendf(&r->out,
+        "{\"execution_id\":%" PRIu64 ",\"outcome\":\"%s\",\"exit_code\":%d,\"test_verdict\":\"unverified\"}",
+        r->call_id, r->timed_out ? "timed_out" : status ? "process_failed" : "process_exited_zero", status);
 }
 
 static sope_next check(tool_run *r)
