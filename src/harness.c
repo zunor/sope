@@ -374,18 +374,11 @@ const sope_builtin sope__builtin_evidence={"evidence",
     "Historical observations do not prove current file contents, coverage or correctness.",
     "{\"type\":\"object\",\"properties\":{\"agent_id\":{\"type\":\"integer\"},\"session_id\":{\"type\":\"string\"},\"call_id\":{\"type\":\"integer\"},\"offset\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}}}",0,evidence,NULL};
 
-/* The plan is model-authored; only its persisted status is a fact. A bounded
- * reconciliation prevents silent success with outstanding items, not false
- * assertions that the work itself is correct. No synthetic user turn. */
-int sope__harness_finish(sope_agent_t *a)
+/* *mu held. Plans are claims; only unresolved items prevent closure. */
+static int pending_todos(sope_agent_t *a)
 {
     struct sope_harness *h = a->harness;
-    if (!h) return 0;
-    if (h->report && !sope__report_current(a, h->report, strlen(h->report))) {
-        free(h->report); h->report = NULL; h->report_call = 0;
-    }
-    unsigned outstanding=h->contract && !h->report;
-    if(h->todos && h->todo_turn==sope__turn_id(a)) {
+    if (!h || !h->todos || h->todo_turn != sope__turn_id(a)) return 0;
     sope_json *v = sope__json_parse(h->todos, strlen(h->todos));
     const sope_json *todos = sope__json_get(v, "todos");
     if (!v || !todos || todos->type != SOPE_JSON_ARRAY) {
@@ -393,12 +386,34 @@ int sope__harness_finish(sope_agent_t *a)
         sope__storage_fail_locked(a, "Cannot read the task plan; completion not established.");
         return -1;
     }
-    for (const sope_json *p = todos ? todos->child : NULL; p; p = p->next) {
+    int outstanding = 0;
+    for (const sope_json *p = todos->child; p; p = p->next) {
         const char *status = sope__json_string(sope__json_get(p, "status"), NULL);
         if (!status || !strcmp(status, "pending") || !strcmp(status, "in_progress")) outstanding++;
     }
     sope__json_free(v);
+    return outstanding;
+}
+
+int sope__harness_ready(sope_agent_t *a)
+{
+    struct sope_harness *h = a->harness;
+    return h && h->contract && h->report && pending_todos(a) == 0 &&
+        sope__report_current(a, h->report, strlen(h->report));
+}
+
+/* Missing evidence is reconciled a bounded number of times, never accepted
+ * merely because a model says it has finished. */
+int sope__harness_finish(sope_agent_t *a)
+{
+    struct sope_harness *h = a->harness;
+    if (!h) return 0;
+    if (h->report && !sope__report_current(a, h->report, strlen(h->report))) {
+        free(h->report); h->report = NULL; h->report_call = 0;
     }
+    int outstanding = pending_todos(a);
+    if (outstanding < 0) return -1;
+    outstanding += h->contract && !h->report;
     if (!outstanding) return 0;
     if (h->closure_checks >= 2) return -1;
     h->closure_checks++;

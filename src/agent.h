@@ -250,6 +250,7 @@ char *sope__journal_observation(sope_agent_t *a, uint64_t agent, uint64_t call);
 int sope__journal_observations(sope_agent_t *a, uint64_t agent, sope_buf *out);
 int sope__journal_stale(sope_agent_t *a, uint64_t call);
 int sope__journal_recall_agent(sope_agent_t *a, uint64_t agent, uint64_t call, size_t offset, size_t limit, sope_buf *out);
+int sope__harness_ready(sope_agent_t *a);
 int sope__harness_finish(sope_agent_t *a); /* 0: resolved, 1: reconcile, -1: incomplete */
 
 /* The turn running now; only while a->turn.active. */

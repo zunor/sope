@@ -325,6 +325,30 @@ static void turn_error(sope_agent_t *a, int code, const char *msg)
     sope__push_event(a, SOPE_EVENT_ERROR, sope__turn_id(a), 0, code, NULL, 0, msg, strlen(msg));
 }
 
+/* Deliver the committed native report without depending on another successful
+ * model request. asst is supplied only when replacing a model-only response. */
+static sope_next finish_report(sope_agent_t *a, sope_message *asst)
+{
+    pthread_mutex_lock(a->mu);
+    const char *report = sope__harness_report(a);
+    sope_message *final = report ? sope__message_new(SOPE__MSG_ASSISTANT, report, strlen(report)) : NULL;
+    pthread_mutex_unlock(a->mu);
+    if (!final) {
+        turn_error(a, SOPE_ENOMEM, "Cannot materialize the committed acceptance report.");
+        finish_turn(a, SOPE_STOP_ERROR);
+        return next(SOPE__NEXT_CONTINUE);
+    }
+    if (asst) {
+        free(asst->content); asst->content = final->content; asst->content_len = final->content_len;
+        final->content = NULL; sope__message_free(final);
+        free(asst->response_items); asst->response_items = NULL;
+        final = asst;
+    } else sope__history_append(&a->history, final);
+    sope__push_event(a, SOPE_EVENT_TEXT_DELTA, sope__turn_id(a), 0, 0, NULL, 0, final->content, final->content_len);
+    finish_turn(a, SOPE_STOP_END_TURN);
+    return next(SOPE__NEXT_CONTINUE);
+}
+
 static sope_next start_compact(sope_agent_t *a);
 
 static int turn_cancelled(sope_agent_t *a)
@@ -588,17 +612,7 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
             }
             return start_call(a);
         }
-        if(t->report_mode) {
-            pthread_mutex_lock(a->mu);
-            const char *report=sope__harness_report(a);
-            char *copy=report?sope__strdup(report):NULL;
-            pthread_mutex_unlock(a->mu);
-            if(!copy){turn_error(a,SOPE_ERROR,"No committed acceptance report");finish_turn(a,SOPE_STOP_ERROR);return next(SOPE__NEXT_CONTINUE);}
-            free(asst->content);asst->content=copy;asst->content_len=strlen(copy);
-            free(asst->response_items);asst->response_items=NULL;
-            sope__push_event(a,SOPE_EVENT_TEXT_DELTA,sope__turn_id(a),0,0,NULL,0,copy,strlen(copy));
-            finish_turn(a,SOPE_STOP_END_TURN);return next(SOPE__NEXT_CONTINUE);
-        }
+        if (t->report_mode) return finish_report(a, asst);
         sope_buf facts = {0}, combined = {0};
         pthread_mutex_lock(a->mu);
         sope__harness_evidence(a, &facts, 1);
@@ -708,6 +722,10 @@ static sope_next collect_tools(sope_agent_t *a)
         finish_turn(a, SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);
     }
+    pthread_mutex_lock(a->mu);
+    int ready = t->report_mode && sope__harness_ready(a);
+    pthread_mutex_unlock(a->mu);
+    if (ready && !turn_cancelled(a)) return finish_report(a, NULL);
     return start_call(a);
 }
 

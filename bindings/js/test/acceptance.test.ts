@@ -66,9 +66,10 @@ test("two parallel children keep provenance; parent recalls exited children afte
  a.send("Delegate two checks");const es=await drain(a);expect(es.at(-1)).toMatchObject({stopReason:"end_turn"});expect(JSON.parse(final(es)).status).toBe("accepted");
  expect(es.filter(e=>e.type==="subagent_start")).toHaveLength(2);expect(es.filter(e=>e.type==="tool_end"&&e.name==="evidence"&&e.isError)).toHaveLength(0);
  const call=reports[0].evidence.receipts[0].call_id,agent=reports[0].agent_id;
- a.free();agents.splice(agents.indexOf(a),1);const b=Agent.open(dir,{...options,"acceptance.contract":JSON.stringify({criteria:[{...criterion("later",["/usr/bin/true"]),cwd:dir}]})});agents.push(b);
- let round=0;respond=()=>++round===1?tools({name:"evidence",input:ref(session,call,agent)}):round===2?tools({name:"report",input:{entries:[{id:"later",unverified:"not part of this retrieval-only turn"}]}}):text("done");
+ a.free();agents.splice(agents.indexOf(a),1);const b=Agent.open(dir,{...options,"acceptance.contract":JSON.stringify({criteria:[{...criterion("later",reports[0].evidence.receipts[0].input.argv),cwd:dir}]})});agents.push(b);
+ let round=0;respond=()=>++round===1?tools({name:"evidence",input:ref(session,call,agent)}):round===2?tools({name:"report",input:{entries:[{id:"later",evidence:ref(session,call,agent)}]}}):round===3?tools({name:"report",input:{entries:[{id:"later",unverified:"not part of this retrieval-only turn"}]}}):text("done");
  b.send("Recall completed child");const later=await drain(b);expect(later.some(e=>e.type==="tool_end"&&e.name==="evidence"&&!e.isError&&e.result.includes("alpha"))).toBe(true);
+ expect(later.some(e=>e.type==="tool_end"&&e.name==="report"&&e.isError)).toBe(true);
  expect(JSON.parse(final(later)).status).toBe("incomplete");
 });
 
@@ -126,4 +127,29 @@ for(const verdict of ["accepted","rejected","incomplete"] as const)test(`CLI del
  const child=Bun.spawn([process.execPath,new URL("../../../tui/src/main.ts",import.meta.url).pathname,"-p","--model","test","--provider","openai","--base-url",`http://127.0.0.1:${server.port}/v1`,"--permissions","full","--execution-dir",join(dir,"execution"),"--acceptance",path,"Verify"],{cwd:dir,env:{...process.env,SOPE_LIB:libraryPath(),SOPE_IMAGE_MODEL:"off"},stdin:"ignore",stdout:"pipe",stderr:"pipe"});
  const timer=setTimeout(()=>child.kill(),7000);
  try {const [out,err,exit]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);expect(out || err).toContain("\"criteria\"");expect(exit).toBe(verdict==="accepted"?0:1);expect(JSON.parse(out).status).toBe(verdict);}finally{clearTimeout(timer);child.kill();}
+});
+
+test("committed report closes at the round limit without a final provider call",async()=>{
+ const {a,session}=open([criterion("test",["/usr/bin/true"])]);a.setOption("max_rounds","2");let n=0;
+ respond=()=>++n===1?tools({name:"check",input:{argv:["/usr/bin/true"]}}):n===2?tools({name:"report",input:{entries:[{id:"test",evidence:ref(session,1)}]}}):new Response("provider unavailable",{status:503});
+ a.send("Verify");const es=await drain(a);expect(es.at(-1)).toMatchObject({stopReason:"end_turn"});expect(n).toBe(2);expect(a.outcome(1).acceptance?.status).toBe("accepted");expect(JSON.parse(final(es)).status).toBe("accepted");
+});
+
+test("automatic closure waits for unresolved todos, then needs no final model text",async()=>{
+ const {a}=open([criterion("test",["/usr/bin/true"])]);let n=0;
+ const plan=(status:string)=>({todos:[{content:"Reconcile",activeForm:"Reconciling",status}]});
+ respond=()=>++n===1?tools({name:"todo_write",input:plan("pending")},{name:"report",input:{entries:[{id:"test",unverified:"not executed"}]}}):n===2?tools({name:"todo_write",input:plan("completed")}):new Response("provider unavailable",{status:503});
+ a.send("Verify");expect((await drain(a)).at(-1)).toMatchObject({stopReason:"end_turn"});expect(n).toBe(2);expect(a.outcome(1).acceptance?.status).toBe("incomplete");
+});
+
+test("children cannot inspect parent or sibling evidence ledgers",async()=>{
+ const {a}=open([criterion("test",["/usr/bin/true"])]);let root=0;const counts=[0,0];
+ respond=r=>{
+  const i=r.messages.some(m=>m.role==="user"&&m.content==="scope-parent")?0:r.messages.some(m=>m.role==="user"&&m.content==="scope-sibling")?1:-1;
+  if(i>=0)return ++counts[i]===1?tools({name:"evidence",input:{agent_id:i?2:0}}):text("Cannot inspect that scope");
+  if(++root===1)return tools({name:"check",input:{argv:["/usr/bin/true"]}});
+  if(root===2)return tools({name:"agent",input:{description:"parent scope",prompt:"scope-parent"}},{name:"agent",input:{description:"sibling scope",prompt:"scope-sibling"}});
+  return tools({name:"report",input:{entries:[{id:"test",unverified:"This turn tests evidence scope"}]}});
+ };
+ a.send("Check child scope");const es=await drain(a);expect(es.filter(e=>e.type==="tool_end"&&e.agentId&&e.name==="evidence"&&e.isError)).toHaveLength(2);expect(es.at(-1)).toMatchObject({stopReason:"end_turn"});
 });

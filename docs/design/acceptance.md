@@ -24,6 +24,8 @@ turn. The contract contains 1–32 unique criteria, at most 16 KB in total:
 ```
 
 Each criterion requires an absolute `cwd`, literal `argv` and expected exit code.
+The cwd string must match the recorded execution directory; CLI hosts should use
+the physical directory (`pwd -P`) rather than a symlink alias.
 `output` is optional and has either `empty: true` or a nonempty `contains` string.
 These are exact predicates, not a universal test-framework parser. In particular,
 `gofmt -l` exiting zero with a filename fails the example criterion.
@@ -43,7 +45,9 @@ Embedding applications use `Agent.open(directory, options)` in JS or
 `sope_agent_open` and `sope_agent_set_option` in C. The terminal outcome has an
 `acceptance` object (or null), available through JS `Agent.outcome(turnId)`, Go
 `Outcome.Acceptance`, and C `sope_agent_outcome`. The final text is the same native
-JSON report. `end_turn` means the report was delivered; inspect its status.
+JSON report. Once all pending tools have completed and current todos are resolved,
+the runtime closes directly from the committed report without another provider
+request or compaction. `end_turn` means the report was delivered; inspect its status.
 
 ## Evidence and verdicts
 
