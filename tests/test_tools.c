@@ -410,6 +410,19 @@ static void test_bash(void)
     run(a, "!bash {\"command\":\"printf 'no newline'; exit 3\"}", &log, NO_ANSWER, NULL);
     CHECK(log.is_error[0] && !strncmp(log.result[0], "no newline\n", 11) && strstr(log.result[0], "Full output:") && strstr(log.result[0], "[exit code 3]"));
 
+    /* A formatter must not turn a failed build/test pipeline into success. */
+    run(a, "!bash {\"command\":\"(printf 'failed check'; exit 7) | cat\"}", &log, NO_ANSWER, NULL);
+    CHECK(log.is_error[0] && strstr(log.result[0], "failed check") && strstr(log.result[0], "[exit code 7]"));
+    run(a, "!bash {\"command\":\"(exit 7) | (exit 3) | cat\"}", &log, NO_ANSWER, NULL);
+    CHECK(log.is_error[0] && strstr(log.result[0], "[exit code 3]"));
+    run(a, "!bash {\"command\":\"printf 'passed check' | cat\"}", &log, NO_ANSWER, NULL);
+    CHECK(!log.is_error[0] && strstr(log.result[0], "passed check") && strstr(log.result[0], "[exit code 0]"));
+    /* Explicit recovery remains normal Bash semantics; errexit is not enabled. */
+    run(a, "!bash {\"command\":\"(exit 7) | cat || printf recovered\"}", &log, NO_ANSWER, NULL);
+    CHECK(!log.is_error[0] && strstr(log.result[0], "recovered"));
+    run(a, "!bash {\"command\":\"(exit 7) | cat; status=$?; echo status:$status; exit $status\"}", &log, NO_ANSWER, NULL);
+    CHECK(log.is_error[0] && strstr(log.result[0], "status:7") && strstr(log.result[0], "[exit code 7]"));
+
     run(a, "!bash {\"command\":\"read x; echo got:$x\"}", &log, NO_ANSWER, NULL); /* stdin is closed */
     CHECK(strstr(log.result[0], "got:") != NULL);
 

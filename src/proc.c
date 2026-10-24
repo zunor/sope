@@ -276,11 +276,11 @@ sope_proc *sope__proc_start(const char *command, const char *cwd, char *const *e
                            const char *archive_path, char *err, size_t errlen)
 {
     static const char prologue[] = "cd -- \"$1\" || exit 1\nshift\n";
-    const char *shell = access("/bin/bash", X_OK) == 0 ? "/bin/bash" : "/bin/sh";
+    const char *shell = "/bin/bash"; /* The bash tool requires consistent pipeline semantics. */
     posix_spawn_file_actions_t fa;
     posix_spawnattr_t attr;
     sope_buf script = { 0 };
-    char *argv[6];
+    char *argv[8];
     char **env = NULL;
     int fds[2] = { -1, -1 }, rc;
     short flags = 0;
@@ -333,11 +333,13 @@ sope_proc *sope__proc_start(const char *command, const char *cwd, char *const *e
     posix_spawnattr_setflags(&attr, flags);
 
     argv[0] = (char *)shell;
-    argv[1] = "-c";
-    argv[2] = script.ptr;
-    argv[3] = "sope-bash";
-    argv[4] = (char *)(cwd && *cwd ? cwd : ".");
-    argv[5] = NULL;
+    argv[1] = "-o";
+    argv[2] = "pipefail";
+    argv[3] = "-c";
+    argv[4] = script.ptr;
+    argv[5] = "sope-bash";
+    argv[6] = (char *)(cwd && *cwd ? cwd : ".");
+    argv[7] = NULL;
     rc = posix_spawn(&pid, shell, &fa, &attr, argv, env);
     posix_spawn_file_actions_destroy(&fa);
     posix_spawnattr_destroy(&attr);

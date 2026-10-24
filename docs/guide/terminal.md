@@ -32,7 +32,7 @@ All tools are built into libsope (see [the built-in tool reference](../abi.md#6-
 |---|---|---|
 | `read`, `glob`, `grep` | Read files with line numbers, find files by pattern, and search with regular expressions (skipping files ignored by `.gitignore`) | No |
 | `write`, `edit` | Create or overwrite files, or replace exact text; existing files must have been read and must not have changed since | Depends on permission mode; shows a change preview |
-| `bash` | Run a command in the current directory (no terminal or input, 2-minute timeout by default); supports background execution | Depends on permission mode; shows the command |
+| `bash` | Run a command with `/bin/bash -o pipefail -c` in the current directory (no terminal or input, 2-minute timeout by default); supports background execution | Depends on permission mode; shows the command |
 | `bash_output`, `bash_kill` | Inspect or stop background commands | No |
 | `web_fetch` | Fetch a web page and convert it to text | Depends on permission mode; shows the URL |
 | `todo_write` | Maintain a task list displayed in the conversation | No |

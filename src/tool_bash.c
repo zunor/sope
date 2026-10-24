@@ -22,7 +22,7 @@
 #define BASH_MAX_OUTPUT 30000
 
 static const char BASH_DESC[] =
-    "Runs a shell command with bash -c in the working directory and returns its combined stdout and stderr "
+    "Runs a shell command with /bin/bash -o pipefail -c in the working directory and returns its combined stdout and stderr "
     "and its exit code.\n\n"
     "Usage:\n"
     "- Commands run without a terminal and with stdin closed. Avoid interactive programs (editors, pagers, "
@@ -36,6 +36,10 @@ static const char BASH_DESC[] =
     "- Use run_in_background for long-running processes such as dev servers and watchers: you get a shell id "
     "right away, read its output with bash_output and stop it with bash_kill. Do not append & yourself.\n"
     "- Run independent commands as parallel tool calls; chain dependent ones with &&.\n"
+    "- Run tests/builds directly: output is already bounded and archived, so do not pipe checks to head/tail. "
+    "pipefail preserves failures inside pipelines; a later echo or other command can still replace the exit status. "
+    "To inspect a failure, capture status=$? immediately and finish with exit $status. Never report a check as "
+    "passed merely because a wrapper command returned zero.\n"
     "- Never run destructive commands (rm -rf, git reset --hard, git push --force, ...) unless the user "
     "asked for them.";
 static const char BASH_SCHEMA[] =
