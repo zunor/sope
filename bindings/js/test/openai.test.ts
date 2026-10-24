@@ -144,6 +144,23 @@ test("retries transient failures before any output", async () => {
   expect(events.some((e) => e.type === "log" && e.level === "warn" && e.message.includes("HTTP 503"))).toBe(true);
   expect(events.some((e) => e.type === "error")).toBe(false);
   expect(events.at(-1)).toMatchObject({ type: "turn_end", stopReason: "end_turn" });
+  const telemetry = events.flatMap((event) => event.type === "log" && event.message.startsWith('{"event":"provider.') ? [JSON.parse(event.message)] : []);
+  expect(telemetry.filter((event) => event.event === "provider.start").map((event) => [event.round, event.attempt])).toEqual([[1, 1], [1, 2], [2, 1]]);
+  expect(telemetry.find((event) => event.event === "provider.retry")).toMatchObject({status: 503, complete: 0, attempt: 1});
+  expect(telemetry.filter((event) => event.event === "provider.end").every((event) => event.status === 200 && event.complete === 1 && event.elapsed_ms >= 0 && event.received_bytes > 0)).toBe(true);
+  expect(JSON.stringify(telemetry)).not.toContain("test-key");
+});
+
+test("a truncated response fails once without replaying streamed output", async () => {
+  overrideStream = `data: ${JSON.stringify(delta({ content: "partial" }))}\n\n`;
+  agent = openaiAgent();
+  agent.send("test disconnect");
+  const events = await drainTurn(agent, () => { throw new Error("unexpected tool"); });
+  expect(requests).toHaveLength(1);
+  expect(events.filter((e) => e.type === "text_delta").map((e) => e.text).join("")).toBe("partial");
+  expect(events.at(-1)).toMatchObject({type: "turn_end", stopReason: "error"});
+  const terminal = events.find((e) => e.type === "log" && e.message.startsWith('{"event":"provider.end"'));
+  expect(terminal?.type === "log" && JSON.parse(terminal.message)).toMatchObject({complete: 0, failed: 1, attempt: 1});
 });
 
 const tool = (index: number, id = "call_a", name = "echo", args = "{}") =>

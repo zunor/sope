@@ -450,7 +450,8 @@ test("a checkpoint that cannot fit is preserved rather than silently clipped", a
   expect(agent.history()).toBe(before);
 });
 
-test("long tool loop survives repeated compaction and a failed middle summary without replaying tools", async () => {
+for (const failMiddle of [false, true]) {
+test(`long tool loop preserves history without replaying tools (failed summary: ${failMiddle})`, async () => {
   const agent = create({ "compact.threshold": "12000", "compact.retain_tokens": "0", max_rounds: "5" });
   agent.registerTool({ name: "probe", description: "probe", inputSchema: { type: "object" } });
   const issued: number[] = [];
@@ -461,7 +462,7 @@ test("long tool loop survives repeated compaction and a failed middle summary wi
       const transcript = String(r.messages[1]!.content);
       expect(transcript).toContain("KEEP_ORIGINAL_CONSTRAINT");
       expect(transcript).toContain(`RESULT_${modelRound}`);
-      if (summaries === 2) return stream([chunk("partial", "length")]);
+      if (failMiddle && summaries === 2) return stream([chunk("partial", "length")]);
       return stream([chunk(`KEEP_ORIGINAL_CONSTRAINT; completed results through RESULT_${modelRound}`)]);
     }
     modelRound++;
@@ -481,8 +482,8 @@ test("long tool loop survives repeated compaction and a failed middle summary wi
   });
   expect(events.at(-1)).toMatchObject({ stopReason: "end_turn" });
   expect(issued).toEqual([1, 2, 3, 4]);
-  expect(summaries).toBe(4);
-  expect(events.filter((e) => e.type === "compact")).toHaveLength(3);
+  expect(summaries).toBe(failMiddle ? 2 : 4);
+  expect(events.filter((e) => e.type === "compact")).toHaveLength(failMiddle ? 1 : 4);
   const saved = agent.history();
   expect(JSON.parse(saved).filter((m: { summary?: boolean }) => m.summary)).toHaveLength(1);
   expect(saved).toContain("RESULT_4");
@@ -490,8 +491,9 @@ test("long tool loop survives repeated compaction and a failed middle summary wi
   restored.loadHistory(saved);
   restored.send("resume after four probes");
   expect((await drain(restored)).at(-1)).toMatchObject({ stopReason: "end_turn" });
-  expect(String(requests.at(-1)!.messages[1]!.content)).toContain("RESULT_4");
+  expect(JSON.stringify(requests.at(-1)!.messages)).toContain("RESULT_4");
 });
+}
 
 for (const impossibleBudget of [false, true]) {
   test(`failed overflow recovery does not resend the known-oversized request (input budget=${impossibleBudget})`, async () => {
@@ -564,4 +566,47 @@ test("summary receives middle tool evidence and arguments when the full transcri
   expect(transcript.includes(input)).toBe(true);
   expect(transcript.includes(result)).toBe(true);
   expect(transcript).not.toContain("bytes omitted");
+});
+
+
+test("failed proactive compaction is suppressed for the turn and reset on new input", async () => {
+  const agent = create({"compact.threshold": "12000", "compact.retain_tokens":"0"});
+  agent.registerTool({name:"probe", inputSchema:{type:"object"}});
+  agent.loadHistory(JSON.stringify(oldHistory()));
+  let summaries = 0, rounds = 0;
+  respond = (r) => {
+    if (compact(r)) { summaries++; return stream([chunk("partial", "length")]); }
+    if (++rounds <= 3) return stream([{ choices:[{delta:{tool_calls:[{index:0,id:`p${rounds}`,function:{name:"probe",arguments:"{}"}}]},finish_reason:"tool_calls"}] }]);
+    return defaultResponse(r);
+  };
+  agent.send("continue");
+  expect((await drain(agent, e => agent.toolResult(e.callId,"result"))).at(-1)).toMatchObject({stopReason:"end_turn"});
+  expect(summaries).toBe(1);
+  expect(agent.history()).toContain("ORIGINAL_TASK");
+  agent.send("new input");
+  await drain(agent);
+  expect(summaries).toBe(2);
+  agent.compact();
+  expect((await drain(agent)).at(-1)).toMatchObject({stopReason:"error"});
+  expect(summaries).toBe(3);
+});
+
+test("suppressed compaction never bypasses the hard context limit", async () => {
+  const agent = create({"compact.threshold":"12000", "context.window":"100000", "compact.retain_tokens":"0"});
+  agent.registerTool({name:"probe",inputSchema:{type:"object"}});
+  agent.loadHistory(JSON.stringify(oldHistory()));
+  let summaries=0, normal=0;
+  respond = (r) => {
+    if (compact(r)) { summaries++; return stream([chunk("partial","length")]); }
+    normal++;
+    return stream([{choices:[{delta:{tool_calls:[{index:0,id:"p",function:{name:"probe",arguments:"{}"}}]},finish_reason:"tool_calls"}]}]);
+  };
+  agent.send("continue safely within budget");
+  const events=await drain(agent,e=>agent.toolResult(e.callId,"large result ".repeat(50000)));
+  expect(events.at(-1)).toMatchObject({stopReason:"error"});
+  expect(summaries).toBe(1);
+  expect(normal).toBe(1);
+  expect(errors(events).some(e=>e.includes("request exceeds context.window"))).toBe(true);
+  expect(agent.history()).toContain("ORIGINAL_TASK");
+  expect(agent.history()).toContain("large result");
 });

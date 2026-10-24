@@ -64,6 +64,8 @@ static const char WRITE_DESC[] =
     "since you read it.\n"
     "- Prefer edit for changing existing files, since it sends only the change. Use write for new files or "
     "complete rewrites.\n"
+    "- Run changes to the same file sequentially: wait for each edit or write result before issuing the next. "
+    "Parallel changes use the same earlier revision and can conflict.\n"
     "- Never create documentation files (*.md) or READMEs unless the user asks for them.";
 static const char WRITE_SCHEMA[] =
     "{\"type\":\"object\",\"properties\":{"
@@ -80,6 +82,8 @@ static const char EDIT_DESC[] =
     "- The edit fails if old_string occurs more than once. Include more surrounding lines to make it unique, "
     "or set replace_all to change every occurrence, e.g. to rename a variable.\n"
     "- An empty old_string creates a new file whose content is new_string.\n"
+    "- Run changes to the same file sequentially: wait for each edit or write result before issuing the next. "
+    "Parallel changes use the same earlier revision and can conflict.\n"
     "- Prefer editing existing files to creating new ones.";
 static const char EDIT_SCHEMA[] =
     "{\"type\":\"object\",\"properties\":{"
@@ -342,8 +346,9 @@ static sope_next stale_file(tool_run *r, const char *shown, int state)
     if (state == 0)
         return sope__run_fail(r, "%s has not been read yet. Read it before changing it.", shown);
     return sope__run_fail(r,
-                          "%s was modified since you last read it, by the user or another program (a formatter, "
-                          "for example). Read it again before changing it.",
+                          "%s was modified since the revision captured for this edit or write. Another tool call "
+                          "or an external program may have changed it. Read it again before changing it, and "
+                          "run changes to the same file sequentially.",
                           shown);
 }
 

@@ -342,7 +342,7 @@ static sope_next start_call(sope_agent_t *a)
     uint64_t tokens = sope__context_tokens(a), limit = sope__context_limit(a);
     uint64_t threshold = t->compact_threshold < limit ? t->compact_threshold : limit;
 
-    if (t->compact_threshold && tokens >= threshold && !t->compact_tried && (t->round || a->history.count > 1))
+    if (t->compact_threshold && tokens >= threshold && !t->compact_tried && !t->compact_failed && (t->round || a->history.count > 1))
         return start_compact(a);
     t->compact_tried = 0;
     if (tokens > limit) {
@@ -684,6 +684,7 @@ static sope_next start_compact_attempt(sope_agent_t *a)
     rc = sope__compact_request(&a->history, t->compact_keep, m->compact ? m->text : NULL,
                                m->compact ? m->len : 0, budget, &text, &len);
     if (rc != SOPE_OK) {
+        t->compact_failed = 1;
         turn_error(a, rc, rc == SOPE_ENOMEM ? "out of memory" : "compaction instructions and transcript cannot fit input budget");
         if (t->held) sope__history_append(&a->history, t->held);
         t->held = NULL;
@@ -715,6 +716,7 @@ static sope_next start_compact_attempt(sope_agent_t *a)
             finish_turn(a, SOPE_STOP_ERROR);
             return next(SOPE__NEXT_CONTINUE);
         }
+        t->compact_failed = 1;
         return start_call(a); /* carry on uncompacted; the call itself may still fit */
     }
     return next(SOPE__NEXT_CONTINUE);
@@ -809,6 +811,7 @@ static sope_next end_compact(sope_agent_t *a, int32_t rc)
     t->call = NULL;
     t->phase = PHASE_START;
 
+    if (!ok) t->compact_failed = 1;
     if (manual || (!ok && t->overflow_retried)) {
         finish_turn(a, ok ? SOPE_STOP_END_TURN : SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);

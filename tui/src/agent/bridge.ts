@@ -4,11 +4,13 @@
 
 import { Agent, libraryPath, type SopeEvent } from "sope";
 import { executionPolicy } from "./environment";
+import { ExecutionTrace } from "./trace";
 
 export class AgentBridge {
   readonly agent: Agent;
   #worker: Worker;
   #closed: Promise<void>;
+  readonly trace: ExecutionTrace | undefined;
 
   constructor(options: Record<string, string>, onEvents: (events: SopeEvent[]) => void, directory?: string) {
     this.agent = directory ? Agent.open(directory, options) : Agent.create(options);
@@ -26,6 +28,7 @@ export class AgentBridge {
     this.#worker = import.meta.url.includes("$bunfs")
       ? new Worker("./tui/src/agent/poller.ts")
       : new Worker(new URL("./poller.ts", import.meta.url).href);
+    this.trace = ExecutionTrace.fromEnvironment();
     this.#worker.onerror = (e) => {
       // Without the poller nothing would ever happen: fail loudly.
       console.error(`sope: event poller failed: ${e.message}`);
@@ -33,6 +36,7 @@ export class AgentBridge {
     };
     this.#worker.onmessage = (msg: MessageEvent<SopeEvent[]>) => {
       if (msg.data.at(-1)?.type === "closed") resolveClosed();
+      if (this.trace) for (const event of msg.data) this.trace.event(event);
       onEvents(msg.data);
     };
     this.#worker.postMessage({ handle: this.agent.handle, library: libraryPath() });
@@ -50,5 +54,7 @@ export class AgentBridge {
     beforeFree?.();
     // If the poller never saw "closed" it may still be inside sope_poll; leaking beats a use-after-free.
     if (drained) this.agent.free();
+    this.trace?.record("bridge.shutdown", { drained });
+    await this.trace?.close();
   }
 }

@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: MIT
+import { expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ExecutionTrace } from "../src/agent/trace";
+
+const origin = { agentId: 0, turnId: 1, sequence: 7 };
+test("trace correlates parallel spans without persisting payloads or token events", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sope-trace-"));
+  try {
+    const trace = new ExecutionTrace(dir);
+    trace.event({ ...origin, type: "turn_start" });
+    for (const agentId of [0, 9]) trace.event({ ...origin, agentId, type: "tool_start", callId: 4, name: "bash", input: "secret-input" });
+    for (let i = 0; i < 10000; i++) trace.event({ ...origin, type: "thinking_delta", text: "secret-thought" });
+    trace.event({ ...origin, type: "log", level: "debug", message: "secret-log" });
+    trace.event({ ...origin, type: "error", code: -1, message: "secret-error" });
+    trace.event({ ...origin, type: "log", level: "debug", message: JSON.stringify({ event: "provider.start", round: 1, compaction: 0, attempt: 1, status: 0, elapsed_ms: 0, request_bytes: 123, received_bytes: 0, complete: 0, failed: 0, secret: "secret-provider" }) });
+    for (const agentId of [9, 0]) trace.event({ ...origin, agentId, type: "tool_end", callId: 4, name: "bash", result: "secret-result", isError: false });
+    trace.event({ ...origin, type: "turn_end", stopReason: "end_turn" });
+    await trace.close();
+    const raw = readFileSync(trace.path, "utf8");
+    expect(raw).not.toContain("secret");
+    const rows = raw.trim().split("\n").map((line) => JSON.parse(line));
+    expect(rows).toHaveLength(10);
+    expect(rows.filter((r) => r.type === "tool_end").every((r) => r.durationMs >= 0 && !r.unmatched)).toBe(true);
+    expect(rows.at(-1)).toMatchObject({ type: "trace.end", activeSpans: 0, thinkingBytes: 140000 });
+    expect(statSync(trace.path).mode & 0o777).toBe(0o600);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("trace has a bounded file and an explicit limit marker", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sope-trace-"));
+  try {
+    let warnings = 0;
+    const trace = new ExecutionTrace(dir, 2048, () => warnings++);
+    for (let i = 0; i < 10000; i++) trace.event({ ...origin, type: "usage", inputTokens: i, outputTokens: i });
+    await trace.close();
+    const raw = readFileSync(trace.path, "utf8");
+    expect(Buffer.byteLength(raw)).toBeLessThanOrEqual(2048);
+    expect(raw).toContain('"type":"trace.limit"');
+    expect(warnings).toBe(1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("slow trace output drops bounded records and reports the gap", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sope-trace-"));
+  try {
+    const trace = new ExecutionTrace(dir);
+    for (let i = 0; i < 10000; i++) trace.event({ ...origin, type: "usage", inputTokens: i, outputTokens: i });
+    await trace.close();
+    const rows = readFileSync(trace.path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(rows.some((r) => r.type === "trace.gap" && r.count > 0)).toBe(true);
+    expect(rows.length).toBeLessThan(2000);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

@@ -133,6 +133,7 @@ typedef struct turn_state {
     uint64_t compact_before;    /* local request estimate before compaction */
     uint64_t compact_request_budget;
     int compact_retries, overflow_retried;
+    int compact_failed; /* suppress repeated proactive failures for this turn */
     int terminal_committed;
     char *cwd;                  /* option cwd: where built-in tools work */
     permit_mode permit;         /* option permissions */

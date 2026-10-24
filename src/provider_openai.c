@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define MAX_TOOL_CALLS 64
 #define MAX_ERROR_BODY 1500
@@ -26,6 +27,10 @@ typedef struct {
 } tool_call_acc;
 
 typedef struct {
+    sope_call *call;
+    int64_t started_ms, progress_ms;
+    size_t received;
+    int first_byte;
     sope_buf url, body, auth; /* kept for retries */
     char *ca_file;            /* option tls.ca_file, or NULL */
     sope_http *http;          /* NULL while waiting to retry */
@@ -269,6 +274,25 @@ static void build_responses(sope_call *c, sope_buf *b, const char *model)
     sope__buf_appends(b, "}");
 }
 
+/* Numeric-only diagnostics: never include endpoint, credentials or payloads. */
+static int64_t trace_now(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+static void trace_request(oa_state *s, const char *phase)
+{
+    sope__call_log(s->call, SOPE_LOG_DEBUG,
+        "{\"event\":\"provider.%s\",\"round\":%llu,\"compaction\":%d,\"attempt\":%d,"
+        "\"status\":%ld,\"elapsed_ms\":%lld,\"request_bytes\":%zu,\"received_bytes\":%zu,"
+        "\"complete\":%d,\"failed\":%d}",
+        phase, (unsigned long long)sope__call_round(s->call), sope__call_is_compaction(s->call),
+        s->attempts, s->status, (long long)(trace_now() - s->started_ms), s->body.len,
+        s->received, s->call->complete, s->call->failed);
+}
+
 static sope_http *post(sope_call *c, oa_state *s)
 {
     const char *headers[3];
@@ -277,6 +301,10 @@ static sope_http *post(sope_call *c, oa_state *s)
     headers[n++] = "Accept: text/event-stream";
     if (s->auth.len) headers[n++] = s->auth.ptr;
     s->attempts++;
+    s->started_ms = s->progress_ms = trace_now();
+    s->received = 0;
+    s->first_byte = 0;
+    trace_request(s, "start");
     return sope__http_post(s->url.ptr, headers, n, s->body.ptr, s->body.len, s->ca_file, sope__call_task(c));
 }
 
@@ -325,6 +353,7 @@ static void *oa_start(sope_call *c)
     if (key && (strchr(key, '\r') || strchr(key, '\n'))) {
         sope__call_error(c, SOPE_EINVAL, "credential contains a line break"); oa_free(s); s = NULL; goto done;
     }
+    s->call = c;
     s->responses = wire && !strcmp(wire, "responses");
     sope__buf_appends(&s->url, base ? base : "https://api.openai.com/v1");
     base_len = s->url.len;
@@ -583,6 +612,7 @@ static sope_step retry(sope_call *c, oa_state *s, const char *why)
     int32_t delay = 1000 << (s->attempts - 1); /* 1 s, 2 s */
     sope__call_log(c, SOPE_LOG_WARN, "openai: %s; retrying in %d ms (attempt %d of %d)", why, (int)delay,
                    s->attempts + 1, MAX_ATTEMPTS);
+    trace_request(s, "retry");
     sope__http_release(s->http);
     s->http = NULL;
     s->in.len = 0;
@@ -606,7 +636,17 @@ static sope_step oa_step(sope_call *c, void *state)
         }
         return (sope_step){ SOPE__STEP_WAIT, 0 };
     }
+    size_t buffered = s->in.len;
     finished = sope__http_take(s->http, &s->in, &s->status, err, sizeof err);
+    s->received += s->in.len - buffered;
+    if (!s->first_byte && s->in.len > buffered) {
+        s->first_byte = 1;
+        trace_request(s, "first_byte");
+    }
+    if (s->in.len > buffered && trace_now() - s->progress_ms >= 15000) {
+        s->progress_ms = trace_now();
+        trace_request(s, "progress");
+    }
 
     if (s->in.oom) {
         sope__call_error(c, SOPE_ENOMEM, "openai: out of memory");
@@ -680,6 +720,7 @@ static sope_step oa_step(sope_call *c, void *state)
 
 static void oa_finish(void *state)
 {
+    if (state) trace_request(state, "end");
     oa_free(state);
 }
 
