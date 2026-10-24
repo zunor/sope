@@ -1,148 +1,207 @@
 ---
 name: release
-description: Cut a sope release end to end — pick the version, bump it everywhere, verify (C tests under ASan/TSan/leaks, bundled build, JS tests, typecheck, live model), commit, run scripts/release.sh, tag, install from the tarball and smoke-test. Use when the user asks to release, publish, ship, cut, tag or upgrade sope, or to bump its version.
+description: Build and validate unreleased sope changes locally or in a consuming repository, or prepare and publish a versioned sope release. Use for sope validation builds, local installation, packaging, version bumps, and releases; ordinary bug investigation alone does not require this workflow.
 ---
 
-# Releasing sope
+# Building and releasing sope
 
-sope ships two products from one version number: **libsope** (C ABI) and the
-**sope** executable (Bun TUI with libsope embedded). The version lives in
-`include/sope.h`; everything else follows it. Background and policy:
-`docs/release.md`. Work from the repo root.
+sope ships libsope (C ABI) and the Bun TUI executable from one version in
+`include/sope.h`. Read [release policy](../../../docs/release.md) from the
+repository root as `docs/release.md`, and inspect the current build scripts.
 
-Do the steps in order and stop at the first failure: fix it, then resume
-from the step that failed. Never skip a verification step silently; if one
-cannot run, say so in the report.
+## Choose the delivery mode first
 
-## 1. Pick the version
-
-Read `git log --oneline <last tag>..HEAD` and the uncommitted diff, then
-apply the table in `docs/release.md`:
-
-| Change | Before 1.0 | After 1.0 |
+| User intent | Mode | Result |
 |---|---|---|
-| TUI only, bug fixes, performance | patch +1 | patch +1 |
-| ABI adds functions, events, options | minor +1 | minor +1 |
-| ABI breaks (struct layout, semantics) | minor +1 | major +1 |
+| Try a local fix, install a development build, validate in another repository | Validation build | A tested library/executable from the working tree and consumer regression results |
+| Bump a version, prepare a release without publishing | Release preparation | Versioned commit and verified packages; remote actions only within the requested scope |
+| Publish a GitHub Release | Publication | Verified packages, tag, release notes, uploaded assets, and README download links |
 
-Any new `SOPE_API` function, `SOPE_EVENT_*`, or agent option counts as an ABI
-addition. Before 1.0 the bindings refuse a library whose major.minor differs,
-so a minor bump means hosts must rebuild: say so in the CHANGELOG.
+A validation build does **not** imply a version bump, changelog release heading,
+commit, tag, push, or GitHub Release. Follow the user's existing authorization;
+using this skill itself does not grant publication permission. If they ask only
+to validate a fix, finish after validation. If both are requested, validate first
+and then continue to release preparation/publication.
 
-## 2. Bump and document
+## Validation build: use the working tree
 
-```sh
-scripts/bump-version.sh X.Y.Z
-```
+1. Inspect the diff and identify the consumer regression to reproduce. Include
+   relevant uncommitted edits; do not build an older tag or discard local work.
+   Record the base commit, dirty state and changed paths. Use a scratch build
+   manifest/diff digest and artifact checksum to distinguish successive dirty
+   builds: `--version` alone cannot identify an unreleased fix.
+2. Build the component the consumer uses, then run the affected native/binding
+   tests. Configure a fresh build directory when necessary:
 
-It updates `include/sope.h`, the three `package.json` and workspace versions in `bun.lock`, the bindings' `ABI`
-in `bindings/js/src/ffi.ts`, the version line of `docs/abi.md`, and the
-tarball names in `README.md` and `docs/guide/quickstart.md`, and reports whether `CHANGELOG.md` has a
-section for X.Y.Z. Then by hand:
+   ```sh
+   cmake -S . -B build-validate -DCMAKE_BUILD_TYPE=Debug
+   cmake --build build-validate --parallel 3
+   ctest --test-dir build-validate --output-on-failure --timeout 120
+   ```
 
-- **CHANGELOG.md**: a `## X.Y.Z — YYYY-MM-DD` section at the top (rename an
-  `## Unreleased…` heading if there is one), in English like the rest, grouped
-  as `### libsope (C ABI x.y)`, `### Bindings`, `### TUI`. Lead with one
-  sentence on what the release is about and whether hosts must recompile.
-- **Exported symbol count**: `nm -gU build/libsope.dylib | grep -c " _sope_"`
-  (Linux: `nm -D --defined-only build/libsope.so | grep -c " sope_"`) must
-  match "exports only the public `sope_*` functions (N in total)" in `docs/abi.md`.
-- **Docs for anything new**: `include/sope.h` comments, `docs/abi.md`
-  (options table, events table, limitations in the last section), `README.md`
-  (overview), `docs/guide/terminal.md` (keys and commands), and
-  `docs/guide/configuration.md` (configuration table). Check with
-  `grep -rn "<old version>" README.md docs include */package.json` that
-  nothing still names the old version, CHANGELOG excepted.
+   Choose `SOPE_CURL` for the target: macOS normally uses `system`; Linux release
+   packages use `bundled`. Run Go/JS checks when those bindings are involved.
+   `scripts/ci/check-ctest.py build-validate` verifies that Go tests were not
+   silently omitted. Add sanitizers for relevant native memory/thread changes.
+3. Route the consumer explicitly to this build:
+   - **JS or a compatible sope executable:** use a command-scoped absolute
+     `SOPE_LIB` path to the rebuilt `.dylib`/`.so`. If TUI code changed, run the
+     current TUI source or compile a new executable; replacing its library alone
+     does not update its embedded TypeScript.
+   - **Go/C host:** use the matching header, library, bindings and pkg-config
+     files. Set `PKG_CONFIG_PATH` for that command; Go needs `go build -a` or
+     `go test -a` because its cache does not track external C library changes.
+     Prefer a temporary `GOWORK`/consumer checkout over persisting dependency
+     replacements in another repository. Confirm which shared library is loaded.
+   - **Standalone executable/package:** `bash scripts/release.sh` builds the
+     working tree without creating a tag or publishing. It runs full package
+     checks and writes version-named outputs in `dist/`. Preserve any existing
+     same-name artifact before rebuilding, then copy the validation package into
+     a scratch directory identified by its commit/dirty-build digest. Label it
+     unreleased, even though its embedded version still matches the last release.
+     Validate with `scripts/ci/check-package.py` (requires Gitleaks), and install
+     from the archive into an explicit temporary `--prefix`. Unset `SOPE_LIB`
+     when testing the executable's embedded library.
+4. In the requested consumer repository, run the original failing scenario and
+   relevant regression checks. Respect that repository's instructions and local
+   changes. Use throwaway session/data paths where persistent state is not part
+   of the regression. Do not change its Git accounts, remotes, global PATH or
+   default installation. If an ABI changed, rebuild the consumer with matching
+   bindings; do not bypass ABI guards to make a smoke test pass.
+5. Report the tested source identity, absolute artifact/install path, consumer
+   scenario and result. State that this is an unreleased validation build, with
+   the current embedded version. No publication steps follow unless requested.
 
-## 3. Verify
+## GitHub account isolation for this checkout
 
-Rebuild native code first: after a minor bump the old build no longer
-matches the bindings and every binding test fails to load the library.
+The publication target is **zunor/sope**. The user's default GitHub CLI and SSH
+account is **iamlinjunhong** for other repositories. Keep that default intact.
 
-```sh
-cmake --build build && ctest --test-dir build --output-on-failure
-for d in build-asan build-thread build-bundled; do
-  cmake --build "$d" && for t in test_agent test_tools test_json; do "./$d/$t" | tail -1; done
-done
-leaks --atExit -- ./build/test_agent | grep "leaks for"   # macOS; expect 0 leaks
-leaks --atExit -- ./build/test_tools | grep "leaks for"
-bun test && bun run typecheck
-```
-
-- If `build-asan`, `build-thread` or `build-bundled` does not exist, configure
-  it with the project's own options:
-  `cmake -S . -B build-asan -DSOPE_SANITIZE=address -DSOPE_BUILD_EXAMPLES=OFF`,
-  `cmake -S . -B build-thread -DSOPE_SANITIZE=thread -DSOPE_BUILD_EXAMPLES=OFF`,
-  `cmake -S . -B build-bundled -DCMAKE_BUILD_TYPE=Release -DSOPE_CURL=bundled`.
-  The bundled one is the Linux configuration and must also compile and pass
-  on macOS; it downloads curl and mbedTLS, or takes local tarballs through
-  `-DSOPE_CURL_URL=… -DSOPE_MBEDTLS_URL=…` when offline.
-- **Live model** (needs `.env` with `SOPE_API_KEY`; load it with
-  `set -a; . ./.env; set +a`, never echo it):
-  `bun tui/src/main.ts -p "In one sentence: what is 1+1?"`, plus one check per
-  user-visible feature of the release (for example `--image` with a small
-  PNG). The endpoint sometimes stalls or times out in the TLS handshake:
-  check `curl -m 20 -w "%{http_code}" "$SOPE_BASE_URL/models" -H "Authorization: Bearer $SOPE_API_KEY"`
-  and retry before suspecting the code.
-- **TUI changes**: drive the real TUI in a pty with the mock provider and a
-  throwaway database (`SOPE_DB=<scratch>/sope.db`, `--provider mock`) using
-  python's `pty` + `pyte`, and look at the screen. Two traps: macOS has no
-  `timeout` (use `perl -e 'alarm N; exec @ARGV'` or a background kill), and
-  ctrl+c only cancels while a turn runs, so a script that quits mid-turn
-  must send it twice.
-
-## 4. Commit
+Use the sope-local `git gh` alias for GitHub operations, from the sope repository:
 
 ```sh
-git add -A && git status --short          # look at every new file
-set -a; . ./.env; set +a
-git diff --cached | grep -c -F "$SOPE_API_KEY"   # must print 0
-git check-ignore -q .env && echo ".env ignored"
+git gh api user --jq .login                 # must be zunor
+git gh repo view zunor/sope --json nameWithOwner
+git remote get-url --push origin
 ```
 
-Scratch files, databases, `dist/` and build directories must stay out;
-`.gitignore` already covers `.env*`, `build/`, `build-*/`, `dist/` and built
-libraries. Commit message:
+Pass `--repo zunor/sope` on commands that support it. Git push uses this
+checkout's local credential helper and its username-qualified HTTPS remote.
+Do not run `gh auth switch`, `gh auth setup-git`, or change global/SSH settings
+for this release. Do not assume ordinary `gh` uses the repository's account.
 
-```
-Release X.Y.Z: <what the release is about, a few words>
+The alias and credential helper live in `.git/config`; they are not copied by
+cloning. If absent, configure only this checkout, or use a per-command token
+obtained with `gh auth token --hostname github.com --user zunor`. Check token
+lookup succeeded and verify the resulting API identity before any mutation.
+Keep the token in process memory/environment; never print it or save it in the
+repository. Missing credentials are a setup issue, not a reason to switch the
+user's global account. Local validation needs no GitHub authentication.
 
-<libsope / TUI bullet points, wrapped at 72>
+## Prepare a versioned release
 
-Co-Authored-By: <the attribution line the session asks for>
-```
+1. Read the diff since the latest release and choose the version:
 
-## 5. Package, tag, install
+   | Change | Before 1.0 | From 1.0 |
+   |---|---|---|
+   | TUI-only changes, fixes, performance | Patch +1 | Patch +1 |
+   | New ABI functions, events or options | Minor +1 | Minor +1 |
+   | Breaking ABI changes | Minor +1 | Major +1 |
+
+   Before 1.0, a minor bump requires consumers to rebuild with matching
+   bindings. Explain that in the release notes.
+2. Run `scripts/bump-version.sh X.Y.Z`. Inspect header/package/lockfile versions,
+   JS and Go ABI guards, and documentation; do not assume the script covers
+   every version reference. Convert the relevant Unreleased notes into a dated
+   English changelog section and update feature docs. Check exported symbols
+   against `docs/abi.md`, and preserve the user-approved README screenshot.
+3. Run `python3 scripts/ci/check-metadata.py`, targeted checks for the changes,
+   and `git diff --check`. Before a public push, scan the intended source/history
+   with Gitleaks using `--redact=100`, and compare against available local
+   credentials without displaying them. Keep `.env`, session databases, build
+   outputs and scratch evidence out of Git. Stage only the intended files.
+4. Commit the reviewed release changes, normally as
+   `Release X.Y.Z: <concrete changes>`. Do not add a Co-Authored-By trailer unless
+   the user explicitly requests one. Capture the commit SHA. Do not amend a
+   pushed commit or move an existing release tag as routine release work.
+
+## Verify that commit and collect packages
+
+Prefer the existing GitHub workflows when remote validation is in scope; a
+local Linux environment is not needed. Push the release commit only within the
+user's authorized scope, then select runs by **head SHA**, not merely the latest
+successful run or branch name.
+
+- **CI** must finish successfully: native/Go/JS tests, type checking, both Linux
+  sanitizers, metadata and history secret scanning.
+- **Nightly**, triggered manually for that commit, adds Linux arm64/Intel Mac,
+  macOS leak checks, PTY interaction, benchmarks and the two package builds.
+  Benchmarks currently record observations rather than enforce thresholds.
+- **Packages** can run separately if no suitable Nightly package artifacts exist.
+  Its outputs are Linux x64 and macOS arm64 archives plus checksums, each named
+  with the source commit in the Actions artifact name. Other tested platforms
+  are not automatically packaged.
 
 ```sh
-bash scripts/release.sh > <scratch>/release-X.Y.Z.log 2>&1; echo "exit $?"
-grep -E "==>|pass|fail|ok$|tar.gz" <scratch>/release-X.Y.Z.log | tail -25
-git tag -a vX.Y.Z -m "sope X.Y.Z"
+git gh workflow run nightly.yml --ref main --repo zunor/sope
+git gh run list --workflow nightly.yml --commit "$release_commit" \
+  --repo zunor/sope --json databaseId,headSha,status,conclusion
 ```
 
-`release.sh` refuses mismatched versions, runs every test suite again,
-compiles `bin/sope`, smoke-tests it from `/`, and writes
-`dist/sope-X.Y.Z-<os>-<arch>.tar.gz` plus `.sha256`. Tag only after it
-succeeds; if it fails, fix, amend the release commit, and run it again.
+Use the actual release branch instead of `main` if applicable. A dispatch can
+race a branch update: verify the selected run's SHA equals `release_commit`.
+Wait for completion and inspect failed jobs. Fix failures and validate the new
+commit; do not treat successful individual steps inside a failed/cancelled run
+as a successful workflow. For a runner-only failure, retry the affected job
+once before investigating; avoid an indefinite cancel/rerun loop. Reuse passed
+checks and packages for the same source rather than repeating local checks just
+because several instructions mention them.
 
-Install from the tarball, not from the build directory, so the package
-itself is what gets checked:
+Download the two verified package artifacts by run ID into separate scratch
+folders, and check their filenames, versions and SHA-256 files. Use the tested
+bytes for publication, rather than rebuilding another binary after CI.
+`scripts/ci/check-package.py` checks archive contents, screenshot, credential
+patterns, temporary-prefix installation and execution from outside the checkout
+on each package's own platform. Never try to run a Linux binary on macOS.
 
-```sh
-(cd dist && shasum -a 256 -c sope-X.Y.Z-*.tar.gz.sha256)
-tar xzf dist/sope-X.Y.Z-*.tar.gz -C <scratch> && <scratch>/sope-X.Y.Z-*/install.sh
-(cd / && ~/.local/bin/sope --version)    # sope X.Y.Z (<os>-<arch>, libsope embedded)
-(cd / && ~/.local/bin/sope -p "In one sentence: what is 1+1?")   # with .env loaded
-```
+For local-only release preparation, run the equivalent checks available on the
+host and `scripts/release.sh`; report unverified platforms. Use full `ctest` runs
+under ASan/UBSan and TSan, not only selected test executables. Use
+`scripts/ci/check-leaks.py` for macOS diagnostics and `scripts/ci/tui-smoke.py`
+(with pyte) for PTY checks. Keep shell failure status intact; do not hide failed
+tests behind `tail` or `grep` pipelines.
 
-Push to the configured remote and upload release assets only when the user
-asks for publication. Each platform needs its own run of
-`release.sh` on a machine of that platform (no cross compiling).
+CI has no real model credentials. When available, exercise the release's live
+model behavior locally using the packaged executable for this host, plus the
+changed user-visible features. Load credentials only for the child process,
+keep them out of logs, and record any live checks that could not be run. For an
+explicit API-key audit, also compare available local secrets against raw package
+bytes: text scanning alone does not establish binary contents are clean.
 
-## 6. Report
+## Publish only when requested
 
-Tell the user, in their language: the version and why that bump, commit
-hash, tag, tarball path, size and sha256, where it is installed and what
-`--version` printed, what was verified (test counts, sanitizers, live
-checks) and anything that could not be verified, plus open items worth
-knowing (unsigned macOS binary, untested platforms).
+1. Reconfirm the target account/repository, exact release commit, successful
+   verification and package checksums. Create the annotated `vX.Y.Z` tag at
+   that commit only after verification. Push that tag to the checked remote.
+2. Prepare English notes describing behavior changes, ABI compatibility,
+   available platforms and signing status. Include the tagged README screenshot
+   and changelog link. Supply multiline notes via `--notes-file`.
+3. Inspect any existing tag/Release before creating or retrying. Create a draft,
+   upload both platforms and their checksums, verify asset names/sizes/digests,
+   then publish the draft. Use `git gh release ... --repo zunor/sope` throughout.
+   Do not silently replace an already-public asset or retag a published release.
+   After an ambiguous network result, inspect remote state before retrying.
+4. Confirm the public release and download/checksum links. Update README download
+   URLs, install commands and platform coverage, then commit/push that documentation
+   within the authorized scope. Keep the tag and binaries tied to their verified
+   source commit; a later README link update does not require rebuilding them.
+
+The current Actions workflows upload build artifacts only: pushing a tag does
+not itself publish a GitHub Release.
+
+## Report
+
+State which mode was completed. For validation, report source identity, artifact
+path and consumer regression evidence. For a release, include version/ABI impact,
+commit/tag, release and asset links, sizes/checksums, validation results and any
+platform or signing limits. Confirm account isolation when GitHub was used.
