@@ -203,6 +203,10 @@ SOPE_API int sope_agent_wait(sope_agent_t *agent, int32_t timeout_ms);
  *                     raises the output reservation if larger
  *   tls.ca_file       PEM file of trusted CAs, for builds with bundled curl
  *                     (default: $SSL_CERT_FILE, else the system bundle)
+ *   openai.max_retries  additional attempts per request, 0..20 (default 5)
+ *   openai.retry_delay_ms initial backoff, capped at 10000 ms (default 1000)
+ *   openai.idle_timeout_ms attempt silence limit (default 120000)
+ *   openai.request_timeout_ms total request budget (default 600000)
  *   mock.delay_ms     delay between streamed chunks of the mock provider */
 SOPE_API int sope_agent_set_option(sope_agent_t *agent, const char *key, const char *value);
 
@@ -389,6 +393,10 @@ SOPE_API int sope_agent_fd(sope_agent_t *agent);
 #define SOPE_EVENT_TOOL_START     12 /* call_id, name: built-in tool, data: JSON input. The library runs it */
 #define SOPE_EVENT_TOOL_END       13 /* call_id, name, code: 1 if it failed, data: the result the model sees */
 #define SOPE_EVENT_PERMISSION     14 /* call_id, name, data: JSON input. Answer with sope_permit */
+#define SOPE_EVENT_MODEL_RETRY    15 /* call_id: model round, code: next attempt, name: failure class.
+                                    * data: {delay_ms,compaction,discarded_text_bytes,discarded_thinking_bytes}.
+                                    * Prior attempt output is provisional and discarded from history.
+                                    * Hosts must mark/separate it before displaying the next attempt. */
 
 #define SOPE_STOP_END_TURN  0
 #define SOPE_STOP_CANCELLED 1

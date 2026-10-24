@@ -175,6 +175,9 @@ void sope__http_info(sope_http *h, char *content_type, size_t ctlen, char *url, 
  * *status is the HTTP status (0 if none) and err holds a transport error
  * message (empty if none). */
 int sope__http_take(sope_http *h, sope_buf *out, long *status, char *err, size_t errlen);
+/* Transport class: 0 success/permanent, 1 transient, 2 timeout. Retry-After
+ * is a bounded delay in milliseconds, or zero when absent/invalid. */
+void sope__http_retry_info(sope_http *h, int *transport, int64_t *after_ms);
 /* Cancels the transfer if running and drops the caller's reference. `wake`
  * is never woken after this returns. */
 void sope__http_release(sope_http *h);

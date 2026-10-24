@@ -167,12 +167,14 @@ test("retries transient failures before any output", async () => {
   expect(telemetry.filter((event) => event.event === "provider.start").map((event) => [event.round, event.attempt])).toEqual([[1, 1], [1, 2], [2, 1]]);
   expect(telemetry.find((event) => event.event === "provider.retry")).toMatchObject({status: 503, complete: 0, attempt: 1});
   expect(telemetry.filter((event) => event.event === "provider.end").every((event) => event.status === 200 && event.complete === 1 && event.elapsed_ms >= 0 && event.received_bytes > 0)).toBe(true);
+  expect(telemetry.find(event => event.event === "provider.end")).toMatchObject({ text_bytes: 13, thinking_bytes: 19, tool_calls: 1, tool_argument_bytes: 18 });
   expect(JSON.stringify(telemetry)).not.toContain("test-key");
 });
 
-test("a truncated response fails once without replaying streamed output", async () => {
+test("disabling retries exposes a truncated response once", async () => {
   overrideStream = `data: ${JSON.stringify(delta({ content: "partial" }))}\n\n`;
   agent = openaiAgent();
+  agent.setOption("openai.max_retries", "0");
   agent.send("test disconnect");
   const events = await drainTurn(agent, () => { throw new Error("unexpected tool"); });
   expect(requests).toHaveLength(1);
@@ -210,6 +212,7 @@ for (const [name, prefix, idle, total, expected] of [
   ["keepalives cannot extend request lifetime", "/stall/heartbeat", 200, 400, "request"],
 ] as const) test(name, async () => {
   agent = openaiAgent("test-key", prefix);
+  agent.setOption("openai.max_retries", "0");
   agent.setOption("openai.idle_timeout_ms", String(idle));
   agent.setOption("openai.request_timeout_ms", String(total));
   agent.send("bounded response");

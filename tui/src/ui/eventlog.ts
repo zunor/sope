@@ -49,6 +49,8 @@ function describe(ev: SopeEvent): string {
     case "text_delta":
     case "thinking_delta":
       return `${who} ${`[${Buffer.byteLength(ev.text)} bytes]`}`;
+    case "model_retry":
+      return `${who} round=${ev.round} attempt=${ev.attempt} ${ev.reason} delay=${ev.delayMs}ms`;
     case "tool_call":
     case "tool_start":
     case "permission":

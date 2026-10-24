@@ -33,6 +33,7 @@ func functionCall(id string) any {
 func responseConfig(dir, url string) Config {
 	c := config(dir)
 	c.Options = map[string]string{"provider": "openai", "openai.wire_api": "responses", "openai.base_url": url, "openai.api_key": "token-before", "model": "test-reasoning", "reasoning.effort": "high"}
+	c.Options["openai.retry_delay_ms"] = "10"
 	return c
 }
 func TestResponsesRoundRecovery(t *testing.T) {

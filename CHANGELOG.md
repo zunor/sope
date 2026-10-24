@@ -4,6 +4,9 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
+- Retry transient provider and interrupted-stream failures with bounded attempts, jittered backoff, Retry-After and shared deadlines; expose explicit discarded-attempt events in the ABI, bindings, TUI and print mode.
+- Extend diagnostic traces with retry classification, delay and remaining request budget.
+
 - TUI: see and stop background work. Each subagent takes one row in the transcript, with its elapsed time, tool calls and tokens; a finished one unfolds into its tool calls and report on a click. While subagents or background shells run, the footer counts them after the permission mode; `↓` on an empty input, `/tasks` or a click on that summary opens a task tree (sope → subagents and shells → their latest tool calls or output), where `x` stops the selected subagent (with an optional note for the model) or shell while the rest of the turn goes on.
 - Add `sope_subagent_cancel` to stop one subagent and let its parent turn continue, and `sope_agent_shells` / `sope_shell_stop` to list and stop background shells from the host (new ABI functions: the minor version advances on release).
 

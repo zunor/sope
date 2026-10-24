@@ -19,7 +19,7 @@
 
 #define MAX_TOOL_CALLS 64
 #define MAX_ERROR_BODY 1500
-#define MAX_ATTEMPTS 3
+enum { RETRY_NONE, RETRY_RATE, RETRY_SERVER, RETRY_TRANSPORT, RETRY_TIMEOUT, RETRY_INCOMPLETE };
 
 typedef struct {
     sope_buf id, name, args;
@@ -28,7 +28,11 @@ typedef struct {
 
 typedef struct {
     sope_call *call;
-    int64_t started_ms, progress_ms;
+    int64_t started_ms, progress_ms, request_started_ms, retry_ready_ms;
+    int64_t retry_after_ms;
+    int max_retries, timeout_retries, failure, retry_delay_ms, delay_ms;
+    uint32_t jitter;
+    size_t thinking_bytes;
     int64_t deadline_ms, last_data_ms, idle_ms;
     size_t received;
     int first_byte;
@@ -37,7 +41,6 @@ typedef struct {
     sope_http *http;          /* NULL while waiting to retry */
     int responses;
     int attempts;
-    int emitted; /* output reached the host: retrying would duplicate it */
     sope_buf in; /* received bytes not yet parsed */
     long status;
     int saw_done; /* data: [DONE] */
@@ -285,18 +288,26 @@ static int64_t trace_now(void)
 
 static void trace_request(oa_state *s, const char *phase)
 {
+    size_t tool_calls = 0, tool_bytes = 0;
+    for (size_t i = 0; i < MAX_TOOL_CALLS; i++) {
+        tool_calls += s->calls[i].used != 0;
+        tool_bytes += s->calls[i].args.len;
+    }
     sope__call_log(s->call, SOPE_LOG_DEBUG,
         "{\"event\":\"provider.%s\",\"round\":%llu,\"compaction\":%d,\"attempt\":%d,"
         "\"status\":%ld,\"elapsed_ms\":%lld,\"request_bytes\":%zu,\"received_bytes\":%zu,"
-        "\"complete\":%d,\"failed\":%d}",
+        "\"complete\":%d,\"failed\":%d,\"failure_kind\":%d,\"delay_ms\":%d,\"remaining_ms\":%lld,\"logical_ms\":%lld,"
+        "\"text_bytes\":%zu,\"thinking_bytes\":%zu,\"tool_calls\":%zu,\"tool_argument_bytes\":%zu}",
         phase, (unsigned long long)sope__call_round(s->call), sope__call_is_compaction(s->call),
         s->attempts, s->status, (long long)(trace_now() - s->started_ms), s->body.len,
-        s->received, s->call->complete, s->call->failed);
+        s->received, s->call->complete, s->call->failed, s->failure, s->delay_ms,
+        (long long)(s->deadline_ms > trace_now() ? s->deadline_ms - trace_now() : 0),
+        (long long)(trace_now() - s->request_started_ms), s->call->text.len,
+        s->thinking_bytes, tool_calls, tool_bytes);
 }
 
-/* Deadlines bound one logical model request, including retry backoff. They
- * wake the task even when HTTP is silent; a timed-out partial stream is never
- * replayed. Traffic can reset idle time, but never the absolute deadline. */
+/* Deadlines bound one logical model request, including retry backoff. A new
+ * attempt discards provisional output; committed tool rounds are never replayed. */
 static int64_t timeout_option(sope_call *c, const char *key, int64_t fallback)
 {
     char *value = sope__call_option(c, key), *end;
@@ -306,8 +317,17 @@ static int64_t timeout_option(sope_call *c, const char *key, int64_t fallback)
     return valid ? ms : fallback;
 }
 
+static sope_step retry(sope_call *c, oa_state *s);
+
+static int retry_allowed(const oa_state *s)
+{
+    return s->failure && s->attempts <= s->max_retries &&
+           (s->failure != RETRY_TIMEOUT || s->timeout_retries < 3);
+}
+
 static sope_step timed_out(sope_call *c, oa_state *s, const char *kind)
 {
+    s->failure = RETRY_TIMEOUT;
     sope__call_error(c, SOPE_ETIMEOUT, "openai: %s deadline exceeded; incomplete response was not replayed", kind);
     trace_request(s, "timeout");
     return (sope_step){ SOPE__STEP_DONE, SOPE_ETIMEOUT };
@@ -318,7 +338,14 @@ static sope_step wait_http(sope_call *c, oa_state *s)
     int64_t now = trace_now();
     int64_t total = s->deadline_ms - now, idle = s->last_data_ms + s->idle_ms - now;
     if (total <= 0) return timed_out(c, s, "request");
-    if (idle <= 0) return timed_out(c, s, "idle");
+    if (idle <= 0) {
+        s->failure = RETRY_TIMEOUT;
+        int permanent_http = (s->status >= 400 && s->status < 500 && s->status != 408 && s->status != 429) || s->status == 501 || s->status == 505;
+        if (!permanent_http && retry_allowed(s)) {
+            return retry(c, s);
+        }
+        return timed_out(c, s, "idle");
+    }
     return (sope_step){ SOPE__STEP_SLEEP, (int32_t)(total < idle ? total : idle) };
 }
 
@@ -332,6 +359,9 @@ static sope_http *post(sope_call *c, oa_state *s)
     s->attempts++;
     s->last_data_ms = s->started_ms = s->progress_ms = trace_now();
     s->received = 0;
+    s->failure = RETRY_NONE;
+    s->delay_ms = 0;
+    s->retry_after_ms = 0;
     s->first_byte = 0;
     trace_request(s, "start");
     return sope__http_post(s->url.ptr, headers, n, s->body.ptr, s->body.len, s->ca_file, sope__call_task(c));
@@ -404,7 +434,15 @@ static void *oa_start(sope_call *c)
                    (unsigned long long)sope__call_round(c), s->url.ptr, model, sope__call_tool_count(c),
                    s->body.len);
     s->idle_ms = timeout_option(c, "openai.idle_timeout_ms", 120000);
-    s->deadline_ms = trace_now() + timeout_option(c, "openai.request_timeout_ms", 600000);
+    s->request_started_ms = trace_now();
+    s->deadline_ms = s->request_started_ms + timeout_option(c, "openai.request_timeout_ms", 600000);
+    s->retry_delay_ms = (int)timeout_option(c, "openai.retry_delay_ms", 1000);
+    if (s->retry_delay_ms > 10000) s->retry_delay_ms = 10000;
+    char *retries = sope__call_option(c, "openai.max_retries"), *end;
+    long count = retries ? strtol(retries, &end, 10) : 5;
+    s->max_retries = retries && (!*retries || *end || count < 0 || count > 20) ? 5 : (int)count;
+    free(retries);
+    s->jitter = (uint32_t)((uintptr_t)s ^ (uint64_t)s->request_started_ms);
     if (!(s->http = post(c, s))) {
         sope__call_error(c, SOPE_ERROR, "openai: %s", sope_last_error());
         oa_free(s);
@@ -445,6 +483,21 @@ static void classify_error(sope_call *c, const sope_json *error)
         sope__call_context_exceeded(c);
 }
 
+static int transient_error(const sope_json *error)
+{
+    double number = sope__json_number(sope__json_get(error, "code"), 0);
+    if (number == 429) return RETRY_RATE;
+    if (number == 500 || number == 502 || number == 503 || number == 504) return RETRY_SERVER;
+    const char *code = sope__json_string(sope__json_get(error, "code"), NULL);
+    if (!code) code = sope__json_string(sope__json_get(error, "type"), NULL);
+    if (!code) return RETRY_NONE;
+    if (!strcmp(code, "rate_limit_exceeded") || !strcmp(code, "rate_limit_error") ||
+        !strcmp(code, "too_many_requests")) return RETRY_RATE;
+    if (!strcmp(code, "server_error") || !strcmp(code, "internal_server_error") ||
+        !strcmp(code, "overloaded_error") || !strcmp(code, "service_unavailable")) return RETRY_SERVER;
+    return RETRY_NONE;
+}
+
 static int usage_count(const sope_json *usage, const char *key, uint64_t *out)
 {
     const sope_json *v = sope__json_get(usage, key);
@@ -463,11 +516,11 @@ static int response_chunk(sope_call *c, oa_state *s, const sope_json *root)
     if (!strcmp(type, "response.output_text.delta")) {
         size_t n; const char *text = sope__json_string(sope__json_get(root, "delta"), &n);
         if (!text) goto invalid;
-        sope__call_text(c, text, n); s->emitted |= n > 0;
+        sope__call_text(c, text, n);
     } else if (!strcmp(type, "response.reasoning_summary_text.delta")) {
         size_t n; const char *text = sope__json_string(sope__json_get(root, "delta"), &n);
         if (!text) goto invalid;
-        sope__call_thinking(c, text, n); s->emitted |= n > 0;
+        sope__call_thinking(c, text, n); s->thinking_bytes += n;
     } else if (!strcmp(type, "response.completed")) {
         const sope_json *response = sope__json_get(root, "response");
         const char *status = sope__json_string(sope__json_get(response, "status"), NULL);
@@ -521,7 +574,12 @@ static int response_chunk(sope_call *c, oa_state *s, const sope_json *root)
         sope__buf_free(&text); sope__buf_free(&items);
         if (!ok) goto invalid;
     } else if (!strcmp(type, "response.failed") || !strcmp(type, "response.incomplete") || !strcmp(type, "error")) {
-        classify_error(c, sope__json_get(sope__json_get(root, "response"), "error"));
+        const sope_json *error = sope__json_get(sope__json_get(root, "response"), "error");
+        if (!error) error = sope__json_get(root, "error");
+        if (!error && !strcmp(type, "error")) error = root;
+        classify_error(c, error);
+        s->failure = transient_error(error);
+        if (s->failure) return 0;
         sope__call_error(c, SOPE_ERROR, "openai: %s", type); return 0;
     }
     return 1;
@@ -542,6 +600,8 @@ static int handle_chunk(sope_call *c, oa_state *s, const char *data, size_t n)
     }
     if ((err = sope__json_get(root, "error"))) {
         classify_error(c, err);
+        s->failure = transient_error(err);
+        if (s->failure) { sope__json_free(root); return 0; }
         str = sope__json_string(sope__json_get(err, "message"), &len);
         sope__call_error(c, SOPE_ERROR, "openai: %.*s", str ? (int)len : (int)n, str ? str : data);
         sope__json_free(root);
@@ -577,11 +637,10 @@ static int handle_chunk(sope_call *c, oa_state *s, const char *data, size_t n)
     if ((str = sope__json_string(sope__json_get(delta, "reasoning_content"), &len)) ||
         (str = sope__json_string(sope__json_get(delta, "reasoning"), &len))) {
         sope__call_thinking(c, str, len);
-        s->emitted |= len > 0;
+        s->thinking_bytes += len;
     }
     if ((str = sope__json_string(sope__json_get(delta, "content"), &len))) {
         sope__call_text(c, str, len);
-        s->emitted |= len > 0;
     }
     if ((calls = sope__json_get(delta, "tool_calls")) && calls->type == SOPE_JSON_ARRAY) {
         const sope_json *tc;
@@ -625,35 +684,80 @@ static int parse_lines(sope_call *c, oa_state *s, int final)
                 return 0;
             }
             if (n == 6 && !memcmp(data, "[DONE]", 6)) s->saw_done = 1;
-            else if (n && !handle_chunk(c, s, data, n)) return 0;
+            else if (n) {
+                /* EOF in the middle of an SSE JSON line is a truncated
+                 * transfer. A complete malformed line remains terminal. */
+                if (!nl && final) {
+                    sope_json *value = sope__json_parse(data, n);
+                    if (!value) { s->failure = RETRY_INCOMPLETE; return 0; }
+                    sope__json_free(value);
+                }
+                if (!handle_chunk(c, s, data, n)) return 0;
+            }
         }
         sope__buf_consume(&s->in, consumed);
     }
 }
 
-/* Transient failures before any output reached the host are retried. */
-static int should_retry(const oa_state *s, const char *err)
+static const char *failure_name(int failure)
 {
-    if (s->emitted || s->attempts >= MAX_ATTEMPTS) return 0;
-    return s->status == 429 || s->status >= 500 || (s->status == 0 && err[0]);
+    switch (failure) {
+    case RETRY_RATE: return "rate_limit";
+    case RETRY_SERVER: return "server";
+    case RETRY_TRANSPORT: return "transport";
+    case RETRY_TIMEOUT: return "timeout";
+    case RETRY_INCOMPLETE: return "incomplete_stream";
+    default: return "permanent";
+    }
 }
 
-static sope_step retry(sope_call *c, oa_state *s, const char *why)
+static sope_step retry(sope_call *c, oa_state *s)
 {
-    int32_t delay = 1000 << (s->attempts - 1); /* 1 s, 2 s */
+    int transport;
+    sope__http_retry_info(s->http, &transport, &s->retry_after_ms);
     int64_t left = s->deadline_ms - trace_now();
     if (left <= 0) return timed_out(c, s, "request");
-    if (left < delay) delay = (int32_t)left;
-    sope__call_log(c, SOPE_LOG_WARN, "openai: %s; retrying in %d ms (attempt %d of %d)", why, (int)delay,
-                   s->attempts + 1, MAX_ATTEMPTS);
+    int64_t delay = (int64_t)s->retry_delay_ms << (s->attempts - 1); /* at most 20 retries */
+    if (delay > 10000) delay = 10000;
+    s->jitter = s->jitter * 1664525u + 1013904223u;
+    delay = delay * (80 + s->jitter % 41) / 100;
+    if (delay > 10000) delay = 10000;
+    if (delay < s->retry_after_ms) delay = s->retry_after_ms;
+    if (delay > left) delay = left;
+    s->delay_ms = (int)delay;
+    s->retry_ready_ms = trace_now() + delay;
+    if (s->failure == RETRY_TIMEOUT) s->timeout_retries++;
+    sope__call_log(c, SOPE_LOG_WARN, "openai: %s (HTTP %ld); retrying in %d ms (attempt %d of %d)",
+                   failure_name(s->failure), s->status, s->delay_ms, s->attempts + 1, s->max_retries + 1);
     trace_request(s, "retry");
+    char data[256];
+    int n = snprintf(data, sizeof data,
+        "{\"delay_ms\":%d,\"compaction\":%d,\"discarded_text_bytes\":%zu,\"discarded_thinking_bytes\":%zu}",
+        s->delay_ms, c->compaction, c->text.len, s->thinking_bytes);
+    const char *reason = failure_name(s->failure);
+    sope__push_event(c->agent, SOPE_EVENT_MODEL_RETRY, sope__turn_id(c->agent), c->round,
+                     s->attempts + 1, reason, strlen(reason), data, (size_t)n);
     sope__http_release(s->http);
     s->http = NULL;
-    s->in.len = 0;
-    s->status = 0;
-    s->saw_done = 0;
-    s->finish = 0;
-    return (sope_step){ SOPE__STEP_SLEEP, delay };
+    sope__buf_free(&s->in);
+    for (size_t i = 0; i < MAX_TOOL_CALLS; i++) {
+        sope__buf_free(&s->calls[i].id); sope__buf_free(&s->calls[i].name); sope__buf_free(&s->calls[i].args);
+        s->calls[i].used = 0;
+    }
+    sope__buf_free(&c->text);
+    sope__tool_uses_free(c->uses, c->n_uses); c->uses = NULL; c->n_uses = c->cap_uses = 0;
+    free(c->response_items); c->response_items = NULL;
+    c->has_usage = c->complete = 0; c->usage_tokens = 0;
+    s->thinking_bytes = 0;
+    s->status = s->saw_done = s->finish = 0;
+    return (sope_step){ SOPE__STEP_SLEEP, s->delay_ms };
+}
+
+static sope_step failed_attempt(sope_call *c, oa_state *s)
+{
+    if (!c->failed && retry_allowed(s)) return retry(c, s);
+    if (!c->failed) sope__call_error(c, SOPE_ERROR, "openai: %s; retry allowance exhausted (%d attempts)", failure_name(s->failure), s->attempts);
+    return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
 }
 
 static sope_step oa_step(sope_call *c, void *state)
@@ -664,7 +768,9 @@ static sope_step oa_step(sope_call *c, void *state)
     size_t i;
 
     if (trace_now() >= s->deadline_ms) return timed_out(c, s, "request");
-    if (!s->http) { /* back from a retry delay */
+    if (!s->http) { /* wakes from other events cannot bypass backoff */
+        int64_t wait = s->retry_ready_ms - trace_now();
+        if (wait > 0) return (sope_step){ SOPE__STEP_SLEEP, (int32_t)wait };
         if (!(s->http = post(c, s))) {
             sope__call_error(c, SOPE_ERROR, "openai: %s", sope_last_error());
             return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
@@ -690,29 +796,39 @@ static sope_step oa_step(sope_call *c, void *state)
     }
     if (s->status >= 400) { /* the body is an error document, not a stream */
         if (!finished) return wait_http(c, s);
-        if (should_retry(s, err)) {
-            char why[32];
-            snprintf(why, sizeof why, "HTTP %ld", s->status);
-            return retry(c, s, why);
-        }
         sope_json *body = sope__json_parse(s->in.ptr, s->in.len);
         classify_error(c, sope__json_get(body, "error"));
         sope__json_free(body);
+        s->failure = s->status == 429 ? RETRY_RATE :
+            s->status == 408 ? RETRY_TIMEOUT :
+            (s->status >= 500 && s->status != 501 && s->status != 505) ? RETRY_SERVER : RETRY_NONE;
+        if (!c->context_exceeded && retry_allowed(s)) return retry(c, s);
         sope__call_error(c, SOPE_ERROR, "openai: HTTP %ld: %.*s", s->status,
                          (int)(s->in.len > MAX_ERROR_BODY ? MAX_ERROR_BODY : s->in.len), s->in.ptr ? s->in.ptr : "");
         return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
     }
-    if (!parse_lines(c, s, finished)) return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
+    /* Some gateways return an error document with status 200 instead of SSE. */
+    if (s->in.len && s->in.ptr[0] == '{') {
+        if (!finished) return wait_http(c, s);
+        if (!handle_chunk(c, s, s->in.ptr, s->in.len)) return failed_attempt(c, s);
+        sope__call_error(c, SOPE_ERROR, "openai: expected an SSE response");
+        return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
+    }
+    if (!parse_lines(c, s, finished)) return failed_attempt(c, s);
+    if (c->failed) return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
     if (!finished && !s->saw_done) return wait_http(c, s);
     if (!s->saw_done && err[0]) {
-        if (should_retry(s, err)) return retry(c, s, err);
+        int transport;
+        sope__http_retry_info(s->http, &transport, &s->retry_after_ms);
+        s->failure = transport == 2 ? RETRY_TIMEOUT : transport == 1 ? RETRY_TRANSPORT : RETRY_NONE;
+        if (retry_allowed(s)) return retry(c, s);
         sope__call_error(c, SOPE_ERROR, "openai: request failed: %s", err);
         return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
     }
 
     if (!s->saw_done || !s->finish) {
-        sope__call_error(c, SOPE_ERROR, "openai: incomplete stream (missing finish_reason or [DONE])");
-        return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
+        s->failure = RETRY_INCOMPLETE;
+        return failed_attempt(c, s);
     }
     size_t used = 0;
     for (i = 0; i < MAX_TOOL_CALLS; i++) {

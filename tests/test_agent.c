@@ -403,6 +403,7 @@ static void test_openai_unreachable(void)
     memset(&log, 0, sizeof log);
     CHECK(sope_agent_set_option(a, "model", "test") == SOPE_OK);
     CHECK(sope_agent_set_option(a, "openai.base_url", "http://127.0.0.1:9/v1") == SOPE_OK);
+    CHECK(sope_agent_set_option(a, "openai.retry_delay_ms", "10") == SOPE_OK);
     CHECK(sope_send(a, "hi", 2, NULL) == SOPE_OK);
     CHECK(drain_turn(a, &log, 0) == 0);
     CHECK(log.errors == 1 && log.stop == SOPE_STOP_ERROR);

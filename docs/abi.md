@@ -273,7 +273,9 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 | `image_model` | Model to switch to when the conversation contains images (for when `model` cannot process them) | Uses `model` |
 | `system` | System prompt | A short built-in prompt |
 | `max_rounds` | Maximum model calls per turn | `32` |
-| `openai.idle_timeout_ms` | Maximum silence during one HTTP attempt; timeout ends the request without replay | `120000` |
+| `openai.idle_timeout_ms` | Maximum silence during one HTTP attempt; retries are bounded by the request budget | `120000` |
+| `openai.max_retries` | Additional attempts per logical request (0 disables, maximum 20); timeouts allow at most three retries | `5` |
+| `openai.retry_delay_ms` | Initial exponential retry delay; jittered and capped at 10 seconds | `1000` |
 | `openai.request_timeout_ms` | Absolute time budget per model request, including all attempts and retry backoff | `600000` |
 | `harness.max_calls` | All tool admissions per agent/user turn | `128` |
 | `harness.max_searches` | Native grep/glob admissions per agent/user turn | `16` |
@@ -525,6 +527,48 @@ and an absolute deadline (10 minutes). Values are milliseconds, integers
 without occupying a worker, so a silent stream does not need an outside cancel
 to terminate. Incoming bytes reset idle time; keepalive traffic cannot extend
 the absolute deadline. That deadline includes retry backoff and all attempts
-of the same request. Expiry emits `SOPE_ETIMEOUT` and `provider.timeout`, ends
-the request, and never replays a partial response. Compaction requests have
+of the same request. Absolute expiry emits `SOPE_ETIMEOUT` and `provider.timeout`
+and ends the request. Idle expiry can start a new bounded attempt; no already
+committed tool round is replayed. Compaction requests have
 their own budgets. These are per-request limits, not a whole-turn time budget.
+
+
+### Provider retries and provisional output
+
+One model round may have multiple HTTP attempts. Rate limits (429), request
+timeouts (408), transient 5xx (excluding 501/505), classified transport errors,
+structured transient provider errors (including errors inside HTTP 200), and
+truncated streams are retryable. Authentication, invalid requests, context
+window overflow, refusals, output limits and complete malformed tool batches
+are terminal for this retry policy. Context overflow uses compaction recovery.
+The policy is provider-independent; it does not match human error prose.
+
+Retry backoff is exponential with 20% jitter, capped at 10 seconds. A valid
+`Retry-After` delta-seconds or HTTP date imposes a minimum wait, capped at 15
+minutes and always limited by the request deadline. Waking an agent for queued
+input cannot bypass that wait. Cancellation interrupts backoff and I/O.
+
+`SOPE_EVENT_MODEL_RETRY` (15) marks an abandoned attempt. `call_id` identifies
+the model round (not a tool), `code` is the next attempt number, and `name` is
+`rate_limit`, `server`, `transport`, `timeout` or `incomplete_stream`.
+The JSON data contains `delay_ms`, `compaction`, `discarded_text_bytes` and
+`discarded_thinking_bytes`. JS exposes `model_retry`; Go exposes `EventModelRetry`.
+Text and reasoning deltas before this boundary are provisional: hosts must mark
+or separate the abandoned output before rendering the next attempt. The TUI
+inserts a notice and starts new blocks; print mode marks abandoned stdout text
+so piped output does not silently concatenate conflicting attempts.
+
+Only the accepted attempt enters history; incomplete tool parameters are
+cleared and never executed. Durable event replay retains the discard boundary,
+while durable model history contains only accepted responses. Compaction keeps
+its partial summaries private and installs only a complete accepted summary.
+Retry state belongs to a live logical request; reopening an interrupted session
+starts a new request budget. Hosts still own whole-task time/cost limits.
+
+Provider trace fields add `failure_kind` (0 none, 1 rate limit, 2 server,
+3 transport, 4 timeout, 5 incomplete stream), `delay_ms`, `remaining_ms` and
+`logical_ms`. `elapsed_ms` remains per-attempt time. `text_bytes`,
+`thinking_bytes`, `tool_calls` and `tool_argument_bytes` describe buffered
+attempt progress (tool fragment counters currently describe Chat Completions);
+they reveal whether an otherwise silent call is building a tool invocation. Error bodies, URLs, headers
+and credentials are excluded from the diagnostic trace.

@@ -23,12 +23,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <time.h>
 
 #ifndef SOPE_WITH_CURL
 
 int sope__http_available(void)
 {
     return 0;
+}
+
+void sope__http_retry_info(sope_http *h, int *transport, int64_t *after_ms)
+{
+    (void)h; *transport = 0; *after_ms = 0;
 }
 
 sope_http *sope__http_post(const char *url, const char *const *headers, size_t nheaders, const char *body,
@@ -89,6 +96,8 @@ struct sope_http {
     int cancelled;
     int done;
     long status;
+    int transport;
+    int64_t retry_after_ms;
     char err[CURL_ERROR_SIZE];
     char *content_type;  /* GET: set when done */
     char *effective_url; /* GET: after redirects, set when done */
@@ -167,6 +176,38 @@ static void unref(sope_http *h)
     if (refs == 0) destroy(h);
 }
 
+static size_t on_header(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+    sope_http *h = userdata;
+    size_t n = size * nmemb;
+    pthread_mutex_lock(&h->mu);
+    if (n >= 5 && !memcmp(ptr, "HTTP/", 5)) {
+        h->retry_after_ms = 0;
+        curl_easy_getinfo(h->easy, CURLINFO_RESPONSE_CODE, &h->status);
+    }
+    if (n > 12 && !strncasecmp(ptr, "Retry-After:", 12) && n < 256) {
+        char value[256];
+        size_t start = 12, end = n;
+        while (start < end && (ptr[start] == ' ' || ptr[start] == '\t')) start++;
+        while (end > start && (ptr[end-1] == '\r' || ptr[end-1] == '\n' || ptr[end-1] == ' ' || ptr[end-1] == '\t')) end--;
+        memcpy(value, ptr + start, end - start); value[end - start] = 0;
+        int digits = end > start;
+        int64_t seconds = 0;
+        for (size_t i = 0; value[i]; i++) {
+            if (value[i] < '0' || value[i] > '9') { digits = 0; break; }
+            seconds = seconds * 10 + value[i] - '0';
+            if (seconds > 900) seconds = 900;
+        }
+        if (!digits) {
+            time_t date = curl_getdate(value, NULL), now = time(NULL);
+            seconds = date > now ? (int64_t)(date - now) : 0;
+        }
+        h->retry_after_ms = (seconds > 900 ? 900 : seconds) * 1000;
+    }
+    pthread_mutex_unlock(&h->mu);
+    return n;
+}
+
 static size_t on_data(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
     sope_http *h = userdata;
@@ -191,6 +232,14 @@ static void finished(sope_http *h, CURLcode result)
     char *ct = NULL, *url = NULL;
     pthread_mutex_lock(&h->mu);
     h->done = 1;
+    switch (result) {
+    case CURLE_OPERATION_TIMEDOUT: h->transport = 2; break;
+    case CURLE_COULDNT_RESOLVE_HOST: case CURLE_COULDNT_RESOLVE_PROXY:
+    case CURLE_COULDNT_CONNECT: case CURLE_SEND_ERROR: case CURLE_RECV_ERROR:
+    case CURLE_GOT_NOTHING: case CURLE_PARTIAL_FILE: case CURLE_HTTP2:
+    case CURLE_HTTP2_STREAM: h->transport = 1; break;
+    default: h->transport = 0; break;
+    }
     curl_easy_getinfo(h->easy, CURLINFO_RESPONSE_CODE, &h->status);
     curl_easy_getinfo(h->easy, CURLINFO_CONTENT_TYPE, &ct);
     curl_easy_getinfo(h->easy, CURLINFO_EFFECTIVE_URL, &url);
@@ -341,6 +390,8 @@ static sope_http *start(const char *url, const char *const *headers, size_t nhea
     curl_easy_setopt(h->easy, CURLOPT_HTTPHEADER, h->headers);
     curl_easy_setopt(h->easy, CURLOPT_WRITEFUNCTION, on_data);
     curl_easy_setopt(h->easy, CURLOPT_WRITEDATA, h);
+    curl_easy_setopt(h->easy, CURLOPT_HEADERFUNCTION, on_header);
+    curl_easy_setopt(h->easy, CURLOPT_HEADERDATA, h);
     curl_easy_setopt(h->easy, CURLOPT_PRIVATE, (char *)h);
     curl_easy_setopt(h->easy, CURLOPT_ERRORBUFFER, h->curl_err);
     curl_easy_setopt(h->easy, CURLOPT_NOSIGNAL, 1L);
@@ -383,6 +434,14 @@ void sope__http_info(sope_http *h, char *content_type, size_t ctlen, char *url, 
     pthread_mutex_lock(&h->mu);
     snprintf(content_type, ctlen, "%s", h->content_type ? h->content_type : "");
     snprintf(url, urllen, "%s", h->effective_url ? h->effective_url : "");
+    pthread_mutex_unlock(&h->mu);
+}
+
+void sope__http_retry_info(sope_http *h, int *transport, int64_t *after_ms)
+{
+    pthread_mutex_lock(&h->mu);
+    *transport = h->transport;
+    *after_ms = h->retry_after_ms;
     pthread_mutex_unlock(&h->mu);
 }
 

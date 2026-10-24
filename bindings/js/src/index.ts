@@ -45,6 +45,9 @@ export type SopeEvent =
   | ({ type: "turn_start" } & Origin)
   | ({ type: "text_delta"; text: string } & Origin)
   | ({ type: "thinking_delta"; text: string } & Origin)
+  /** The previous model attempt was discarded; tools have not been dispatched. */
+  | ({ type: "model_retry"; round: number; attempt: number; reason: string; delayMs: number;
+       compaction: boolean; discardedTextBytes: number; discardedThinkingBytes: number } & Origin)
   /** A host tool call: answer it with toolResult(). */
   | ({ type: "tool_call"; callId: number; name: string; input: string } & Origin)
   /** A built-in tool call the library runs itself. */
@@ -422,6 +425,12 @@ export class Agent {
         return { type: "tool_end", ...origin, callId, name: name(), isError: code !== 0, result: data() };
       case 14:
         return { type: "permission", ...origin, callId, name: name(), input: data() };
+      case 15: {
+        const retry = JSON.parse(data());
+        return { type: "model_retry", ...origin, round: callId, attempt: code, reason: name(),
+          delayMs: retry.delay_ms, compaction: !!retry.compaction,
+          discardedTextBytes: retry.discarded_text_bytes, discardedThinkingBytes: retry.discarded_thinking_bytes };
+      }
       default:
         // Unknown event type from a newer library: skip it rather than fail.
         return this.poll(timeoutMs);

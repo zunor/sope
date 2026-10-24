@@ -55,3 +55,18 @@ They are not execution journals and cannot resume work.
 
 Print mode handles SIGINT, SIGTERM and SIGHUP by cancelling the turn and cleaning
 up its shell processes before returning status 130, 143 or 129 respectively.
+
+
+## Provider recovery
+
+Transient model failures retry automatically, including interrupted streams.
+The previous attempt is marked as discarded; only a complete response can
+execute tools. `/set openai.max_retries 5` controls the retry allowance (0–20;
+zero disables retries). `/set openai.idle_timeout_ms 120000` bounds silence per
+attempt and `/set openai.request_timeout_ms 600000` bounds the whole request,
+including retries and waiting. Cancellation also interrupts retry waits.
+
+Backoff honors bounded `Retry-After` hints. Authentication, invalid requests and
+output limits require correction rather than repeated requests. Enable
+`SOPE_TRACE_DIR` to retain attempt, failure-class, delay and deadline metadata;
+the trace does not contain model text, tool output or credentials.

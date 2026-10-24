@@ -42,6 +42,13 @@ export async function runPrint(config: Config, prompt: string, images: ImageFile
       } else if (ev.type === "text_delta") {
         if (!outputClosed) process.stdout.write(ev.text);
         endedWithNewline = ev.text.endsWith("\n");
+      } else if (ev.type === "model_retry") {
+        const notice = `Model request interrupted (${ev.reason}); retrying attempt ${ev.attempt} in ${(ev.delayMs / 1000).toFixed(1)}s.`;
+        err(`sope: ${notice}`);
+        if (ev.discardedTextBytes && !ev.compaction && !outputClosed) {
+          process.stdout.write(`\n[${notice} Previous attempt output was discarded.]\n`);
+          endedWithNewline = true;
+        }
       } else if (ev.type === "subagent_start") {
         err(`· agent ${ev.subagentType}`);
       } else if (ev.type === "error") {

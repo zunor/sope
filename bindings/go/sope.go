@@ -389,6 +389,7 @@ const (
 	EventPermission    = uint32(C.SOPE_EVENT_PERMISSION)
 	EventTurnEnd       = uint32(C.SOPE_EVENT_TURN_END)
 	EventError         = uint32(C.SOPE_EVENT_ERROR)
+	EventModelRetry    = uint32(C.SOPE_EVENT_MODEL_RETRY)
 	StopEndTurn        = int(C.SOPE_STOP_END_TURN)
 	StopCancelled      = int(C.SOPE_STOP_CANCELLED)
 	StopError          = int(C.SOPE_STOP_ERROR)

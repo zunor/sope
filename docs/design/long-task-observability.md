@@ -9,7 +9,7 @@ supports log correlation; monotonic elapsed time measures durations. Execution
 journals remain the authority for recovery, not diagnostic JSONL.
 
 Trace is opt-in through SOPE_TRACE_DIR. It contains metadata only: lifecycle,
-counts, byte lengths, usage, provider attempts/status/durations and tool spans.
+counts, byte lengths, usage, provider attempts/status/durations, retry failure classes/delays/remaining budgets and tool spans.
 No prompt, reasoning, tool arguments/results, error bodies, URLs, API keys or
 process environment are recorded. Provider telemetry uses an allowlisted JSON
 schema in LOG events; arbitrary provider logs are not persisted.
@@ -54,3 +54,8 @@ agent and turn into byte/chunk counts. Lifecycle events and tool boundaries
 remain separate. Its 2000-entry ring replaces array shifting, and payload
 previews are bounded before formatting. The panel is for interactive inspection;
 only the opt-in diagnostic file follows the metadata-only persistence contract.
+
+Provider attempt ownership and provisional output boundaries are defined in
+[provider-retry.md](provider-retry.md). The `model_retry` event is retained by
+the durable event journal and metadata trace; only complete attempts enter
+model history.
