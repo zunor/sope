@@ -319,10 +319,14 @@ static void child_closed(sope_task *task)
     sope_buf result = { 0 };
     pending_call *p;
 
-    if (stop != SOPE_STOP_END_TURN)
+    if (stop != SOPE_STOP_END_TURN && child->stop_note) {
+        sope__buf_appends(&result, "The user stopped this subagent.");
+        if (*child->stop_note) sope__buf_appendf(&result, " Their note: %s", child->stop_note);
+    } else if (stop != SOPE_STOP_END_TURN) {
         sope__buf_appends(&result, stop == SOPE_STOP_CANCELLED ? "Subagent was cancelled." : "Subagent failed.");
+    }
     if (last && last->content_len) {
-        if (result.len) sope__buf_appends(&result, " Partial output:\n");
+        if (result.len) sope__buf_appends(&result, child->stop_note && *child->stop_note ? "\n\nPartial output:\n" : " Partial output:\n");
         sope__buf_append(&result, last->content, last->content_len);
     }
     if (!result.len) sope__buf_appends(&result, "(no output)");
@@ -349,4 +353,34 @@ static void child_closed(sope_task *task)
     sope__buf_free(&result);
     sope__agent_free_memory(child);
     sope__pool_release();
+}
+
+int sope_subagent_cancel(sope_agent_t *a, uint64_t agent_id, const char *note, size_t len)
+{
+    sope_agent_t *c;
+    char *copy;
+
+    if (!a || (!note && len)) return sope__set_error(SOPE_EINVAL, "sope_subagent_cancel: agent or note is NULL");
+    if (!(copy = malloc(len + 1))) return sope__set_error(SOPE_ENOMEM, "sope_subagent_cancel: out of memory");
+    if (len) memcpy(copy, note, len);
+    copy[len] = '\0';
+
+    pthread_mutex_lock(a->mu);
+    for (c = a->root->children; c; c = c->sibling)
+        if (agent_id && c->agent_id == agent_id) break;
+    if (!c) {
+        pthread_mutex_unlock(a->mu);
+        free(copy);
+        return sope__set_error(SOPE_ENOTFOUND, "sope_subagent_cancel: no subagent %llu is running", (unsigned long long)agent_id);
+    }
+    if (!c->closing) { /* a second stop keeps the first note */
+        c->stop_note = copy;
+        copy = NULL;
+        c->closing = 1;
+        if (c->active_turn) c->cancel_requested = 1;
+        sope__task_wake(&c->task); /* under the lock: child_closed frees c once it is unlinked */
+    }
+    pthread_mutex_unlock(a->mu);
+    free(copy);
+    return SOPE_OK;
 }

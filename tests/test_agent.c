@@ -562,6 +562,42 @@ static void test_cancel_reaches_subagents(void)
     sope_agent_free(a);
 }
 
+static void test_cancel_one_subagent(void)
+{
+    sope_agent_t *a = new_agent("0");
+    turn_log log = { 0 };
+    sope_event_t ev;
+    uint64_t calls[2] = { 0 }, agents[2] = { 0 };
+    size_t n = 0;
+    static const char msg[] = "!agent !echo stays | !echo goes";
+    static const char note[] = "look in src/ instead";
+
+    CHECK(sope_send(a, msg, sizeof msg - 1, NULL) == SOPE_OK);
+    while (n < 2 && next_event(a, &ev) == 1) {
+        if (ev.type == SOPE_EVENT_SUBAGENT_START) log.sub_starts++;
+        if (ev.type == SOPE_EVENT_TOOL_CALL && ev.agent_id) {
+            calls[n] = ev.call_id;
+            agents[n++] = ev.agent_id;
+        }
+    }
+    CHECK(n == 2 && agents[0] != agents[1]);
+    size_t goes = 0, stays = 1; /* either child: both wait on a host tool */
+    CHECK(sope_subagent_cancel(a, 0, NULL, 0) == SOPE_ENOTFOUND);
+    CHECK(sope_subagent_cancel(a, 12345, NULL, 0) == SOPE_ENOTFOUND);
+    CHECK(sope_subagent_cancel(NULL, agents[goes], NULL, 0) == SOPE_EINVAL);
+    CHECK(sope_subagent_cancel(a, agents[goes], note, sizeof note - 1) == SOPE_OK);
+    CHECK(sope_subagent_cancel(a, agents[goes], "again", 5) == SOPE_OK); /* the first note stays */
+    CHECK(sope_tool_result(a, calls[stays], 0, "child complete", 14) == SOPE_OK);
+    CHECK(drain_turn(a, &log, 0) == 0);
+    CHECK(log.stop == SOPE_STOP_END_TURN); /* the parent went on */
+    CHECK(log.sub_starts == 2 && log.sub_ends == 2 && log.sub_cancelled == 1);
+    CHECK(strstr(log.text, "child complete") != NULL);
+    CHECK(strstr(log.text, "The user stopped this subagent. Their note: look in src/ instead") != NULL);
+    CHECK(strstr(log.text, "again") == NULL);
+    CHECK(sope_subagent_cancel(a, agents[stays], NULL, 0) == SOPE_ENOTFOUND); /* gone with its turn */
+    sope_agent_free(a);
+}
+
 static void test_custom_subagent(void)
 {
     sope_agent_t *a = new_agent("0");
@@ -881,6 +917,7 @@ int main(void)
     test_parallel_subagents();
     test_subagent_calls_host_tool();
     test_cancel_reaches_subagents();
+    test_cancel_one_subagent();
     test_custom_subagent();
     test_free_with_running_subagents();
     test_manual_compact();

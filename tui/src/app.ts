@@ -11,9 +11,8 @@
 //
 //   ✻ Thought for 2.1s
 //   ● assistant reply …
-//   ◆ agent · general-purpose  explain thread pools
-//     ● read  src/pool.c
-//     ⎿ report …
+//   ◆ agent · general-purpose  explain thread pools          12s · 7 tools
+//                                    (one row; a click shows its calls and report)
 //
 //   ⠉⠉ Thinking… (1m 4s · 38 tok/s · tip: …)  (while a turn runs: a
 //                                                    meteor circles a one-row square)
@@ -21,7 +20,8 @@
 //   › input                         (or a popup in its place: the permission
 //   ───────────────────────────────  prompt, the permission modes, the models,
 //                                    the search bar; see ui/popup.ts)
-//     ◈ Approve for me                 (and short notices after it)   glm-5.3 · 42.1k / 200k
+//     ◈ Approve for me · ⠋ 2 agents · ◑ 1 shell   (what runs in the background,
+//                       then short notices: ui/tasks.ts)            glm-5.3 · 42.1k / 200k
 //
 // What a popup, the session list, a command or the editor does with a key
 // is theirs to decide; the app routes input, owns the layout and the state
@@ -59,6 +59,7 @@ import { copyToClipboard, Selection } from "./ui/selection";
 import { SessionList } from "./ui/sessions";
 import { drawStatus, tipAt } from "./ui/status";
 import { ALL_SESSIONS, drawTabs, NEW_TAB, TAB_ROWS, type TabHit, type TabInfo } from "./ui/tabs";
+import { drawTaskSummary, TaskPanel } from "./ui/tasks";
 import { stringWidth, truncate } from "./unicode/width";
 import { Workspace } from "./workspace";
 
@@ -67,6 +68,7 @@ const PROMPT = "› ";
 const MAX_INPUT_ROWS = 8;
 const ESC_TIMEOUT_MS = 25;
 const TICK_MS = 50; // animation frame rate while anything runs
+const SHELL_TICK_MS = 1000; // while only background shells run: notice when they exit
 const MAX_TABS = 5; // sessions shown as tabs; the rest are a click on ⋯ away
 
 const MODE_COLOR: Record<PermissionMode, number> = { ask: palette.muted, auto: palette.muted, full: palette.error };
@@ -119,6 +121,7 @@ export class App {
   #hoverStarted = 0;
   #hover: number | null = null; // tab bar item under the pointer
   #modeHit = { x0: 0, x1: 0 }; // the mode in the footer: a click opens the popup
+  #tasksHit: { x0: number; x1: number } | null = null; // the task summary in the footer: a click opens the panel
 
   #showThinking = false;
   #showTrace = false;
@@ -265,6 +268,7 @@ export class App {
     openModes: () => (app.#popup = app.#modePicker()),
     openEffort: () => (app.#popup = app.#effortPicker()),
     openSearch: (query) => app.#openSearch(query),
+    openTasks: () => app.#openTasks(),
     setEffort: (effort) => app.#setEffort(effort),
     setMode: (mode) => app.#setMode(mode),
     toggleThinking: () => {
@@ -406,6 +410,10 @@ export class App {
       case "ctrl+f":
       case "super+f": // cmd+f, when the terminal passes it on (Ghostty: keybind = super+f=unbind)
         return this.#openSearch();
+      case "down":
+        // Below an empty input there is nothing to move to but the tasks.
+        if (!e.text && !e.browsingHistory && (s.agents.length || s.shells().length)) return this.#openTasks();
+        break;
       case "pageup":
         return s.chat.scrollBy(s.chat.pageSize);
       case "pagedown":
@@ -458,6 +466,8 @@ export class App {
       if (ev.action === "press") this.#handleKey("enter");
       return;
     }
+    const tasks = this.#tasksHit;
+    if (ev.action === "press" && ev.button === 0 && tasks && ev.y === this.#term.rows - 1 && ev.x >= tasks.x0 && ev.x < tasks.x1) return this.#openTasks();
     if (ev.action === "press" && ev.button === 0 && ev.y === this.#term.rows - 1 && ev.x >= this.#modeHit.x0 && ev.x < this.#modeHit.x1) {
       this.#popup = this.#popup instanceof ModePicker ? null : this.#modePicker();
       return;
@@ -571,6 +581,12 @@ export class App {
     this.#flash(`attached [Image #${n}] ${describeImage(img)}`);
   }
 
+  /** ↓, /tasks, a click on the footer's task summary: the task panel takes the input's place. */
+  #openTasks(): void {
+    if (this.#popup instanceof SearchBar) this.#popup.chat.endSearch(false);
+    this.#popup = new TaskPanel(() => this.#session, (text) => this.#flash(text, 3000));
+  }
+
   /** ctrl+f, /find: the search bar takes the input's place; ctrl+f in it edits the query. */
   #openSearch(query = ""): void {
     if (this.#popup instanceof SearchBar) this.#popup.chat.endSearch(false);
@@ -665,7 +681,8 @@ export class App {
   /** Slow border breathing only keeps the timer alive while its bubble is visible. */
   #tick(on: boolean): void {
     const fast = on || (this.#hover !== null && this.#hover >= 0);
-    const interval = this.#quitting ? 0 : fast ? TICK_MS : this.#session.chat.hasVisibleAnimation ? 100 : 0;
+    const shells = this.#tabs.sessions.some((s) => s.shells().some((sh) => sh.running));
+    const interval = this.#quitting ? 0 : fast ? TICK_MS : this.#session.chat.hasVisibleAnimation ? 100 : shells ? SHELL_TICK_MS : 0;
     if (interval === this.#tickInterval) return;
     if (this.#ticker) clearInterval(this.#ticker);
     this.#tickInterval = interval;
@@ -731,7 +748,7 @@ export class App {
       drawBox(buf, PAD, ruleTopY, inner, inputRows + 2, palette.faint);
       this.#drawInput(buf, inputY, inputRows, layout, promptWidth);
     }
-    this.#drawFooter(buf, footerY, inner);
+    this.#drawFooter(buf, footerY, inner, t0);
     if (this.#list) {
       s.chat.resetInteractions();
       this.#renderer.image = null;
@@ -812,8 +829,8 @@ export class App {
     this.#renderer.cursor = { x: x + layout.cursorCol, y: y + layout.cursorRow, visible: true };
   }
 
-  /** The permission mode, then a notice when there is one; on the right, the model and how full the context is. */
-  #drawFooter(buf: CellBuffer, y: number, inner: number): void {
+  /** The permission mode, what runs in the background, then a notice when there is one; on the right, the model and how full the context is. */
+  #drawFooter(buf: CellBuffer, y: number, inner: number, now: number): void {
     const s = this.#session;
     const left = PAD + 2;
     const usage = s.context ? `${formatTokens(s.context)}${s.contextWindow ? ` / ${formatTokens(s.contextWindow)}` : ""}` : "";
@@ -830,6 +847,9 @@ export class App {
     let x = buf.text(left, y, `${MODE_ICON[this.#mode]} `, { fg: MODE_COLOR[this.#mode] }, end);
     x = buf.text(x, y, modeLabel(this.#mode), { fg: MODE_COLOR[this.#mode] }, end);
     this.#modeHit = { x0: left, x1: x };
+    const spin = SPINNER[Math.floor(now / SPINNER_MS) % SPINNER.length]!;
+    this.#tasksHit = drawTaskSummary(buf, x, y, end, s, spin, now);
+    if (this.#tasksHit) x = this.#tasksHit.x1;
     if (this.#notice && end - x - 2 > 0) buf.text(x + 2, y, truncate(this.#notice, end - x - 2), { fg: palette.tool });
   }
 }

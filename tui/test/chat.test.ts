@@ -187,13 +187,20 @@ test("short and streaming tool results have no folding targets", () => {
 test("fold state is per message and subagent results support the same interaction", () => {
   const chat = new ChatView();
   chat.add({ role: "tool", text: output(8) });
-  const agent = chat.add({ role: "subagent", text: output(9), steps: [{ name: "read", detail: "file", done: true }] });
+  const agent = chat.add({ role: "subagent", title: "general", text: output(9), steps: [{ name: "read", detail: "file", done: true }] });
   let buf = render(chat);
-  expect(row(buf, 19)).toContain("… 3 more lines");
-  expect(chat.toggleAt(5, 19)).toBe(true);
+  // Folded: one row. A click on it shows its tool calls and the whole report.
+  expect(row(buf, 11)).toContain("agent · general");
+  expect(rows(buf).slice(12).join("\n").trim()).toBe("");
+  expect(chat.toggleAt(5, 11)).toBe(true);
   buf = render(chat);
   expect(row(buf, 9)).toContain("… 2 more lines");
+  expect(row(buf, 12)).toContain("● read  file");
+  expect(row(buf, 13)).toContain("⎿ output 1");
   expect(rows(buf).join("\n")).toContain("output 9");
+  expect(chat.toggleAt(5, 15)).toBe(true); // anywhere in it folds it again
+  expect(rows(render(chat)).slice(12).join("\n").trim()).toBe("");
+  chat.toggleAt(5, 11);
   chat.update(agent, { text: output(10) });
   expect(rows(render(chat)).join("\n")).toContain("output 10");
 });

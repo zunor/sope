@@ -178,7 +178,7 @@ static sope_next tool_bash_output(tool_run *r)
     sope_agent_t *root = r->agent->root;
     sope_buf fresh = { 0 };
     bg_shell *sh;
-    int status, done;
+    int status, done, stopped;
 
     pthread_mutex_lock(r->agent->mu); /* lock order: agent, then proc.c */
     for (sh = root->shells; sh; sh = sh->next)
@@ -188,6 +188,7 @@ static sope_next tool_bash_output(tool_run *r)
         return sope__run_fail(r, "There is no background shell %u.", (unsigned)id);
     }
     done = sope__proc_done(sh->proc, &status);
+    stopped = sh->stopped;
     sh->read_pos = sope__proc_read(sh->proc, sh->read_pos, BASH_MAX_OUTPUT, &fresh);
     int archived = sope__proc_archive(sh->proc, &r->out);
     if (!archived) sope__storage_fail_locked(r->agent, "Background output archive failed; verify the command outcome before recovery.");
@@ -196,7 +197,9 @@ static sope_next tool_bash_output(tool_run *r)
 
     sope__buf_sanitize(&fresh, 0);
 
-    if (done)
+    if (done && stopped)
+        sope__buf_appendf(&r->out, "Shell %u was stopped by the user.\n", (unsigned)id);
+    else if (done)
         sope__buf_appendf(&r->out, "Shell %u exited with code %d.\n", (unsigned)id, status);
     else
         sope__buf_appendf(&r->out, "Shell %u is running.\n", (unsigned)id);
@@ -237,6 +240,74 @@ static sope_next tool_bash_kill(tool_run *r)
         sope__buf_appendf(&r->out, "Killed shell %u (%s).", (unsigned)id, sh->command);
     shell_free(sh);
     return sope__run_done(r);
+}
+
+#define SHELL_TAIL 512
+
+int sope_agent_shells(sope_agent_t *a, const char **json, size_t *len)
+{
+    sope_buf b = { 0 }, tail = { 0 };
+    bg_shell *sh, **order = NULL;
+    size_t n = 0, i;
+
+    if (!a || !json) return sope__set_error(SOPE_EINVAL, "sope_agent_shells: agent or json is NULL");
+    pthread_mutex_lock(a->mu); /* lock order: agent, then proc.c */
+    for (sh = a->root->shells; sh; sh = sh->next) n++;
+    if (n && !(order = malloc(n * sizeof *order))) b.oom = 1;
+    i = n;
+    if (order)
+        for (sh = a->root->shells; sh; sh = sh->next) order[--i] = sh; /* the list is newest first */
+    sope__buf_appends(&b, "[");
+    for (i = 0; order && i < n; i++) {
+        int status, done = sope__proc_done(order[i]->proc, &status);
+        const char *t;
+        size_t skip = 0;
+        tail.len = 0;
+        uint64_t total = sope__proc_tail(order[i]->proc, SHELL_TAIL, &tail);
+        if (tail.oom) b.oom = 1;
+        while (skip < tail.len && ((unsigned char)tail.ptr[skip] & 0xc0) == 0x80) skip++; /* a cut character */
+        sope__buf_sanitize(&tail, skip);
+        t = tail.len > skip ? tail.ptr + skip : "";
+        sope__buf_appendf(&b, "%s{\"id\":%u,\"command\":", i ? "," : "", (unsigned)order[i]->id);
+        sope__buf_append_json_string(&b, order[i]->command, strlen(order[i]->command));
+        sope__buf_appendf(&b, ",\"running\":%s,\"exit_code\":", done ? "false" : "true");
+        if (done) sope__buf_appendf(&b, "%d", status);
+        else sope__buf_appends(&b, "null");
+        sope__buf_appendf(&b, ",\"stopped\":%s,\"output_bytes\":%llu,\"tail\":", order[i]->stopped ? "true" : "false",
+                          (unsigned long long)total);
+        sope__buf_append_json_string(&b, t, strlen(t));
+        sope__buf_appends(&b, "}");
+    }
+    sope__buf_appends(&b, "]");
+    free(order);
+    sope__buf_free(&tail);
+    if (b.oom) {
+        pthread_mutex_unlock(a->mu);
+        sope__buf_free(&b);
+        return sope__set_error(SOPE_ENOMEM, "sope_agent_shells: out of memory");
+    }
+    free(a->history_json);
+    a->history_json = b.ptr;
+    *json = b.ptr;
+    if (len) *len = b.len;
+    pthread_mutex_unlock(a->mu);
+    return SOPE_OK;
+}
+
+int sope_shell_stop(sope_agent_t *a, uint32_t shell_id)
+{
+    bg_shell *sh;
+    if (!a) return sope__set_error(SOPE_EINVAL, "sope_shell_stop: agent is NULL");
+    pthread_mutex_lock(a->mu);
+    for (sh = a->root->shells; sh; sh = sh->next)
+        if (sh->id == shell_id) break;
+    if (sh) {
+        int status;
+        if (!sope__proc_done(sh->proc, &status)) sh->stopped = 1;
+        sope__proc_kill(sh->proc);
+    }
+    pthread_mutex_unlock(a->mu);
+    return sh ? SOPE_OK : sope__set_error(SOPE_ENOTFOUND, "sope_shell_stop: there is no background shell %u", (unsigned)shell_id);
 }
 
 void sope__shells_free(sope_agent_t *root)

@@ -201,6 +201,8 @@ int sope__proc_killed(sope_proc *p);
  * dropped is marked) and returns the offset of the end. */
 uint64_t sope__proc_output(sope_proc *p, uint64_t from, sope_buf *out);
 uint64_t sope__proc_read(sope_proc *p, uint64_t from, size_t limit, sope_buf *out);
+/* Appends the end of the output kept in memory, at most limit bytes; returns the total. */
+uint64_t sope__proc_tail(sope_proc *p, size_t limit, sope_buf *out);
 int sope__proc_archive(sope_proc *p, sope_buf *out);
 void sope__proc_set_wake(sope_proc *p, sope_task *wake);
 /* Kills the process group. */

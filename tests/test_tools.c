@@ -486,9 +486,37 @@ static void test_background_shell(void)
     run(a, "!bash_output {\"shell_id\":\"1\"}", &log, NO_ANSWER, NULL);
     CHECK(log.is_error[0] && strstr(log.result[0], "no background shell 1"));
 
+    /* The host lists shells and stops one; the model hears it was the user. */
+    const char *json = NULL;
+    size_t len = 0;
+    int i;
+    run(a, "!bash {\"command\":\"echo h\303\251llo; sleep 30\",\"run_in_background\":true}", &log, NO_ANSWER, NULL);
+    CHECK(strstr(log.result[0], "shell 2"));
+    for (i = 0; i < 50; i++) { /* until its output arrived */
+        CHECK(sope_agent_shells(a, &json, &len) == SOPE_OK);
+        if (strstr(json, "\"output_bytes\":0")) usleep(20000);
+        else break;
+    }
+    CHECK(json && json[0] == '[' && len == strlen(json));
+    CHECK(strstr(json, "{\"id\":2,\"command\":\"echo h") && strstr(json, "\"running\":true,\"exit_code\":null,\"stopped\":false"));
+    CHECK(strstr(json, "\"tail\":\"h\303\251llo\\n\"") != NULL);
+    CHECK(sope_shell_stop(a, 2) == SOPE_OK);
+    CHECK(sope_shell_stop(a, 99) == SOPE_ENOTFOUND);
+    for (i = 0; i < 100; i++) {
+        CHECK(sope_agent_shells(a, &json, &len) == SOPE_OK);
+        if (strstr(json, "\"running\":true")) usleep(20000);
+        else break;
+    }
+    CHECK(strstr(json, "\"running\":false") && strstr(json, "\"stopped\":true"));
+    run(a, "!bash_output {\"shell_id\":\"2\"}", &log, NO_ANSWER, NULL);
+    CHECK(strstr(log.result[0], "Shell 2 was stopped by the user."));
+    CHECK(sope_agent_shells(NULL, &json, &len) == SOPE_EINVAL);
+
     /* Freeing the agent kills what is still running. */
     run(a, "!bash {\"command\":\"sleep 60\",\"run_in_background\":true}", &log, NO_ANSWER, NULL);
-    CHECK(strstr(log.result[0], "shell 2"));
+    CHECK(strstr(log.result[0], "shell 3"));
+    CHECK(sope_agent_shells(a, &json, &len) == SOPE_OK);
+    CHECK(strstr(json, "\"id\":2") < strstr(json, "\"id\":3")); /* oldest first */
     sope_agent_free(a);
 }
 

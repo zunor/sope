@@ -112,6 +112,7 @@ typedef struct bg_shell { /* bash run_in_background */
     char *command;
     sope_proc *proc;
     uint64_t read_pos; /* output offset bash_output has returned up to */
+    int stopped;       /* sope_shell_stop: the user stopped it */
 } bg_shell;
 
 typedef struct turn_state {
@@ -203,6 +204,7 @@ struct sope_agent {
     msg_node *in_head, *in_tail;
     struct sope_agent *children; /* live subagents of the running turn */
     struct sope_agent *sibling;
+    char *stop_note;     /* subagents: sope_subagent_cancel stopped it, with this note ("" for none) */
     tool_run *runs;      /* built-in tool calls running for the current turn */
     file_state *files;   /* what read/write/edit have seen; edits require a fresh read */
     char **tool_filter;  /* subagents: tools their type allows; NULL: all */

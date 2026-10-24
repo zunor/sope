@@ -100,6 +100,20 @@ export interface ContextUsage {
   largest: Array<{ name: string; input?: string; tokens: number }>;
 }
 
+/** A background shell (bash with run_in_background), as sope_agent_shells reports it. */
+export interface Shell {
+  id: number;
+  command: string;
+  running: boolean;
+  /** null while it runs. */
+  exit_code: number | null;
+  /** stopShell() stopped it. */
+  stopped: boolean;
+  output_bytes: number;
+  /** The end of its output, at most 512 bytes. */
+  tail: string;
+}
+
 const STOP_REASONS: StopReason[] = ["end_turn", "cancelled", "error"];
 const LOG_LEVELS: LogLevel[] = ["debug", "info", "warn", "error"];
 
@@ -272,6 +286,29 @@ export class Agent {
 
   cancel(): void {
     check(C().sope_cancel(this.#ptr()), "sope_cancel");
+  }
+
+  /**
+   * Stops one running subagent (agentId: the callId of its "subagent_start")
+   * and lets the parent turn go on. The note tells the model why, or what to
+   * do instead. Throws SOPE_ENOTFOUND once it is no longer running.
+   */
+  cancelSubagent(agentId: number, note = ""): void {
+    const bytes = encoder.encode(note);
+    check(C().sope_subagent_cancel(this.#ptr(), agentId, bytes.length ? bytes : EMPTY, bytes.length), "sope_subagent_cancel");
+  }
+
+  /** The background shells, oldest first; they outlive turns until stopped. */
+  shells(): Shell[] {
+    const ptr = new BigUint64Array(1);
+    const len = new BigUint64Array(1);
+    check(C().sope_agent_shells(this.#ptr(), ptr, len), "sope_agent_shells");
+    return JSON.parse(readString(Number(ptr[0]), Number(len[0]))) as Shell[];
+  }
+
+  /** Stops a background shell and everything it started. */
+  stopShell(id: number): void {
+    check(C().sope_shell_stop(this.#ptr(), id), "sope_shell_stop");
   }
 
   /** Forgets the conversation history from the next turn on. */

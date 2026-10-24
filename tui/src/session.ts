@@ -7,7 +7,7 @@
 // journals own admitted inputs, checkpoints and outcomes, including mid-turn.
 // A restored session opens its journal on first use and waits for /recover.
 
-import { Agent, type ContextUsage, type SopeEvent } from "sope";
+import { Agent, type ContextUsage, type Shell, type SopeEvent } from "sope";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { AgentBridge } from "./agent/bridge";
@@ -41,6 +41,14 @@ export interface Approval {
 }
 
 type ToolTarget = { msg: Message } | { sub: Message; step: Step };
+
+/** How often the task strip and panel ask libsope about background shells. */
+const SHELL_POLL_MS = 500;
+
+/** A background shell, and when this session first saw it (performance.now()). */
+export interface ShellTask extends Shell {
+  seenAt: number;
+}
 
 export const UNTITLED = "New session";
 const TITLE_MAX = 40;
@@ -96,6 +104,11 @@ export class Session {
   #thinking = new Map<number, Message>(); // turn id → reasoning being streamed
   #toolCalls = new Map<number, ToolTarget>(); // call id → where its result goes
   #subagents = new Map<number, Message>(); // spawning call id (= agent id) → subagent message
+  #agents: Message[] = []; // the subagents of the latest turn that launched any, running or not
+  #agentsTurn = 0;
+  #shellsSeen = false; // a bash call went to the background: worth asking libsope about shells
+  #shells: ShellTask[] = [];
+  #shellsAt = -Infinity;
 
   constructor(
     config: Config,
@@ -280,6 +293,54 @@ export class Session {
     this.trace.call("sope_cancel", "");
   }
 
+  /** Stops one running subagent; the note tells the model why. False if it is no longer running. */
+  stopSubagent(agentId: number, note = ""): boolean {
+    const m = this.#subagents.get(agentId);
+    if (!m || !this.#bridge) return false;
+    try {
+      this.#bridge.agent.cancelSubagent(agentId, note);
+    } catch (err) {
+      this.trace.note((err as Error).message); // it finished meanwhile
+      return false;
+    }
+    this.trace.call("sope_subagent_cancel", `a${agentId}${note ? ` ${JSON.stringify(note)}` : ""}`);
+    this.chat.update(m, { stopped: true });
+    return true;
+  }
+
+  /** The subagents of the latest turn that launched any, oldest first. */
+  get agents(): readonly Message[] {
+    return this.#agents;
+  }
+
+  /** The background shells, oldest first; asked for at most every SHELL_POLL_MS. */
+  shells(now = performance.now()): readonly ShellTask[] {
+    if (!this.#shellsSeen || !this.#bridge) return this.#shells;
+    if (now - this.#shellsAt < SHELL_POLL_MS) return this.#shells;
+    this.#shellsAt = now;
+    try {
+      const seen = new Map(this.#shells.map((sh) => [sh.id, sh.seenAt]));
+      this.#shells = this.#bridge.agent.shells().map((sh) => ({ ...sh, seenAt: seen.get(sh.id) ?? now }));
+    } catch (err) {
+      this.trace.note((err as Error).message);
+    }
+    return this.#shells;
+  }
+
+  /** Stops a background shell and what it started. */
+  stopShell(id: number): boolean {
+    if (!this.#bridge) return false;
+    try {
+      this.#bridge.agent.stopShell(id);
+    } catch (err) {
+      this.trace.note((err as Error).message); // bash_kill got there first
+      return false;
+    }
+    this.trace.call("sope_shell_stop", `shell ${id}`);
+    this.#shellsAt = -Infinity;
+    return true;
+  }
+
   compact(focus: string): void {
     const turnId = this.#agent.compact(focus);
     this.#openTurns.add(turnId);
@@ -326,6 +387,7 @@ export class Session {
   reset(): void {
     this.#agent.reset();
     this.chat.clear();
+    this.#agents = [];
     this.context = 0;
     this.title = UNTITLED;
     this.#history = "[]";
@@ -516,9 +578,13 @@ export class Session {
           turnId: ev.turnId,
           startedAt: performance.now(),
           steps: [],
-          tail: "",
+          agentId: ev.callId,
+          tokens: 0,
         });
         this.#subagents.set(ev.callId, msg);
+        if (ev.turnId !== this.#agentsTurn) this.#agents = [];
+        this.#agentsTurn = ev.turnId;
+        this.#agents.push(msg);
         return;
       }
       case "subagent_end": {
@@ -575,9 +641,6 @@ export class Session {
   #onSubagentEvent(ev: Exclude<SopeEvent, { type: "closed" }>): void {
     const sub = this.#subagents.get(ev.agentId);
     switch (ev.type) {
-      case "text_delta":
-        if (sub) this.chat.update(sub, { tail: ((sub.tail ?? "") + ev.text).slice(-400) });
-        return;
       case "tool_call":
       case "tool_start": {
         if (!sub) {
@@ -585,7 +648,7 @@ export class Session {
           return;
         }
         const step: Step = { name: ev.name, detail: describeCall(ev.name, parseInput(ev.input)), done: false };
-        this.chat.update(sub, { steps: [...(sub.steps ?? []), step], tail: "" });
+        this.chat.update(sub, { steps: [...(sub.steps ?? []), step] });
         this.#toolCalls.set(ev.callId, { sub, step });
         if (ev.type === "tool_call") this.#runner!.run(ev.callId, ev.turnId, ev.name, ev.input, ev.agentId);
         return;
@@ -601,6 +664,7 @@ export class Session {
       case "usage":
         this.tokens.in += ev.inputTokens;
         this.tokens.out += ev.outputTokens;
+        if (sub) this.chat.update(sub, { tokens: (sub.tokens ?? 0) + ev.inputTokens + ev.outputTokens });
         return;
       case "error":
         this.chat.add({ role: "error", text: `subagent ${sub?.title ?? ev.agentId}: ${ev.message}` });
@@ -629,6 +693,10 @@ export class Session {
   }
 
   #onToolEnd(callId: number, name: string, result: string, isError: boolean): void {
+    if (name.startsWith("bash")) {
+      if (!isError && result.startsWith("Started in the background")) this.#shellsSeen = true;
+      this.#shellsAt = -Infinity; // bash_output and bash_kill change them too
+    }
     const target = this.#toolCalls.get(callId);
     this.#dropApproval(callId);
     if (!target) return;

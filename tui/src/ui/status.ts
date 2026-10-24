@@ -33,6 +33,7 @@ export const TIPS = [
   "pgup/pgdn or the wheel scroll the transcript",
   "shift+tab switches who approves edits and commands",
   "alt+m or /model picks another model",
+  "↓ on an empty input shows subagents and background shells",
 ];
 
 /** 4s, 2m 4s, 1h 2m. */

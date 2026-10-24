@@ -189,6 +189,7 @@ void sope__agent_free_memory(sope_agent_t *a)
     free(a->tool_filter);
     free(a->history_json);
     free(a->context_json);
+    free(a->stop_note);
     while (a->in_head) {
         msg_node *m = a->in_head;
         a->in_head = m->next;

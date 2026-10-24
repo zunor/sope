@@ -6,8 +6,9 @@ import type { CellBuffer, Style } from "../render/buffer";
 import { mix } from "../render/color";
 import { palette, surfaces, type Surfaces } from "../theme";
 import { stringWidth, truncate } from "../unicode/width";
-import { contextRows, type ContextReport } from "./context";
+import { contextRows, formatTokens, type ContextReport } from "./context";
 import { renderMarkdown, slice } from "./markdown";
+import { formatElapsed } from "./status";
 import { wrapText } from "./wrap";
 
 export type Role = "user" | "assistant" | "thinking" | "tool" | "subagent" | "error" | "info" | "context";
@@ -33,9 +34,12 @@ export interface Message {
   ok?: boolean;
   startedAt?: number;
   endedAt?: number;
-  /** Subagents: their tool calls, and the tail of their streaming text. */
+  /** Subagents: their tool calls. */
   steps?: Step[];
-  tail?: string;
+  /** Subagents: the agent id their events carry, the tokens they spent, whether the user stopped them. */
+  agentId?: number;
+  tokens?: number;
+  stopped?: boolean;
   /** /context: what it measured; laid out again at each width. */
   context?: ContextReport;
   version: number;
@@ -90,7 +94,6 @@ interface Line {
 const GUTTER = 2;
 const RESULT_LINES = 6;
 const THINKING_TAIL = 3;
-const SUBAGENT_STEPS = 5;
 const USER_BORDER_BREATH_MS = 6000;
 
 const blank: Span = { text: "  ", style: {} };
@@ -160,6 +163,11 @@ function resultLines(text: string, width: number, ok: boolean | undefined, expan
   ];
 }
 
+/** The first foldRow a folded block hides: a search hit there unfolds it. */
+const hiddenFrom = (m: Message) => (m.role === "subagent" ? 1 : RESULT_LINES);
+/** The foldRow of the row that unfolds a folded block: its "more lines" label, or a subagent's title. */
+const controlRow = (m: Message) => (m.role === "subagent" ? 0 : RESULT_LINES);
+
 /** One-line summary of a tool input: the lone string value if there is one, else compact JSON. */
 export function summarizeInput(input: string | undefined): string {
   if (!input) return "";
@@ -174,6 +182,57 @@ export function summarizeInput(input: string | undefined): string {
   } catch {
     return input.replace(/\s+/g, " ");
   }
+}
+
+/** What a subagent block says at the right of its title: 12s · 7 tools · 3.1k tok · stopped. */
+export function agentMeta(m: Message, now = performance.now()): string {
+  const parts = [formatElapsed((m.endedAt ?? now) - (m.startedAt ?? now))];
+  const n = m.steps?.length ?? 0;
+  if (n) parts.push(`${n} tool${n === 1 ? "" : "s"}`);
+  if (m.tokens) parts.push(`${formatTokens(m.tokens)} tok`);
+  if (m.stopped) parts.push("stopped");
+  else if (!m.streaming && m.ok === false) parts.push("failed");
+  return parts.join(" · ");
+}
+
+/** A subagent's title and task, with agentMeta at the right edge when there is room. */
+function agentTitle(m: Message, width: number, part: number): Line {
+  const title = `agent · ${m.title ?? ""}`;
+  const meta = agentMeta(m);
+  const metaWidth = stringWidth(meta);
+  const fits = width - stringWidth(title) - metaWidth - 4 >= 8;
+  const line = titleLine(title, palette.accent, m.detail ?? "", fits ? width - metaWidth - 2 : width, part);
+  if (fits) {
+    const used = line.spans.reduce((n, span) => n + stringWidth(span.text), 0);
+    line.spans.push({ text: " ".repeat(Math.max(2, width - used - metaWidth)), style: {} }, { text: meta, style: { fg: m.stopped || m.ok === false ? palette.error : palette.faint } });
+  }
+  return line;
+}
+
+/** One tool call of a subagent: ○ while it runs, ● once done, ✕ if it failed; `part` and `part + 1` are searchable. */
+function stepLine(s: Step, width: number, part: number): Line {
+  const glyph = !s.done ? "○" : s.ok === false ? "✕" : "●";
+  const line: Line = {
+    spans: [
+      blank,
+      { text: `${glyph} `, style: { fg: s.ok === false ? palette.error : palette.tool } },
+      { text: s.name, style: { fg: palette.tool } },
+    ],
+    src: [{ part, text: s.name, start: 0, end: s.name.length, x: 4 }],
+  };
+  if (s.detail) {
+    const { span, src } = rowText(s.detail, Math.max(0, width - s.name.length - 6), { fg: palette.muted }, part + 1, 4 + stringWidth(s.name), "  ");
+    line.spans.push(span);
+    line.src!.push(src);
+  }
+  return line;
+}
+
+/** A finished subagent, unfolded: every tool call it made, then its report. */
+function agentDetailLines(m: Message, width: number, stepsPart: number, part: number): Line[] {
+  const calls = (m.steps ?? []).map((s, i) => stepLine(s, width, stepsPart + 2 * i));
+  const body = textLines(m.text || "(no output)", width, { fg: m.ok === false ? palette.error : palette.muted }, part, [marker, blank]);
+  return [...calls, ...body].map((line, i) => ({ ...line, fold: "body", foldRow: 1 + i }));
 }
 
 function seconds(m: Message): string {
@@ -226,34 +285,16 @@ function linesFor(m: Message, width: number, showThinking: boolean, expanded: bo
       if (!m.streaming) lines.push(...resultLines(m.text, width, m.ok, expanded, part));
       break;
     case "subagent": {
-      lines = [titleLine(`agent · ${m.title ?? ""}`, palette.accent, m.detail ?? "", width, part)];
+      // One row: what it does and how far it got (the task panel shows more).
+      // A finished one unfolds into its tool calls and report on a click.
+      const title = agentTitle(m, width, part);
+      lines = [title];
       part += 2;
-      const steps = m.steps ?? [];
-      if (steps.length > SUBAGENT_STEPS)
-        lines.push({ spans: [blank, { text: `… ${steps.length - SUBAGENT_STEPS} earlier tool calls`, style: { fg: palette.faint } }] });
-      for (const s of steps.slice(-SUBAGENT_STEPS)) {
-        const glyph = !s.done ? "○" : s.ok === false ? "✕" : "●";
-        const line: Line = {
-          spans: [
-            blank,
-            { text: `${glyph} `, style: { fg: s.ok === false ? palette.error : palette.tool } },
-            { text: s.name, style: { fg: palette.tool } },
-          ],
-          src: [{ part: part++, text: s.name, start: 0, end: s.name.length, x: 4 }],
-        };
-        const detail = part++;
-        if (s.detail) {
-          const { span, src } = rowText(s.detail, Math.max(0, width - s.name.length - 6), { fg: palette.muted }, detail, 4 + stringWidth(s.name), "  ");
-          line.spans.push(span);
-          line.src!.push(src);
-        }
-        lines.push(line);
-      }
-      if (m.streaming) {
-        const tail = (m.tail ?? "").trim().split("\n").at(-1) ?? "";
-        lines.push({ spans: [blank, { text: tail ? truncate(tail, width - 2) : `working · ${seconds(m)}`, style: { fg: palette.faint, italic: true } }] });
-      } else {
-        lines.push(...resultLines(m.text, width, m.ok, expanded, part));
+      const stepsPart = part;
+      part += 2 * (m.steps?.length ?? 0); // searchable whether shown or not
+      if (!m.streaming) {
+        Object.assign(title, { fold: "control", foldRow: 0 });
+        if (expanded) lines.push(...agentDetailLines(m, width, stepsPart, part));
       }
       break;
     }
@@ -413,7 +454,7 @@ export class ChatView {
     // Keep the clicked output near the pointer. A row hidden by collapsing
     // maps to the more-lines label instead; opening makes room below it.
     const row = opening ? Math.min(hit.row, Math.floor(this.#height / 2)) : hit.row;
-    this.#foldAnchor = { msg: hit.msg, outputRow: opening ? hit.outputRow : Math.min(hit.outputRow, RESULT_LINES), row };
+    this.#foldAnchor = { msg: hit.msg, outputRow: opening ? hit.outputRow : Math.min(hit.outputRow, controlRow(hit.msg)), row };
     this.#foldHits = []; // a second queued click must not hit the old layout
     return true;
   }
@@ -546,7 +587,7 @@ export class ChatView {
     s.current = hit;
     s.reveal = true;
     const line = this.#searchCache.get(hit.msg)?.lines[hit.line];
-    if (line?.foldRow !== undefined && line.foldRow >= RESULT_LINES) this.#expanded.add(hit.msg);
+    if (line?.foldRow !== undefined && line.foldRow >= hiddenFrom(hit.msg)) this.#expanded.add(hit.msg);
   }
 
   render(buf: CellBuffer, r: Rect, spin: string, now = performance.now(), colors: Surfaces = DEFAULT_SURFACES): void {

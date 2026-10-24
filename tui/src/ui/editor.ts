@@ -207,6 +207,11 @@ export class Editor {
     return text;
   }
 
+  /** Whether ↑/↓ are walking through earlier messages. */
+  get browsingHistory(): boolean {
+    return this.#historyIndex !== -1;
+  }
+
   historyPrev(): void {
     if (!this.#history.length) return;
     if (this.#historyIndex === -1) {

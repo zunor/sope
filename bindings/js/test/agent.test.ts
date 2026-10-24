@@ -106,6 +106,40 @@ test("runs subagents and tags their events", () => {
   expect(text(events)).toContain("`agent` returned: `echo` returned: pong"); // the final message only
 });
 
+test("stops one subagent while its sibling and the parent go on", () => {
+  agent = Agent.create({ "mock.delay_ms": "0" });
+  agent.registerTool({ name: "echo" });
+  agent.send("!agent !echo a | !echo b");
+  const calls: Array<Extract<SopeEvent, { type: "tool_call" }>> = [];
+  while (calls.length < 2) {
+    const ev = agent.poll(2000);
+    if (!ev) throw new Error("timed out waiting for the children");
+    if (ev.type === "tool_call") calls.push(ev);
+  }
+  agent.cancelSubagent(calls[0]!.agentId, "wrong directory");
+  agent.toolResult(calls[1]!.callId, "pong");
+  const events = drainTurn(agent);
+  const ends = events.filter((e) => e.type === "subagent_end");
+  expect(ends.map((e) => (e as { stopReason: string }).stopReason).sort()).toEqual(["cancelled", "end_turn"]);
+  expect(events.at(-1)).toMatchObject({ type: "turn_end", stopReason: "end_turn" });
+  expect(text(events)).toContain("The user stopped this subagent. Their note: wrong directory");
+  expect(() => agent!.cancelSubagent(calls[1]!.agentId)).toThrow(SopeError);
+});
+
+test("lists and stops background shells", async () => {
+  agent = Agent.create({ "mock.delay_ms": "0" });
+  agent.setOption("permissions", "allow");
+  agent.send('!bash {"command":"echo ready; sleep 30","run_in_background":true}');
+  drainTurn(agent);
+  let [shell] = agent.shells();
+  for (let i = 0; i < 50 && shell && !shell.output_bytes; i++, [shell] = agent.shells()) await Bun.sleep(20);
+  expect(shell).toMatchObject({ id: 1, command: "echo ready; sleep 30", running: true, exit_code: null, stopped: false, tail: "ready\n" });
+  agent.stopShell(1);
+  for (let i = 0; i < 100 && agent.shells()[0]!.running; i++) await Bun.sleep(20);
+  expect(agent.shells()[0]).toMatchObject({ running: false, stopped: true });
+  expect(() => agent!.stopShell(9)).toThrow(SopeError);
+});
+
 test("exposes a pollable fd", () => {
   agent = Agent.create();
   expect(agent.fd()).toBeGreaterThan(2);

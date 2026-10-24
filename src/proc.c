@@ -422,6 +422,19 @@ uint64_t sope__proc_output(sope_proc *p, uint64_t from, sope_buf *out)
     return end;
 }
 
+/* The last bytes of output kept in memory, at most limit; returns the total. */
+uint64_t sope__proc_tail(sope_proc *p, size_t limit, sope_buf *out)
+{
+    uint64_t total;
+    pthread_mutex_lock(&R.mu);
+    total = p->total;
+    const sope_buf *b = p->tail.len ? &p->tail : &p->head;
+    size_t n = b->len < limit ? b->len : limit;
+    if (n) sope__buf_append(out, b->ptr + b->len - n, n);
+    pthread_mutex_unlock(&R.mu);
+    return total;
+}
+
 /* Background readers advance only over bytes actually returned. The archive
  * remains seekable after a preview or reader falls behind the in-memory tail. */
 uint64_t sope__proc_read(sope_proc *p, uint64_t from, size_t limit, sope_buf *out)

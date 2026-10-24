@@ -127,6 +127,8 @@ Library invariants:
 
 `sope_cancel` cancels only the **running** turn and its subagents; queued turns are unaffected.
 
+`sope_subagent_cancel` stops a single subagent of the running turn, identified by the `agent_id` its events carry. The parent turn and the other subagents keep running; the parent receives the subagent's result marked as an error, saying the user stopped it and including the optional note and any partial output, so the model can decide what to do next. It returns `SOPE_ENOTFOUND` once that subagent has finished; a second call keeps the first note.
+
 ### 5.1 History compaction
 
 Long conversations are compacted into a checkpoint plus a budgeted suffix of recent original messages. The current system prompt and tool schemas remain part of subsequent requests.
@@ -162,6 +164,8 @@ Every agent comes with tools executed by the library; the host does not need to 
 | `bash_kill` | Stop a background command and all its child processes | No |
 | `web_fetch` | Fetch an HTTP(S) URL: convert HTML to text with headings, lists, and links (page images become `![alt](url)`); return text and JSON unchanged; send image URLs' images directly to the model. Follows redirects; paginate long pages with `offset` (about 40000 bytes per page) | Yes |
 | `todo_write` | Maintain a task list: submit the full list each time, with `content`, `activeForm`, and `status` for each item | No |
+
+Background shells belong to the root agent and outlive turns. Hosts can show and stop them without going through the model: `sope_agent_shells` returns them as a JSON array (id, command, running, exit code, whether the user stopped it, output size and the last 512 bytes of output), and `sope_shell_stop` stops one and its process group. The model's next `bash_output` for that shell reports that the user stopped it.
 
 Full tool descriptions and JSON schemas are next to each tool in `src/tool_*.c`; these are what the model sees.
 

@@ -241,6 +241,29 @@ SOPE_API int sope_tool_register(sope_agent_t *agent, const char *name,
  * message to the parent as the tool result. */
 SOPE_API int sope_subagent_register(sope_agent_t *agent, const char *definition_json, size_t len);
 
+/* Stops one running subagent: agent_id is the call_id of its
+ * SOPE_EVENT_SUBAGENT_START. The parent turn and the other subagents keep
+ * running; the parent gets the subagent's cancelled result, with note
+ * (optional, may be NULL with len 0) added to tell the model why or what
+ * to do instead. SOPE_ENOTFOUND if no such subagent is running. */
+SOPE_API int sope_subagent_cancel(sope_agent_t *agent, uint64_t agent_id, const char *note, size_t len);
+
+/* The background shells (bash with run_in_background) as a JSON array,
+ * oldest first:
+ *   [{"id":1,"command":"bun run dev","running":true,"exit_code":null,
+ *     "stopped":false,"output_bytes":2048,"tail":"ready on :3000\n"}]
+ * exit_code is null while running; stopped is true once
+ * sope_shell_stop stopped it; tail is the end of its output (at most 512
+ * bytes). The string stays valid until the next call of this, history or
+ * context. Shells outlive turns until bash_kill, sope_shell_stop or
+ * sope_agent_free. */
+SOPE_API int sope_agent_shells(sope_agent_t *agent, const char **json, size_t *len);
+
+/* Stops a background shell and every process it started. The model's next
+ * bash_output for it reports that the user stopped it. SOPE_ENOTFOUND if
+ * there is no such shell. */
+SOPE_API int sope_shell_stop(sope_agent_t *agent, uint32_t shell_id);
+
 /* Attaches an image to the next sope_send: the message carries every image
  * attached since the previous one. data is the raw file content (PNG, JPEG,
  * GIF or WebP, at most 10 MiB) and is copied; media_type is "image/png",
