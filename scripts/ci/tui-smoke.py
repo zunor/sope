@@ -39,13 +39,13 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
             except OSError:
                 pass # Linux reports EIO when the PTY slave closes.
 
-    def until(needle, seconds=20):
+    def until(needle, seconds=20, present=True):
         end = time.monotonic() + seconds
         while time.monotonic() < end:
-            if needle in text():
+            if (needle in text()) == present:
                 return
             drain()
-        raise AssertionError(f'Missing {needle}\n{text()}')
+        raise AssertionError(f'Expected {needle!r} present={present}\n{text()}')
 
     try:
         until('You said: hello CI')
@@ -56,7 +56,10 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
         until('Reasoning effort')
         (logs / 'tui-effort.txt').write_text(text())
         os.write(fd, b'\x1b')
-        time.sleep(0.15)
+        # Wait for the actual close before sending more input. If a busy
+        # runner coalesces ESC and /quit, the decoder sees an Alt sequence
+        # and the popup consumes the command instead of closing first.
+        until('Reasoning effort', present=False)
         os.write(fd, b'/quit\r')
         end = time.monotonic() + 10
         while time.monotonic() < end:
