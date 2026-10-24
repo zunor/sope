@@ -324,7 +324,8 @@ void sope__walk_ignores_above(walk *w, const char *dir)
         if (!slash || slash == cur) {
             free(cur);
             cur = NULL;
-            n = 0; /* not inside a repository: only the walk's own files count */
+            /* No repository: skip loading ancestors, but retain the count
+             * so their allocated paths are still freed below. */
             break;
         }
         *slash = '\0';

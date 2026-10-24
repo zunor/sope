@@ -29,7 +29,6 @@ typedef struct {
     int starts, ends, tool_calls, sub_tool_calls, errors, usage;
     int sub_starts, sub_ends, sub_cancelled;
     int sub_end_before_turn_end;
-    double subs_done_at; /* when the last subagent ended */
     int32_t stop;
     uint64_t last_call_id;
     int compacts;
@@ -105,7 +104,6 @@ static int drain_turn(sope_agent_t *a, turn_log *log, int answer_tools)
         case SOPE_EVENT_SUBAGENT_END:
             log->sub_ends++;
             if (ev.code == SOPE_STOP_CANCELLED) log->sub_cancelled++;
-            log->subs_done_at = now_seconds();
             break;
         case SOPE_EVENT_USAGE:
             log->usage++;
@@ -501,16 +499,37 @@ static void test_parallel_subagents(void)
 {
     sope_agent_t *a = new_agent("20");
     turn_log log = { 0 };
-    static const char msg[] = "!agent task one | task two | task three | task four";
-    double start = now_seconds(), elapsed;
+    static const char msg[] = "!agent !echo one | !echo two | !echo three | !echo four";
+    uint64_t calls[4], agents[4];
+    size_t n = 0, i, j;
+    double start = now_seconds();
 
     CHECK(sope_send(a, msg, sizeof msg - 1, NULL) == SOPE_OK);
+    /* With only two worker threads, all four children must reach their
+     * host-tool wait before any result is supplied. This detects serial
+     * execution or pinned workers without a machine-speed threshold. */
+    while (n < 4 && now_seconds() - start < 15) {
+        sope_event_t ev;
+        if (next_event(a, &ev) != 1) break;
+        if (ev.type == SOPE_EVENT_SUBAGENT_START) log.sub_starts++;
+        if (ev.type == SOPE_EVENT_SUBAGENT_END) log.sub_ends++;
+        if (ev.type == SOPE_EVENT_TURN_END && !ev.agent_id) break;
+        if (ev.type == SOPE_EVENT_TOOL_CALL) {
+            CHECK(ev.agent_id != 0);
+            calls[n] = ev.call_id;
+            agents[n++] = ev.agent_id;
+        }
+    }
+    CHECK(n == 4 && log.sub_starts == 4 && log.sub_ends == 0);
+    for (i = 0; i < n; i++) {
+        for (j = 0; j < i; j++) CHECK(agents[i] != agents[j] && calls[i] != calls[j]);
+        CHECK(sope_tool_result(a, calls[i], 0, "child complete", 14) == SOPE_OK);
+    }
+    if (n != 4) CHECK(sope_cancel(a) == SOPE_OK);
     CHECK(drain_turn(a, &log, 0) == 0);
-    elapsed = log.subs_done_at - start;
     CHECK(log.sub_starts == 4 && log.sub_ends == 4);
-    CHECK(strstr(log.text, "You said: task one") && strstr(log.text, "You said: task four"));
-    /* Each subagent streams ~35 chunks x 20 ms; in sequence that is ~3 s. */
-    CHECK(elapsed < 1.5);
+    CHECK(log.stop == SOPE_STOP_END_TURN && log.sub_end_before_turn_end);
+    CHECK(strstr(log.text, "child complete") != NULL);
     sope_agent_free(a);
 }
 

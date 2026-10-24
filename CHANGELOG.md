@@ -2,6 +2,12 @@
 
 The version in `include/sope.h` is authoritative. The library, bindings, and `sope` executable are released together; see [docs/release.md](docs/release.md) for the policy.
 
+## Unreleased
+
+- Fix ancestor-path allocations leaking during file searches outside a Git repository.
+- Add cross-platform CI, sanitizers, credential scanning and installable-package checks.
+- Check subagent concurrency with a host-tool barrier instead of a wall-clock speed threshold.
+
 ## 0.5.0 — 2026-10-24
 
 This release adds context visibility, hardens agent execution, and improves
