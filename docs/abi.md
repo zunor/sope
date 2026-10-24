@@ -269,6 +269,8 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 | `image_model` | Model to switch to when the conversation contains images (for when `model` cannot process them) | Uses `model` |
 | `system` | System prompt | A short built-in prompt |
 | `max_rounds` | Maximum model calls per turn | `32` |
+| `openai.idle_timeout_ms` | Maximum silence during one HTTP attempt; timeout ends the request without replay | `120000` |
+| `openai.request_timeout_ms` | Absolute time budget per model request, including all attempts and retry backoff | `600000` |
 | `harness.max_calls` | All tool admissions per agent/user turn | `128` |
 | `harness.max_searches` | Native grep/glob admissions per agent/user turn | `16` |
 | `harness.max_repeats` | Identical read/program admissions or failed operation results before rejection | `2` |
@@ -511,3 +513,14 @@ into pass/fail claims. Use the archived output and exact invocation to assess
 what actually ran. Raw output has the existing artifact retention policy;
 receipt retention does not delete those archives. Runtime trace remains compact
 metadata, without duplicating commands or output.
+
+
+OpenAI-compatible requests have both an idle deadline (2 minutes by default)
+and an absolute deadline (10 minutes). Values are milliseconds, integers
+1–3600000; invalid values use the defaults. The pool schedules a deadline wake
+without occupying a worker, so a silent stream does not need an outside cancel
+to terminate. Incoming bytes reset idle time; keepalive traffic cannot extend
+the absolute deadline. That deadline includes retry backoff and all attempts
+of the same request. Expiry emits `SOPE_ETIMEOUT` and `provider.timeout`, ends
+the request, and never replays a partial response. Compaction requests have
+their own budgets. These are per-request limits, not a whole-turn time budget.

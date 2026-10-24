@@ -22,6 +22,8 @@ const sse = (chunks: unknown[]) =>
   chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
 const delta = (d: object, finish: string | null = null) => ({ choices: [{ index: 0, delta: d, finish_reason: finish }] });
 
+const heartbeatTimers = new Set<ReturnType<typeof setInterval>>();
+
 beforeAll(() => {
   server = Bun.serve({
     port: 0,
@@ -32,6 +34,21 @@ beforeAll(() => {
         return new Response("overloaded", { status: 503 });
       const body = (await req.json()) as Body;
       requests.push(body);
+      if (new URL(req.url).pathname.startsWith("/stall/")) {
+        const heartbeat = new URL(req.url).pathname.includes("heartbeat");
+        let timer: ReturnType<typeof setInterval> | undefined;
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(delta({ content: "partial" }))}\n\n`));
+            if (heartbeat) {
+              timer = setInterval(() => controller.enqueue(new TextEncoder().encode(": keepalive\n\n")), 15);
+              heartbeatTimers.add(timer);
+            }
+          },
+          cancel() { if (timer) { clearInterval(timer); heartbeatTimers.delete(timer); } },
+        });
+        return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+      }
       if (overrideStream !== null) return new Response(overrideStream, { headers: { "content-type": "text/event-stream" } });
       const last = body.messages.at(-1)!;
       const stream =
@@ -60,6 +77,8 @@ afterEach(() => {
   agent = null;
   requests.length = 0;
   overrideStream = null;
+  for (const timer of heartbeatTimers) clearInterval(timer);
+  heartbeatTimers.clear();
 });
 
 // The server runs on this thread, so poll without blocking and yield in between.
@@ -184,3 +203,32 @@ for (const [name, calls, finish] of [
     expect(events.at(-1)).toMatchObject({ type: "turn_end", stopReason: "error" });
   });
 }
+
+
+for (const [name, prefix, idle, total, expected] of [
+  ["silent partial stream", "/stall/idle", 150, 2000, "idle"],
+  ["keepalives cannot extend request lifetime", "/stall/heartbeat", 200, 400, "request"],
+] as const) test(name, async () => {
+  agent = openaiAgent("test-key", prefix);
+  agent.setOption("openai.idle_timeout_ms", String(idle));
+  agent.setOption("openai.request_timeout_ms", String(total));
+  agent.send("bounded response");
+  const events = await drainTurn(agent, () => { throw new Error("partial response executed a tool"); });
+  expect(events.at(-1)).toMatchObject({ type: "turn_end", stopReason: "error" });
+  expect(events.find((ev) => ev.type === "error")?.type).toBe("error");
+  expect(events.some((ev) => ev.type === "error" && ev.message.includes(`${expected} deadline exceeded`))).toBe(true);
+  expect(events.filter((ev) => ev.type === "text_delta").map((ev) => ev.text).join("")).toBe("partial");
+  expect(requests).toHaveLength(1);
+  expect(events.some((ev) => ev.type === "log" && ev.message.includes('"event":"provider.timeout"'))).toBe(true);
+});
+
+test("request deadline includes retry backoff", async () => {
+  flakyFailures = 2;
+  agent = openaiAgent("test-key", "/flaky");
+  agent.setOption("openai.request_timeout_ms", "150");
+  agent.send("deadline expires before second attempt");
+  const events = await drainTurn(agent, () => { throw new Error("unexpected tool"); });
+  expect(events.at(-1)).toMatchObject({ type: "turn_end", stopReason: "error" });
+  expect(flakyFailures).toBe(1);
+  expect(events.some((ev) => ev.type === "error" && ev.message.includes("request deadline exceeded"))).toBe(true);
+});

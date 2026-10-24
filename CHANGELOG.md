@@ -4,6 +4,8 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
+- Bound stalled model streams with native idle and absolute request deadlines; retry delays share the same absolute budget.
+
 - Bound repeated reads, failed retries and aggregate tool/search work in the native harness; retain budgets across compaction and recovery.
 - Add literal-argv `check`, a durable `evidence` ledger and runtime execution summaries that distinguish process exits from unverified test claims.
 

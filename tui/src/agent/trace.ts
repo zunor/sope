@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { SopeEvent } from "sope";
 
 type Fields = Record<string, string | number | boolean>;
-const PROVIDER_EVENTS = new Set(["provider.start", "provider.first_byte", "provider.retry", "provider.progress", "provider.end"]);
+const PROVIDER_EVENTS = new Set(["provider.start", "provider.first_byte", "provider.retry", "provider.progress", "provider.timeout", "provider.end"]);
 const PROVIDER_FIELDS = ["round", "compaction", "attempt", "status", "elapsed_ms", "request_bytes", "received_bytes", "complete", "failed"];
 
 export class ExecutionTrace {
