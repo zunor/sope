@@ -4,6 +4,9 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
+- Retain content-aware native text-read observations across compaction and unrelated commands; return qualified historical-result references for repeated unchanged payloads while still detecting changed file contents.
+- Distinguish provider finish reasons from stream terminal events in diagnostic traces.
+
 - Scope execution evidence by session and agent, include exact bounded invocations in working state, and reject ambiguous historical-result references.
 
 - Preserve task plans and execution observations outside model summaries; retrieve historical tool results without rerunning them, reconcile unfinished plans before completion, and trace repeated reads.
