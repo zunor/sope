@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: nightly-${{ github.ref }}
+  group: nightly-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 defaults:
   run:
@@ -55,9 +55,7 @@ jobs:
           bun run typecheck
       - name: macOS leak checks
         if: matrix.platform == 'darwin-arm64'
-        run: |
-          leaks --atExit -- ./build/test_agent
-          leaks --atExit -- ./build/test_tools
+        run: python3 scripts/ci/check-leaks.py build/test_agent build/test_tools
       - name: PTY interaction and performance record
         run: |
           python3 -m venv build-ci/venv
