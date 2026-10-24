@@ -51,7 +51,8 @@ test("asks before changing things", () => {
   expect(ends(events)[0]).toMatchObject({ name: "bash", isError: false });
   expect(ends(events)[0]!.result).toStartWith("allowed\n");
   expect(ends(events)[0]!.result).toContain("Full output:");
-  expect(ends(events)[0]!.result).toEndWith("[exit code 0]");
+  expect(ends(events)[0]!.result).toContain("[exit code 0]");
+  expect(ends(events)[0]!.result).toContain('"test_verdict":"unverified"');
 
   events = run(agent, '!bash {"command":"rm -rf /tmp/nothing"}', (p) => agent!.permit(p.callId, false, "too risky"));
   expect(ends(events)[0]!.isError).toBe(true);

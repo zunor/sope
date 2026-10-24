@@ -196,6 +196,9 @@ static int begin_turn(sope_agent_t *a)
 
     sope__push_event(a, SOPE_EVENT_TURN_START, m->turn_id, 0, 0, NULL, 0, NULL, 0);
     if (reset) {
+        pthread_mutex_lock(a->mu);
+        sope__harness_clear(a);
+        pthread_mutex_unlock(a->mu);
         sope__history_clear(&a->history);
         sope__files_clear(a);
         a->context_tokens = 0;
@@ -485,6 +488,21 @@ static int dispatch(sope_agent_t *a, sope_tool_use *u)
     if (!p) return 0;
 
     pthread_mutex_lock(a->mu);
+    if (!sope__harness_admit(a, p, u)) {
+        sope__storage_fail_locked(a, "Cannot retain operation identity; execution stopped.");
+        pthread_mutex_unlock(a->mu);
+        return 1;
+    }
+    if (p->harness_blocked) {
+        sope__push_event_locked(a, SOPE_EVENT_TOOL_START, p->turn_id, p->call_id, 0, u->name, strlen(u->name), u->input, u->input_len);
+        p->done = sope__journal_result(a, p);
+        pthread_mutex_unlock(a->mu);
+        return 1;
+    }
+    if (!sope__journal_harness(a)) {
+        pthread_mutex_unlock(a->mu);
+        return 1;
+    }
     int suspended = a->root->suspending || a->root->journal_failed || a->closing;
     if (offered && sope__policy_authorize(a) && !suspended) {
         p->permission = 1;
@@ -542,7 +560,23 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
     t->call = NULL;
 
     if (!asst->n_tool_uses) {
-        finish_turn(a, SOPE_STOP_END_TURN);
+        sope_buf facts = {0}, combined = {0};
+        pthread_mutex_lock(a->mu);
+        sope__harness_evidence(a, &facts, 1);
+        pthread_mutex_unlock(a->mu);
+        int evidence_ok = !facts.oom;
+        if (facts.len) {
+            sope__buf_append(&combined, asst->content, asst->content_len);
+            sope__buf_append(&combined, facts.ptr, facts.len);
+            if (!combined.oom && !facts.oom) {
+                free(asst->content); asst->content = combined.ptr; asst->content_len = combined.len;
+                combined.ptr = NULL;
+                sope__push_event(a, SOPE_EVENT_TEXT_DELTA, sope__turn_id(a), 0, 0, NULL, 0, facts.ptr, facts.len);
+            } else evidence_ok = 0;
+        }
+        sope__buf_free(&facts); sope__buf_free(&combined);
+        if (!evidence_ok) turn_error(a, SOPE_ENOMEM, "Cannot render execution evidence.");
+        finish_turn(a, evidence_ok ? SOPE_STOP_END_TURN : SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);
     }
 
@@ -627,6 +661,14 @@ static sope_next collect_tools(sope_agent_t *a)
     pthread_mutex_unlock(a->mu);
 
     t->asst = NULL;
+    pthread_mutex_lock(a->mu);
+    int exhausted = sope__harness_exhausted(a);
+    pthread_mutex_unlock(a->mu);
+    if (exhausted) {
+        turn_error(a, SOPE_ERROR, "harness: execution stopped after three blocked operations; task completion is not established.");
+        finish_turn(a, SOPE_STOP_ERROR);
+        return next(SOPE__NEXT_CONTINUE);
+    }
     return start_call(a);
 }
 

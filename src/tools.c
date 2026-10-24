@@ -23,7 +23,7 @@ static const sope_builtin *const BUILTINS[] = {
     &sope__builtin_read,  &sope__builtin_write,       &sope__builtin_edit,      &sope__builtin_glob,
     &sope__builtin_grep,  &sope__builtin_bash,        &sope__builtin_bash_output, &sope__builtin_bash_kill,
     &sope__builtin_web_fetch, &sope__builtin_todo_write,
-    &sope__builtin_artifact_read,
+    &sope__builtin_artifact_read, &sope__builtin_check, &sope__builtin_evidence,
 };
 
 size_t sope__builtin_count(void)
@@ -175,6 +175,8 @@ static void run_free(tool_run *r)
     sope__json_free(r->input);
     free(r->cwd);
     free(r->ca_file);
+    free(r->receipt);
+    free(r->check_archive);
     sope__buf_free(&r->out);
     sope__buf_free(&r->body);
     if (r->proc) sope__proc_release(r->proc);
@@ -231,6 +233,7 @@ static void run_closed(sope_task *task)
         p->n_images = r->n_images;
         r->images = NULL;
         r->n_images = 0;
+        p->receipt = r->receipt; r->receipt = NULL;
         p->done = sope__journal_result(a, p);
         p->reported = 1;
         r->out.ptr = NULL;

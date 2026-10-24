@@ -428,6 +428,44 @@ static void test_process_isolation(void)
     REQUIRE(success == 1 && rejected == 1);
 }
 
+static void test_execution_receipts(void)
+{
+    char dir[8192]; snprintf(dir, sizeof dir, "%s/receipts", root);
+    sope_agent_t *a = open_agent(dir);
+    send_text(a, "!check {\"argv\":[\"false\"]}");
+    int seen = 0;
+    for (;;) {
+        sope_event_t ev = poll_event(a);
+        if (ev.type == SOPE_EVENT_TOOL_END) { REQUIRE(ev.code && strstr(ev.data, "process_failed")); seen++; }
+        if (ev.type == SOPE_EVENT_TURN_END) break;
+    }
+    REQUIRE(seen == 1);
+    REQUIRE(sope_compact(a, NULL, 0, NULL) == SOPE_OK);
+    finish(a, 1);
+    sope_agent_free(a);
+    a = open_agent(dir);
+    send_text(a, "!evidence {}");
+    seen = 0;
+    for (;;) {
+        sope_event_t ev = poll_event(a);
+        if (ev.type == SOPE_EVENT_TOOL_END) {
+            REQUIRE(!ev.code && strstr(ev.data, "process_failed") && strstr(ev.data, "\"exit_code\":1") && strstr(ev.data, "unverified")); seen++;
+        }
+        if (ev.type == SOPE_EVENT_TURN_END) break;
+    }
+    REQUIRE(seen == 1);
+    REQUIRE(sope_agent_reset(a) == SOPE_OK);
+    sope_agent_free(a);
+    a = open_agent(dir);
+    send_text(a, "!evidence {}");
+    for (;;) {
+        sope_event_t ev = poll_event(a);
+        if (ev.type == SOPE_EVENT_TOOL_END) REQUIRE(strstr(ev.data, "\"receipts\":[]") && !strstr(ev.data, "process_failed"));
+        if (ev.type == SOPE_EVENT_TURN_END) break;
+    }
+    sope_agent_free(a);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3) { crash_child(argv[1], argv[2]); return 2; }
@@ -437,6 +475,7 @@ int main(int argc, char **argv)
     test_crash_recovery();
     test_admission();
     test_compaction_commit();
+    test_execution_receipts();
     test_failed_intent_commit();
     test_failed_start_commit();
     test_failed_result_commit();

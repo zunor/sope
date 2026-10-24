@@ -4,6 +4,9 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
+- Bound repeated reads, failed retries and aggregate tool/search work in the native harness; retain budgets across compaction and recovery.
+- Add literal-argv `check`, a durable `evidence` ledger and runtime execution summaries that distinguish process exits from unverified test claims.
+
 - Fix ancestor-path allocations leaking during file searches outside a Git repository.
 - Add cross-platform CI, sanitizers, credential scanning and installable-package checks.
 - Check subagent concurrency with a host-tool barrier instead of a wall-clock speed threshold.

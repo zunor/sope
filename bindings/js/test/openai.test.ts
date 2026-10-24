@@ -114,7 +114,7 @@ test("streams text and reasoning, assembles tool calls, loops until the model st
   expect(first!.messages[0]).toEqual({ role: "system", content: "Be brief." });
   expect(first!.tools!.map((t) => t.function.name)).toEqual([
     "echo",
-    ...["read", "write", "edit", "glob", "grep", "bash", "bash_output", "bash_kill", "web_fetch", "todo_write", "artifact_read"],
+    ...["read", "write", "edit", "glob", "grep", "bash", "bash_output", "bash_kill", "web_fetch", "todo_write", "artifact_read", "check", "evidence"],
     "agent",
   ]);
   // Round two replays the assistant tool call and answers it by id.

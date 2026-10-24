@@ -78,6 +78,11 @@ function assessIn(name: string, input: Record<string, unknown>, root: string): V
     }
     case "web_fetch":
       return yes("fetching a web page changes nothing here");
+    case "check": {
+      const argv = input.argv;
+      if (!Array.isArray(argv) || !argv.length || !argv.every((v) => typeof v === "string" && !v.includes("\0"))) return no("invalid check argv");
+      return assessProgram(argv as string[], base, root);
+    }
     case "bash":
       return assessCommand(String(input.command ?? ""), base, root);
     default:

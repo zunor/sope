@@ -121,3 +121,13 @@ test("the splitter sees nested commands, pipes and redirections the way a shell 
   expect(split.commands[0]!.writes).toEqual([]); // 2>&1 writes no file
   expect(why("ls; rm -rf /")).toMatch(/deletes outside/);
 });
+
+
+test("check argv follows program policy without interpreting literal shell operators", () => {
+  expect(assess("check", { argv: ["go", "test", "./pkg/cache"] }, root).allow).toBe(true);
+  expect(assess("check", { argv: ["git", "push", "origin", "main"] }, root).allow).toBe(false);
+  expect(assess("check", { argv: ["bash", "-c", "git push origin main"] }, root).allow).toBe(false);
+  expect(assess("check", { argv: ["printf", "%s", "; git push origin main"] }, root).allow).toBe(true);
+  expect(assess("check", { argv: ["rm", "-rf", "/"] }, root).allow).toBe(false);
+  expect(assess("check", { argv: [] }, root).allow).toBe(false);
+});

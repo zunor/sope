@@ -91,10 +91,49 @@ static void test_request_accounting(void)
     sope__history_clear(&a.history);
 }
 
+/* The guard and evidence ledger must outlive replacement of model history. */
+static void test_harness_checkpoint(void)
+{
+    sope_agent_t *a = NULL, *b = NULL;
+    CHECK(sope_agent_new(&a) == SOPE_OK && sope_agent_new(&b) == SOPE_OK);
+    const char *inputs[] = { "{\"command\":\"false\",\"description\":\"first\"}", "{\"description\":\"renamed\",\"command\":\"false\"}" };
+    for (int i = 0; i < 2; i++) {
+        pending_call *p = calloc(1, sizeof *p);
+        p->name = sope__strdup("bash"); p->call_id = (uint64_t)i + 1; p->turn_id = 7;
+        sope_tool_use u = { .name = "bash", .input = (char *)inputs[i], .input_len = strlen(inputs[i]) };
+        CHECK(sope__harness_admit(a, p, &u) && !p->harness_blocked);
+        p->is_error = 1;
+        sope__harness_observe(a, p); sope__pending_free(p);
+    }
+    sope__history_append(&a->history, sope__message_new(SOPE__MSG_USER, "summary", 7));
+    sope__history_clear(&a->history); /* what compaction can replace */
+    char *state = sope__harness_json(a);
+    CHECK(state && sope__harness_load(b, state));
+    free(state);
+    for (int i = 0; i < 3; i++) {
+        pending_call *p = calloc(1, sizeof *p);
+        p->name = sope__strdup("bash"); p->call_id = 10 + (uint64_t)i; p->turn_id = 7;
+        sope_tool_use u = { .name = "bash", .input = (char *)inputs[0], .input_len = strlen(inputs[0]) };
+        CHECK(sope__harness_admit(b, p, &u) && p->harness_blocked);
+        CHECK(strstr(p->content, "#2"));
+        sope__harness_observe(b, p); sope__pending_free(p);
+    }
+    CHECK(sope__harness_exhausted(b));
+    pending_call *p = calloc(1, sizeof *p);
+    p->name = sope__strdup("bash"); p->call_id = 20; p->turn_id = 8;
+    sope_tool_use u = { .name = "bash", .input = (char *)inputs[0], .input_len = strlen(inputs[0]) };
+    CHECK(sope__harness_admit(b, p, &u) && !p->harness_blocked && !sope__harness_exhausted(b));
+    sope__pending_free(p);
+    CHECK(!sope__harness_load(b, "{\"calls\":-1}"));
+    CHECK(!sope__harness_load(b, "{\"turn\":1e100}"));
+    sope_agent_free(a); sope_agent_free(b);
+}
+
 int main(void)
 {
     test_transcript_budget_and_utf8();
     test_suffix_groups();
     test_request_accounting();
+    test_harness_checkpoint();
     return failures ? 1 : 0;
 }

@@ -57,6 +57,8 @@ struct tool_run {
     int64_t deadline_ms; /* monotonic */
     int64_t timeout_ms;
     int timed_out;
+    char *receipt;
+    char *check_archive;
     /* web_fetch */
     sope_http *http;
     sope_buf body;
@@ -81,6 +83,7 @@ extern const sope_builtin sope__builtin_bash, sope__builtin_bash_output, sope__b
 extern const sope_builtin sope__builtin_web_fetch;
 extern const sope_builtin sope__builtin_todo_write;
 extern const sope_builtin sope__builtin_artifact_read;
+extern const sope_builtin sope__builtin_check, sope__builtin_evidence;
 
 /* tools.c: the registry */
 size_t sope__builtin_count(void);
@@ -117,6 +120,8 @@ void sope__files_clear(sope_agent_t *a);
 int sope__file_prepare(tool_run *r);
 sope_next sope__file_step(tool_run *r);
 void sope__file_release(tool_run *r);
+/* Native execution fact; call only after process exit and a complete archive. */
+void sope__execution_receipt(tool_run *r, int status);
 /* tool_bash.c: kills the root's background shells (agent teardown). */
 void sope__shells_free(sope_agent_t *root);
 /* tool_web.c: HTML to readable text with Markdown-style headings, lists and links. */

@@ -516,6 +516,51 @@ static void test_todo_and_subagents(void)
     sope_agent_free(a);
 }
 
+/* Guard rejections must be paired tool events and never execute an effect. */
+static void test_execution_guard(void)
+{
+    sope_agent_t *a = new_agent("allow");
+    static run_log log;
+    write_file("guard.txt", "needle\n");
+    run(a, "!grep {\"path\":\"guard.txt\",\"pattern\":\"needle\"} ;; !grep {\"pattern\":\"needle\",\"path\":\"guard.txt\"} ;; !grep {\"path\":\"guard.txt\",\"pattern\":\"needle\"}", &log, NO_ANSWER, NULL);
+    int blocked = 0;
+    for (int i = 0; i < log.n; i++) blocked += log.is_error[i] && strstr(log.result[i], "operation did not run") != NULL;
+    CHECK(log.n == 3 && blocked == 1 && log.stop == SOPE_STOP_END_TURN);
+    /* A fresh user request is a new budget. */
+    run(a, "!grep {\"path\":\"guard.txt\",\"pattern\":\"needle\"}", &log, NO_ANSWER, NULL);
+    CHECK(log.n == 1 && !log.is_error[0]);
+    CHECK(sope_agent_set_option(a, "harness.max_calls", "1") == SOPE_OK);
+    run(a, "!read {\"file_path\":\"guard.txt\"} ;; !read {} ;; !read {} ;; !read {} ;; !bash {\"command\":\"touch forbidden-effect\"}", &log, NO_ANSWER, NULL);
+    CHECK(log.n == 5 && log.stop == SOPE_STOP_ERROR && slurp("forbidden-effect") == NULL);
+    sope_agent_free(a);
+}
+
+static void test_check_evidence(void)
+{
+    sope_agent_t *a = new_agent("allow");
+    static run_log log;
+    run(a, "!check {\"argv\":[\"printf\",\"%s\",\"literal ' $HOME; touch forbidden-check\"]}", &log, NO_ANSWER, NULL);
+    CHECK(log.n == 1 && !log.is_error[0] && strstr(log.result[0], "literal ' $HOME; touch forbidden-check"));
+    CHECK(slurp("forbidden-check") == NULL);
+    CHECK(strstr(log.result[0], "\"test_verdict\":\"unverified\"") && strstr(log.text, "Execution evidence"));
+    run(a, "!check {\"argv\":[\"false\"]}", &log, NO_ANSWER, NULL);
+    CHECK(log.is_error[0] && strstr(log.result[0], "\"exit_code\":1") && strstr(log.result[0], "process_failed"));
+    run(a, "!check {\"argv\":[\"sleep\",\"10\"],\"timeout\":20}", &log, NO_ANSWER, NULL);
+    CHECK(log.is_error[0] && strstr(log.result[0], "timed_out"));
+    /* A shell can overwrite status; the trusted fact still never says tests passed. */
+    run(a, "!bash {\"command\":\"false; echo done\"}", &log, NO_ANSWER, NULL);
+    CHECK(!log.is_error[0] && strstr(log.result[0], "process_exited_zero") && strstr(log.result[0], "unverified"));
+    run(a, "!evidence {}", &log, NO_ANSWER, NULL);
+    CHECK(!log.is_error[0] && strstr(log.result[0], "process_failed") && strstr(log.result[0], "timed_out") && strstr(log.result[0], "\"tool\":\"bash\""));
+    run(a, "!check {\"argv\":[\"printf\",\"bad\\u0000arg\"]}", &log, NO_ANSWER, NULL);
+    CHECK(log.is_error[0] && strstr(log.result[0], "NUL"));
+    sope_agent_free(a);
+    a = new_agent("deny");
+    run(a, "!check {\"argv\":[\"touch\",\"forbidden-check\"]}", &log, NO_ANSWER, NULL);
+    CHECK(log.is_error[0] && slurp("forbidden-check") == NULL);
+    sope_agent_free(a);
+}
+
 /* Exec each probe in a fresh process: injected diagnostics such as macOS
  * leaks may already have threads even before libsope starts its own.
  * A stuck file open must fail the test, not pin the runner during teardown. */
@@ -579,6 +624,8 @@ int main(int argc, char **argv)
     CHECK(sope_set_threads(2) == SOPE_OK);
 
     test_special_files(argv[0]);
+    test_execution_guard();
+    test_check_evidence();
 
     test_read_image();
     test_read_write_edit();

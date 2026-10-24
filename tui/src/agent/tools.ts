@@ -12,10 +12,10 @@ import { diffLines, hunks, splitLines } from "../ui/diff";
 import { langFor } from "../ui/highlight";
 
 /** Built-in tools that wait for the user's permission (sope.h: "ask"). */
-export const ASKING_TOOLS = ["write", "edit", "bash", "web_fetch"];
+export const ASKING_TOOLS = ["write", "edit", "bash", "check", "web_fetch"];
 
 /** Built-in tools that read only. */
-export const READ_TOOLS = ["read", "artifact_read", "glob", "grep", "bash_output", "bash_kill", "todo_write"];
+export const READ_TOOLS = ["read", "evidence", "artifact_read", "glob", "grep", "bash_output", "bash_kill", "todo_write"];
 
 /** One line of a permission preview. */
 export interface PreviewLine {
@@ -111,6 +111,8 @@ export function previewFor(name: string, input: Record<string, unknown>, read = 
       if (now !== null) header.text += "  (the old text is not in the file)";
       return [header, ...diffPreview(oldS, newS, lang).map((l) => ({ ...l, no: undefined }))];
     }
+    case "check":
+      return [{ text: JSON.stringify(input.argv), kind: "command" }];
     case "bash": {
       const rows = lines(str(input.command), "command", 12);
       if (input.description) rows.unshift({ text: str(input.description), kind: "plain" });
@@ -139,6 +141,8 @@ export function describeCall(name: string, input: Record<string, unknown>): stri
       return `${str(input.pattern)}${where(input.path)}`;
     case "grep":
       return `${str(input.pattern)}${where(input.path)}${input.glob ? ` (${str(input.glob)})` : ""}`;
+    case "check":
+      return JSON.stringify(input.argv);
     case "bash":
       return `${input.run_in_background ? "[background] " : ""}${str(input.command)}`;
     case "bash_output":

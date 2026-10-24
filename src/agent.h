@@ -89,6 +89,9 @@ typedef struct pending_call {
     size_t len;
     sope_image *images; /* a built-in's result images (read, web_fetch) */
     size_t n_images;
+    char *harness_key;
+    int harness_blocked;
+    char *receipt; /* native check fact, never supplied by the model */
 } pending_call;
 
 typedef enum { PHASE_START, PHASE_CALL, PHASE_TOOLS, PHASE_COMPACT } turn_phase;
@@ -216,7 +219,18 @@ struct sope_agent {
     uint64_t context_estimate; /* local estimate at that usage checkpoint */
     int turns_finished;
     int32_t last_stop;
+    struct sope_harness *harness; /* bounded execution facts, independent of history */
 };
+
+/* harness.c; all access is under *mu. */
+int sope__harness_admit(sope_agent_t *a, pending_call *p, const sope_tool_use *u);
+void sope__harness_observe(sope_agent_t *a, pending_call *p);
+int sope__harness_exhausted(sope_agent_t *a);
+int sope__journal_harness(sope_agent_t *a);
+char *sope__harness_json(sope_agent_t *a);
+int sope__harness_load(sope_agent_t *a, const char *json);
+void sope__harness_clear(sope_agent_t *a);
+void sope__harness_evidence(sope_agent_t *a, sope_buf *out, int summary);
 
 /* The turn running now; only while a->turn.active. */
 static inline uint64_t sope__turn_id(const sope_agent_t *a)

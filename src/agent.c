@@ -92,6 +92,8 @@ void sope__pending_free(pending_call *p)
     sope__images_free(p->images, p->n_images);
     free(p->name);
     free(p->content);
+    free(p->harness_key);
+    free(p->receipt);
     free(p);
 }
 
@@ -180,6 +182,7 @@ int sope__push_event(sope_agent_t *a, uint32_t type, uint64_t turn_id, uint64_t 
 void sope__agent_free_memory(sope_agent_t *a)
 {
     size_t i;
+    sope__harness_clear(a);
     sope__history_clear(&a->history);
     sope__files_clear(a);
     for (i = 0; i < a->n_tool_filter; i++) free(a->tool_filter[i]);
@@ -628,6 +631,7 @@ int sope_agent_reset(sope_agent_t *a)
             pthread_mutex_unlock(a->mu);
             return sope__set_error(SOPE_EBUSY, "finish or recover the durable task before resetting history");
         }
+        sope__harness_clear(a);
         sope__history_clear(&a->history);
         sope__files_clear(a);
         a->context_tokens = a->context_estimate = 0;
@@ -719,6 +723,7 @@ int sope_agent_load_history(sope_agent_t *a, const char *json, size_t len)
         sope__history_clear(&h);
         return sope__set_error(SOPE_EBUSY, "sope_agent_load_history: a turn is running or queued");
     }
+    sope__harness_clear(a);
     sope__history_clear(&a->history);
     a->history = h;
     a->reset_requested = 0;

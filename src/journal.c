@@ -87,6 +87,21 @@ int sope__journal_input(sope_agent_t *a, const msg_node *m)
     return ok || fail(a);
 }
 
+/* Part of the same transaction as results/checkpoints. Never a second ledger. */
+static int save_harness(sope_agent_t *a)
+{
+    char *body = sope__harness_json(a);
+    int ok = body && sql(a->root->journal->db,
+        "INSERT OR REPLACE INTO harness(agent,payload) VALUES(%lld,%Q)", (long long)a->agent_id, body);
+    free(body); return ok;
+}
+
+int sope__journal_harness(sope_agent_t *a)
+{
+    if (a->root->journal_failed) return 0;
+    return !a->root->journal || save_harness(a) || fail(a);
+}
+
 static int stream_event(sope_agent_t *a, const ev_node *e);
 
 int sope__journal_checkpoint(sope_agent_t *a, const char *kind, int terminal)
@@ -135,6 +150,7 @@ int sope__journal_checkpoint(sope_agent_t *a, const char *kind, int terminal)
             .turn_id = id, .code = a->last_stop };
         ok = stream_event(a, &end);
     }
+    if (ok) ok = save_harness(a);
     if (ok) ok = sql(db, "COMMIT");
     if (!ok) { sql(db, "ROLLBACK"); a->root->event_sequence = sequence; }
     free(fact);
@@ -154,6 +170,9 @@ static const sope_tool_use *find_use(sope_agent_t *a, uint64_t id)
  * root lock is still held so live sequence order matches the committed stream. */
 static int commit_result(sope_agent_t *a, pending_call *p, uint32_t type, int32_t code)
 {
+    if (a->root->journal_failed) return 0;
+    sope__harness_observe(a, p);
+    if (a->root->journal_failed) return 0;
     ev_node event = { .type = type, .agent_id = a->agent_id, .turn_id = p->turn_id,
         .call_id = p->call_id, .code = code, .data = p->content, .data_len = p->len,
         .name = type == SOPE_EVENT_TOOL_END ? p->name : NULL,
@@ -171,6 +190,7 @@ static int commit_result(sope_agent_t *a, pending_call *p, uint32_t type, int32_
         int ok = body && sql(db, "BEGIN IMMEDIATE") && audit(a, "result", p->turn_id, p->call_id, body) &&
             sql(db, "INSERT INTO results(call,payload) VALUES(%lld,%Q)", (long long)p->call_id, body) &&
             stream_event(a, &event);
+        if (ok) ok = save_harness(a);
         if (ok) ok = sql(db, "COMMIT");
         if (!ok) { sql(db, "ROLLBACK"); a->root->event_sequence = sequence; }
         free(body);
@@ -288,6 +308,10 @@ int sope__journal_restore(sope_agent_t *a)
         } else if (rc != SQLITE_DONE) goto out;
         sqlite3_finalize(s); s = NULL;
     }
+    if (sqlite3_prepare_v2(db, "SELECT payload FROM harness WHERE agent=0", -1, &s, NULL) != SQLITE_OK) goto out;
+    rc = sqlite3_step(s);
+    if (rc == SQLITE_ROW && !sope__harness_load(a, (const char *)sqlite3_column_text(s, 0))) goto out;
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) goto out;
     a->recovering = a->in_head != NULL;
     ok = 1;
 out:
@@ -335,6 +359,7 @@ int sope_agent_open(sope_agent_t **out, const char *directory)
         "CREATE TABLE IF NOT EXISTS runtime(id INTEGER PRIMARY KEY CHECK(id=1),session_id TEXT NOT NULL,manifest TEXT);"
         "CREATE TABLE IF NOT EXISTS stream(seq INTEGER PRIMARY KEY AUTOINCREMENT,type INTEGER NOT NULL,agent INTEGER NOT NULL,turn INTEGER NOT NULL,call INTEGER NOT NULL,code INTEGER NOT NULL,name TEXT NOT NULL,data TEXT NOT NULL);"
         "CREATE TABLE IF NOT EXISTS outcomes(turn INTEGER PRIMARY KEY,payload TEXT NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS harness(agent INTEGER PRIMARY KEY,payload TEXT NOT NULL);"
         "CREATE INDEX IF NOT EXISTS stream_origin ON stream(agent,turn,type,seq);"
         "PRAGMA user_version=2;")) goto bad;
     if (!sql(j->db, "INSERT OR IGNORE INTO runtime VALUES(1,%Q,NULL)", a->session_id)) goto bad;

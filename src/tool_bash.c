@@ -36,10 +36,8 @@ static const char BASH_DESC[] =
     "- Use run_in_background for long-running processes such as dev servers and watchers: you get a shell id "
     "right away, read its output with bash_output and stop it with bash_kill. Do not append & yourself.\n"
     "- Run independent commands as parallel tool calls; chain dependent ones with &&.\n"
-    "- Run tests/builds directly: output is already bounded and archived, so do not pipe checks to head/tail. "
-    "pipefail preserves failures inside pipelines; a later echo or other command can still replace the exit status. "
-    "To inspect a failure, capture status=$? immediately and finish with exit $status. Never report a check as "
-    "passed merely because a wrapper command returned zero.\n"
+    "- Prefer check for test/build programs: literal argv avoids shell wrappers replacing exit status. "
+    "Bash receipts record only shell completion; they do not establish test success.\n"
     "- Never run destructive commands (rm -rf, git reset --hard, git push --force, ...) unless the user "
     "asked for them.";
 static const char BASH_SCHEMA[] =
@@ -92,6 +90,7 @@ static void bash_result(tool_run *r, int status)
         sope__buf_appendf(&r->out, "[exit code %d]", status);
         r->is_error = status != 0 || !archived;
     }
+    if (archived) sope__execution_receipt(r, status);
 }
 
 static sope_next tool_bash(tool_run *r)
@@ -115,7 +114,7 @@ static sope_next tool_bash(tool_run *r)
         pthread_mutex_unlock(r->agent->mu);
         if (!committed) { close(archive_fd); free(archive_path); return sope__run_fail(r, "Cannot commit shell archive; command did not run."); }
         r->proc = sope__proc_start(cmd, r->cwd, r->agent->root->environment, background ? NULL : &r->task, archive_fd, archive_path, err, sizeof err);
-        free(archive_path);
+        r->check_archive = archive_path;
         if (!r->proc) return sope__run_fail(r, "%s", err);
         if (background) {
             sope_agent_t *root = r->agent->root;

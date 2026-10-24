@@ -156,6 +156,8 @@ Every agent comes with tools executed by the library; the host does not need to 
 | `write` | Write a file, creating parent directories automatically | Yes |
 | `edit` | Replace exact text; errors if `old_string` is not unique unless `replace_all` is set. An empty `old_string` creates a file | Yes |
 | `bash` | Run a command with `/bin/bash -o pipefail -c`, returning merged stdout/stderr and the exit code; `timeout` defaults to 2 minutes, up to 10 minutes; `run_in_background` enables background execution | Yes |
+| `check` | Run a program with literal `argv`, bounded output, a deadline and a durable execution receipt; no implicit shell chaining | Yes |
+| `evidence` | Retrieve the last 32 native execution receipts for this agent | No |
 | `bash_output` | Read new output from a background command since the last call, and report whether it is still running | No |
 | `bash_kill` | Stop a background command and all its child processes | No |
 | `web_fetch` | Fetch an HTTP(S) URL: convert HTML to text with headings, lists, and links (page images become `![alt](url)`); return text and JSON unchanged; send image URLs' images directly to the model. Follows redirects; paginate long pages with `offset` (about 40000 bytes per page) | Yes |
@@ -267,6 +269,9 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 | `image_model` | Model to switch to when the conversation contains images (for when `model` cannot process them) | Uses `model` |
 | `system` | System prompt | A short built-in prompt |
 | `max_rounds` | Maximum model calls per turn | `32` |
+| `harness.max_calls` | All tool admissions per agent/user turn | `128` |
+| `harness.max_searches` | Native grep/glob admissions per agent/user turn | `16` |
+| `harness.max_repeats` | Identical read admissions or failed operation results before rejection | `2` |
 | `cwd` | Working directory for built-in tools | Process's current directory |
 | `permissions` | `ask`: built-in tools requiring permission emit `PERMISSION` first; `allow`: execute immediately; `deny`: reject immediately | `ask` |
 | `subagents` | `off` hides the built-in `agent` tool | — |
@@ -458,3 +463,51 @@ Subprocess environments no longer inherit the host process environment. Unsealed
 C agents default to `PATH=/usr/bin:/bin` plus fixed noninteractive settings; an
 explicit policy environment replaces the default. Supply `HOME` explicitly for
 home-directory expansion. A policy is capability routing, not an OS sandbox.
+
+
+## Execution budgets and evidence
+
+The native harness bounds work independently of model history. Canonical JSON
+arguments identify operations (object key order and bash/check `description`
+do not distinguish calls). It tracks at most 64 identities of at most 16 KiB
+each. Two identical read/search admissions or two identical failures exhaust
+that operation's default budget. A third attempt returns an error without
+executing; three blocked calls end the turn with `SOPE_STOP_ERROR`. Later calls
+in that batch are also blocked; already admitted work drains normally. All
+calls count toward the total budget, including polling and evidence retrieval.
+The three `harness.*` options accept integers 1–10000; invalid values use defaults.
+
+Successful native writes/edits reopen failure budgets. Successful writes,
+edits, foreground/background shell admission results and checks reopen read
+budgets because they may change files. This is a budget, **not a result cache**:
+blocked calls never assert that an earlier result is still current. Differently
+phrased searches and arbitrary shell scripts are not semantically deduplicated;
+large or evicted identities still count toward aggregate limits. Each user
+turn opens new budgets. Automatic compaction and durable resume preserve the
+same turn's budgets; resetting/importing history explicitly clears them.
+Subagents have their own bounded ledgers, not a combined proof for the parent.
+
+`check({argv:["go","test","-count=1","./pkg/example"],timeout:120000})`
+quotes each argument literally and uses the process runner's shell only to
+`exec` the requested program. Shell operators, wildcards and variables are
+literal arguments. Explicitly invoking an interpreter retains its semantics.
+`check` uses the same execution permissions and environment as `bash`.
+
+Every completed native `check` and foreground `bash` produces an execution
+receipt: call/turn IDs, input, cwd, exit status, timeout outcome and raw output
+archive path. Inputs above 16 KiB are omitted from the receipt (the durable
+intent retains them). The last 32 receipts survive compaction and durable
+reopen. Admission state commits before dispatch; receipt state commits in the
+same transaction as its tool result. Unknown/cancelled outcomes do not become
+successful receipts. Host tools replacing these builtins cannot supply trusted
+receipts. Background shells currently have no completion receipts.
+
+`evidence` retrieves the ledger. A deterministic footer on normal completion
+shows up to eight recent receipts, even if the model omits failures. These are
+historical observations; **exit zero does not establish test success**. Receipts
+do not verify assertion quality, coverage, test count, current source freshness
+or the correctness of the model's prose. Arbitrary test output is not parsed
+into pass/fail claims. Use the archived output and exact invocation to assess
+what actually ran. Raw output has the existing artifact retention policy;
+receipt retention does not delete those archives. Runtime trace remains compact
+metadata, without duplicating commands or output.

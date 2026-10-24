@@ -64,6 +64,8 @@ set(SOPE_SOURCES
   src/provider_openai.c
   src/subagent.c
   src/tool_bash.c
+  src/tool_check.c
+  src/harness.c
   src/tool_file.c
   src/tool_search.c
   src/tool_todo.c
