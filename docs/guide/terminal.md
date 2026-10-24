@@ -68,12 +68,19 @@ The rounded input box grows with explicit newlines and wrapped text, up to eight
 | `alt+1` … `alt+9` | Switch to the Nth session |
 | `ctrl+t` / `F2` | Toggle the ABI trace panel: `→` marks calls from the TUI into the library; `←` marks events returned by `sope_poll` |
 | `pgup` / `pgdn` | Scroll the conversation |
+| `ctrl+f` | Search the conversation (see [Searching the conversation](#searching-the-conversation)) |
 | Hover over / click a long tool output block | Hover anywhere in the block to turn its connector and `… N more lines` white; click anywhere to expand, then click the expanded block to collapse |
 | `↑` / `↓` | Move within multiline input; browse input history at its boundaries |
 | `ctrl+a/e`, `alt+b/f`, `ctrl+w/u/k` | Emacs-style editing (word movement supports Chinese word segmentation) |
 | `ctrl+c` | Cancel a running turn, clear nonempty input, or otherwise exit |
 
-Commands: `/recover [resume|resolve <id> <ok|error> <outcome>]`, `/help`, `/new`, `/close`, `/clear` (also clears conversation history), `/context` (what fills the context window), `/compact [focus]`, `/effort [level]` (how long the model thinks), `/model [name]` (opens the model picker without an argument), `/thinking` (expand/collapse reasoning), `/permissions [ask|auto|full]`, `/trace`, `/mouse`, `/set <key> [value]`, and `/quit`.
+Commands: `/recover [resume|resolve <id> <ok|error> <outcome>]`, `/help`, `/find [text]` (search the conversation), `/new`, `/close`, `/clear` (also clears conversation history), `/context` (what fills the context window), `/compact [focus]`, `/effort [level]` (how long the model thinks), `/model [name]` (opens the model picker without an argument), `/thinking` (expand/collapse reasoning), `/permissions [ask|auto|full]`, `/trace`, `/mouse`, `/set <key> [value]`, and `/quit`.
+
+### Searching the conversation
+
+`ctrl+f` (or `/find`) replaces the input box with a one-line search bar; the conversation above stays in view. Typing highlights matches as you go and selects the one nearest the current view. The counter numbers matches from the newest, so `1/17` is the most recent. Matching ignores case unless the query contains a capital letter. The search covers the visible text of user messages, replies, tool names and inputs, tool output, and errors; it includes reasoning only while `/thinking` shows it. A match inside a collapsed tool output expands that output when you move to it. `cmd+f` also opens the bar if the terminal passes it on. Ghostty uses `cmd+f` for its own scrollback search, and a full-screen app has no scrollback to search. To send `cmd+f` to sope instead, add `keybind = super+f=unbind` to the Ghostty config. This applies in every Ghostty window, not only in sope.
+
+`Enter` moves to the next (older) match and wraps from the oldest back to the newest; `shift+enter` moves the other way where the terminal reports it. `↑`/`↓` and the `↑` `↓` buttons at the right of the search bar (click them) also move to an older or newer match, wrapping at the ends. After the first `enter`, the bar is in browse mode: `n`/`N` move to an older or newer match, `o` (or `tab`) collapses or expands the output that contains the current match, and `q` closes the bar and stays on the match. In browse mode, typing any other character, `backspace`, `/` or `ctrl+f` returns to editing the query. `Esc` closes the bar and returns to where you were before searching. `pgup`/`pgdn` and the mouse wheel still scroll. `/find <text>` opens the bar already in browse mode for `<text>`. Switching sessions closes the search.
 
 `/model` or `alt+m` opens the model picker. It lists chat models and context sizes from the endpoint (`GET /models`), with recently used models first. Type to search, select with `↑`/`↓`, and press Enter to use a model; you can also enter a name that the endpoint does not list. The selected model takes effect on the next turn in the current session and becomes the default for new sessions.
 

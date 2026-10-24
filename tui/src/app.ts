@@ -19,8 +19,8 @@
 //                                                    meteor circles a one-row square)
 //   ──────────────────────────────────────────────────────────────────────
 //   › input                         (or a popup in its place: the permission
-//   ───────────────────────────────  prompt, the permission modes, the models;
-//                                    see ui/popup.ts)
+//   ───────────────────────────────  prompt, the permission modes, the models,
+//                                    the search bar; see ui/popup.ts)
 //     ◈ Approve for me                 (and short notices after it)   glm-5.3 · 42.1k / 200k
 //
 // What a popup, the session list, a command or the editor does with a key
@@ -54,6 +54,7 @@ import { ModePicker } from "./ui/modes";
 import { ModelPicker } from "./ui/models";
 import { pixelMeteor } from "./ui/pixel-meteor";
 import { drawBox, step, type ChoiceHit, type Popup } from "./ui/popup";
+import { SearchBar } from "./ui/search";
 import { copyToClipboard, Selection } from "./ui/selection";
 import { SessionList } from "./ui/sessions";
 import { drawStatus, tipAt } from "./ui/status";
@@ -220,6 +221,10 @@ export class App {
 
   /** Another session is on screen: what pointed into the last one goes. */
   #switched(): void {
+    if (this.#popup instanceof SearchBar) {
+      this.#popup.chat.endSearch(false); // a search belongs to the session it began in
+      this.#popup = null;
+    }
     this.#session.chat.resetInteractions();
     this.#commands = new CommandSuggestions(COMMANDS);
     this.#commandHits = [];
@@ -259,6 +264,7 @@ export class App {
     useModel: (id) => app.#useModel(id),
     openModes: () => (app.#popup = app.#modePicker()),
     openEffort: () => (app.#popup = app.#effortPicker()),
+    openSearch: (query) => app.#openSearch(query),
     setEffort: (effort) => app.#setEffort(effort),
     setMode: (mode) => app.#setMode(mode),
     toggleThinking: () => {
@@ -307,8 +313,9 @@ export class App {
     const popup = this.#docked;
     if (popup && ev.type !== "key") {
       // The input box is hidden while a popup is up: typing is the popup's, or a key.
-      if (popup.type) popup.type(ev.text);
-      else if (ev.type === "text" && [...ev.text].length === 1) this.#handleKey(ev.text);
+      if (popup.type) {
+        if (popup.type(ev.text) === "close" && popup === this.#popup) this.#popup = null;
+      } else if (ev.type === "text" && [...ev.text].length === 1) this.#handleKey(ev.text);
       return;
     }
     switch (ev.type) {
@@ -396,6 +403,9 @@ export class App {
         return;
       case "ctrl+l":
         return this.#renderer.invalidate();
+      case "ctrl+f":
+      case "super+f": // cmd+f, when the terminal passes it on (Ghostty: keybind = super+f=unbind)
+        return this.#openSearch();
       case "pageup":
         return s.chat.scrollBy(s.chat.pageSize);
       case "pagedown":
@@ -440,6 +450,10 @@ export class App {
     const popup = this.#docked;
     const choice = this.#choiceHits.find((h) => h.y === ev.y && ev.x >= h.x0 && ev.x < h.x1);
     if (popup && choice && (ev.action === "move" || (ev.action === "press" && ev.button === 0))) {
+      if (popup.click) {
+        if (ev.action === "press") popup.click(choice.index);
+        return;
+      }
       popup.select(choice.index);
       if (ev.action === "press") this.#handleKey("enter");
       return;
@@ -555,6 +569,12 @@ export class App {
     const before = e.text.slice(0, e.cursor);
     e.insert(`${before && !/\s$/.test(before) ? " " : ""}[Image #${n}] `);
     this.#flash(`attached [Image #${n}] ${describeImage(img)}`);
+  }
+
+  /** ctrl+f, /find: the search bar takes the input's place; ctrl+f in it edits the query. */
+  #openSearch(query = ""): void {
+    if (this.#popup instanceof SearchBar) this.#popup.chat.endSearch(false);
+    this.#popup = new SearchBar(this.#session.chat, query);
   }
 
   // ---- permission modes and models ------------------------------------
@@ -745,19 +765,19 @@ export class App {
   #drawBody(buf: CellBuffer, r: { x: number; y: number; w: number; h: number }, now: number): void {
     const { chat, trace } = this.#session;
     const spin = SPINNER[Math.floor(now / SPINNER_MS) % SPINNER.length]!;
-    if (!this.#showTrace) return chat.render(buf, r, spin, now);
+    if (!this.#showTrace) return chat.render(buf, r, spin, now, this.#colors);
 
     const stats = `${trace.count} · ${this.#frame.ms.toFixed(1)}ms ${this.#frame.bytes}B`;
     if (r.w >= 100) {
       const traceW = Math.min(64, Math.floor(r.w * 0.42));
       const chatW = r.w - traceW - 3;
-      chat.render(buf, { ...r, w: chatW }, spin, now);
+      chat.render(buf, { ...r, w: chatW }, spin, now, this.#colors);
       for (let y = r.y; y < r.y + r.h; y++) buf.text(r.x + chatW + 1, y, "│", { fg: palette.faint });
       trace.render(buf, { x: r.x + chatW + 3, y: r.y, w: traceW, h: r.h }, stats);
     } else {
       const traceH = Math.max(3, Math.floor(r.h * 0.45));
       const chatH = r.h - traceH - 1;
-      chat.render(buf, { ...r, h: chatH }, spin, now);
+      chat.render(buf, { ...r, h: chatH }, spin, now, this.#colors);
       buf.text(r.x, r.y + chatH, "┄".repeat(r.w), { fg: palette.faint });
       trace.render(buf, { x: r.x, y: r.y + chatH + 1, w: r.w, h: traceH }, stats);
     }

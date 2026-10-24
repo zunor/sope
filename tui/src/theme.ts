@@ -34,6 +34,8 @@ export interface Surfaces {
   /** Diff lines. */
   added: number;
   removed: number;
+  /** Transcript search hits other than the current one. */
+  match: number;
 }
 
 const DARK_GUESS = 0x1e2027; // the background until (or unless) the terminal says
@@ -50,5 +52,6 @@ export function surfaces(bg: number | null): Surfaces {
     panelSelected: lift(0.17),
     added: mix(base, 0x2ea043, dark ? 0.2 : 0.16),
     removed: mix(base, 0xf85149, dark ? 0.2 : 0.14),
+    match: mix(base, palette.tool, dark ? 0.3 : 0.35),
   };
 }

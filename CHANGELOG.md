@@ -4,6 +4,8 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
+- TUI: search the conversation with `ctrl+f` or `/find`. Matches are highlighted as you type; `enter`, `n`/`N` and the search bar's `↑` `↓` buttons cycle through them, matches in collapsed tool output are expanded, and `esc` returns to the previous position. `ctrl+f` no longer moves the input cursor; use `→`.
+
 - Bound stalled model streams with native idle and absolute request deadlines; retry delays share the same absolute budget.
 
 - Bound repeated reads, failed retries and aggregate tool/search work in the native harness; retain budgets across compaction and recovery.

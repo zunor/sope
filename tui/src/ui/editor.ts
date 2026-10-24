@@ -153,7 +153,6 @@ export class Editor {
         this.left();
         break;
       case "right":
-      case "ctrl+f":
         this.right();
         break;
       case "home":

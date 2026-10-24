@@ -4,7 +4,7 @@
 
 import type { CellBuffer, Style } from "../render/buffer";
 import { mix } from "../render/color";
-import { palette } from "../theme";
+import { palette, surfaces, type Surfaces } from "../theme";
 import { stringWidth, truncate } from "../unicode/width";
 import { contextRows, type ContextReport } from "./context";
 import { renderMarkdown, slice } from "./markdown";
@@ -54,8 +54,30 @@ interface Span {
   userBorder?: boolean;
 }
 
+/** Where a line shows part of one of its message's searchable strings. */
+interface Source {
+  /** Which string of the message: numbered in the order its lines are built. */
+  part: number;
+  text: string;
+  /** The [start, end) of `text` on this line, starting at column `x` of it. */
+  start: number;
+  end: number;
+  x: number;
+}
+
+/** A search hit: [start, end) of one searchable string, first shown on `line` of its message. */
+export interface Hit {
+  msg: Message;
+  part: number;
+  start: number;
+  end: number;
+  line: number;
+}
+
 interface Line {
   spans: Span[];
+  /** The text it shows that a search can find. */
+  src?: Source[];
   /** Horizontal inset within the transcript content area. */
   offset?: number;
   fold?: "connector" | "control" | "body";
@@ -74,43 +96,56 @@ const USER_BORDER_BREATH_MS = 6000;
 const blank: Span = { text: "  ", style: {} };
 const marker: Span = { text: "⎿ ", style: { fg: palette.faint } };
 
-function textLines(text: string, width: number, style: Style, prefix?: [first: Span, rest: Span]): Line[] {
+function textLines(text: string, width: number, style: Style, part: number, prefix?: [first: Span, rest: Span]): Line[] {
   const expanded = text.replace(/\t/g, "    ").replace(/\n+$/, "");
   const inner = width - (prefix ? 2 : 0);
   return wrapText(expanded, inner).map((row, i) => {
     const spans = [{ text: expanded.slice(row.start, row.end), style }];
     if (prefix) spans.unshift(i === 0 ? prefix[0] : prefix[1]);
-    return { spans };
+    return { spans, src: [{ part, text: expanded, start: row.start, end: row.end, x: prefix ? 2 : 0 }] };
   });
 }
 
-function markdownLines(text: string, width: number): Line[] {
+function markdownLines(text: string, width: number, part: number): Line[] {
   const styled = renderMarkdown(text.replace(/\t/g, "    ").replace(/\n+$/, ""));
-  return wrapText(styled.text, width).map((row) => ({ spans: slice(styled, row.start, row.end, {}) }));
+  return wrapText(styled.text, width).map((row) => ({
+    spans: slice(styled, row.start, row.end, {}),
+    src: [{ part, text: styled.text, start: row.start, end: row.end, x: 0 }],
+  }));
 }
 
 /** Right-aligned user bubbles, with ordinary text and rounded character borders. */
-function userLines(text: string, width: number): Line[] {
-  if (width < 6) return textLines(text, width, {});
+function userLines(text: string, width: number, part: number): Line[] {
+  if (width < 6) return textLines(text, width, {}, part);
   const maxWidth = Math.min(width, Math.max(6, Math.floor(width * 0.75)));
   const expanded = text.replace(/\t/g, "    ").replace(/\n+$/, "");
   const rows = wrapText(expanded, maxWidth - 4)
-    .map((row) => truncate(expanded.slice(row.start, row.end).trimEnd(), maxWidth - 4));
-  const inner = Math.max(1, ...rows.map(stringWidth));
+    .map((row) => ({ row, text: truncate(expanded.slice(row.start, row.end).trimEnd(), maxWidth - 4) }));
+  const inner = Math.max(1, ...rows.map((r) => stringWidth(r.text)));
   const offset = width - inner - 4;
   const edge = (text: string): Span => ({ text, style: { fg: palette.faint }, userBorder: true });
   return [
     { offset, spans: [edge(`╭${"─".repeat(inner + 2)}╮`)] },
-    ...rows.map((text): Line => ({ offset, spans: [
-      edge("│ "), { text: text + " ".repeat(inner - stringWidth(text)), style: {} }, edge(" │"),
-    ] })),
+    ...rows.map(({ row, text }): Line => ({
+      offset,
+      spans: [edge("│ "), { text: text + " ".repeat(inner - stringWidth(text)), style: {} }, edge(" │")],
+      src: [{ part, text: expanded, start: row.start, end: row.start + text.length, x: 2 }],
+    })),
     { offset, spans: [edge(`╰${"─".repeat(inner + 2)}╯`)] },
   ];
 }
 
+/** One-row text with its whitespace collapsed, cut to `width`: the span, and the part of it shown. */
+function rowText(text: string, width: number, style: Style, part: number, x: number, lead = ""): { span: Span; src: Source } {
+  const flat = text.replace(/\s+/g, " ");
+  const shown = truncate(flat, width);
+  const end = shown === flat ? flat.length : shown.endsWith("…") ? shown.length - 1 : shown.length;
+  return { span: { text: lead + shown, style }, src: { part, text: flat, start: 0, end, x: x + stringWidth(lead) } };
+}
+
 /** A tool or subagent result whose entire block toggles its long preview. */
-function resultLines(text: string, width: number, ok: boolean | undefined, expanded: boolean, max = RESULT_LINES): Line[] {
-  const lines = textLines(text || "(empty)", width, { fg: ok === false ? palette.error : palette.muted }, [marker, blank]);
+function resultLines(text: string, width: number, ok: boolean | undefined, expanded: boolean, part: number, max = RESULT_LINES): Line[] {
+  const lines = textLines(text || "(empty)", width, { fg: ok === false ? palette.error : palette.muted }, part, [marker, blank]);
   if (lines.length <= max) return lines;
   lines.forEach((line, i) => { line.fold = i === 0 ? "connector" : "body"; line.foldRow = i; });
   if (expanded) return lines;
@@ -146,66 +181,79 @@ function seconds(m: Message): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-function titleLine(title: string, color: number, rest: string, width: number): Line {
-  const restWidth = Math.max(0, width - stringWidth(title) - 2);
-  return {
-    spans: [
-      { text: title, style: { fg: color, bold: true } },
-      { text: rest ? `  ${truncate(rest.replace(/\s+/g, " "), restWidth)}` : "", style: { fg: palette.muted } },
-    ],
-  };
+/** The title of a tool or subagent, then its input on the rest of the row; `part` and `part + 1` are searchable. */
+function titleLine(title: string, color: number, rest: string, width: number, part: number): Line {
+  const line: Line = { spans: [{ text: title, style: { fg: color, bold: true } }], src: [{ part, text: title, start: 0, end: title.length, x: 0 }] };
+  if (rest) {
+    const { span, src } = rowText(rest, Math.max(0, width - stringWidth(title) - 2), { fg: palette.muted }, part + 1, stringWidth(title), "  ");
+    line.spans.push(span);
+    line.src!.push(src);
+  }
+  return line;
 }
 
 function linesFor(m: Message, width: number, showThinking: boolean, expanded: boolean): Line[] {
+  // Searchable strings are numbered the same way whatever is folded, so a hit
+  // found in the unfolded layout names the same text in the one on screen.
+  let part = 0;
   let lines: Line[];
   switch (m.role) {
     case "user":
-      return userLines(m.text, width);
+      return userLines(m.text, width, part);
     case "assistant":
-      lines = markdownLines(m.text, width);
+      lines = markdownLines(m.text, width, part);
       break;
     case "error":
-      lines = textLines(m.text, width, { fg: palette.error });
+      lines = textLines(m.text, width, { fg: palette.error }, part);
       break;
     case "info":
-      lines = textLines(m.text, width, { fg: palette.muted });
+      lines = textLines(m.text, width, { fg: palette.muted }, part);
       break;
     case "context":
-      lines = m.context ? contextRows(m.context, width, summarizeInput).map((spans) => ({ spans })) : textLines(m.text, width, { fg: palette.muted });
+      lines = m.context ? contextRows(m.context, width, summarizeInput).map((spans) => ({ spans })) : textLines(m.text, width, { fg: palette.muted }, part);
       break;
     case "thinking": {
       const head = m.streaming ? "Thinking…" : `Thought for ${seconds(m)}`;
       lines = [{ spans: [{ text: head, style: { fg: palette.muted, italic: true } }] }];
-      const body = textLines(m.text.trim(), width, { fg: palette.faint, italic: true });
+      const body = textLines(m.text.trim(), width, { fg: palette.faint, italic: true }, part);
       if (showThinking) lines.push(...body);
       else if (m.streaming) lines.push(...body.slice(-THINKING_TAIL));
       break;
     }
     case "tool":
-      lines = [titleLine(m.title ?? "tool", palette.tool, summarizeInput(m.detail), width)];
-      if (!m.streaming) lines.push(...resultLines(m.text, width, m.ok, expanded));
+      lines = [titleLine(m.title ?? "tool", palette.tool, summarizeInput(m.detail), width, part)];
+      part += 2;
+      if (!m.streaming) lines.push(...resultLines(m.text, width, m.ok, expanded, part));
       break;
     case "subagent": {
-      lines = [titleLine(`agent · ${m.title ?? ""}`, palette.accent, m.detail ?? "", width)];
+      lines = [titleLine(`agent · ${m.title ?? ""}`, palette.accent, m.detail ?? "", width, part)];
+      part += 2;
       const steps = m.steps ?? [];
       if (steps.length > SUBAGENT_STEPS)
         lines.push({ spans: [blank, { text: `… ${steps.length - SUBAGENT_STEPS} earlier tool calls`, style: { fg: palette.faint } }] });
       for (const s of steps.slice(-SUBAGENT_STEPS)) {
         const glyph = !s.done ? "○" : s.ok === false ? "✕" : "●";
-        lines.push({
+        const line: Line = {
           spans: [
             blank,
             { text: `${glyph} `, style: { fg: s.ok === false ? palette.error : palette.tool } },
             { text: s.name, style: { fg: palette.tool } },
-            { text: s.detail ? `  ${truncate(s.detail.replace(/\s+/g, " "), Math.max(0, width - s.name.length - 6))}` : "", style: { fg: palette.muted } },
           ],
-        });
+          src: [{ part: part++, text: s.name, start: 0, end: s.name.length, x: 4 }],
+        };
+        const detail = part++;
+        if (s.detail) {
+          const { span, src } = rowText(s.detail, Math.max(0, width - s.name.length - 6), { fg: palette.muted }, detail, 4 + stringWidth(s.name), "  ");
+          line.spans.push(span);
+          line.src!.push(src);
+        }
+        lines.push(line);
       }
       if (m.streaming) {
         const tail = (m.tail ?? "").trim().split("\n").at(-1) ?? "";
         lines.push({ spans: [blank, { text: tail ? truncate(tail, width - 2) : `working · ${seconds(m)}`, style: { fg: palette.faint, italic: true } }] });
       } else {
-        lines.push(...resultLines(m.text, width, m.ok, expanded));
+        lines.push(...resultLines(m.text, width, m.ok, expanded, part));
       }
       break;
     }
@@ -238,6 +286,56 @@ function gutterFor(m: Message, spin: string): Span {
   }
 }
 
+/** The hits of `pattern` in a message's lines, in reading order; only text a line shows counts. */
+function findHits(msg: Message, lines: Line[], pattern: RegExp): Hit[] {
+  const parts = new Map<number, { text: string; rows: Array<{ start: number; end: number; line: number }> }>();
+  lines.forEach((line, i) => {
+    for (const s of line.src ?? []) {
+      if (s.end <= s.start) continue;
+      let p = parts.get(s.part);
+      if (!p) parts.set(s.part, (p = { text: s.text, rows: [] }));
+      p.rows.push({ start: s.start, end: s.end, line: i });
+    }
+  });
+  const hits: Hit[] = [];
+  for (const [part, { text, rows }] of parts) {
+    let r = 0;
+    for (const m of text.matchAll(pattern)) {
+      const start = m.index;
+      const end = start + m[0].length;
+      while (r < rows.length && rows[r]!.end <= start) r++;
+      if (r < rows.length && rows[r]!.start < end) hits.push({ msg, part, start, end, line: rows[r]!.line });
+    }
+  }
+  return hits.sort((a, b) => a.line - b.line || a.start - b.start);
+}
+
+/** What a search looks for: smart case, so a capital letter makes it case-sensitive. */
+function searchPattern(query: string): RegExp | null {
+  if (!query) return null;
+  return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), /\p{Lu}/u.test(query) ? "gu" : "giu");
+}
+
+const sameHit = (a: Pick<Hit, "msg" | "part" | "start">, b: Pick<Hit, "msg" | "part" | "start">) =>
+  a.msg === b.msg && a.part === b.part && a.start === b.start;
+
+/** A row of the transcript to come back to: a line of a message, or null for the bottom. */
+type Anchor = { msg: Message; row: number } | null;
+
+interface Search {
+  query: string;
+  pattern: RegExp | null;
+  /** The hit shown as current, found again by where it is as the transcript changes. */
+  current: Pick<Hit, "msg" | "part" | "start"> | null;
+  /** Bring the current hit into view at the next render. */
+  reveal: boolean;
+  /** Where the view was when the search began. */
+  home: Anchor;
+}
+
+const CURRENT_HIT: Style = { bg: palette.tool, fg: 0x16181d };
+const DEFAULT_SURFACES = surfaces(null);
+
 export class ChatView {
   #messages: Message[] = [];
   #nextId = 1;
@@ -253,6 +351,12 @@ export class ChatView {
   #foldAnchor: { msg: Message; outputRow: number; row: number } | null = null;
   #breathingMessage: Message | null = null;
   #breathStarted = 0;
+  #search: Search | null = null;
+  // Each message laid out unfolded, where a search looks, and its hits.
+  #searchCache = new WeakMap<Message, { key: string; lines: Line[]; pattern: RegExp | null; hits: Hit[] }>();
+  #restore: Anchor | undefined; // where a search that ended goes back to, at the next render
+  #width = 0; // of the content at the last render
+  #view: { all: Array<{ line: Line; msg: Message | null }>; first: number; height: number } | null = null;
   hasVisibleAnimation = false;
   showThinking = false;
 
@@ -283,6 +387,9 @@ export class ChatView {
     this.#lastLayout = { lines: 0, width: 0 };
     this.#foldAnchor = null;
     this.#breathingMessage = null;
+    this.#view = null;
+    this.#restore = undefined;
+    if (this.#search) this.#search = { ...this.#search, current: null, home: null };
     this.resetInteractions();
   }
 
@@ -327,7 +434,122 @@ export class ChatView {
     return Math.max(1, this.#height - 2);
   }
 
-  render(buf: CellBuffer, r: Rect, spin: string, now = performance.now()): void {
+  // ---- search (ctrl+f) --------------------------------------------------
+
+  get searching(): boolean {
+    return this.#search !== null;
+  }
+
+  /** Starts a search; endSearch(true) brings the view back to where it is now. */
+  startSearch(): void {
+    this.#search = { query: "", pattern: null, current: null, reveal: false, home: this.#anchor() };
+  }
+
+  /** Searches for `query` as typed; the current hit becomes the one nearest the view. */
+  setQuery(query: string): void {
+    const s = this.#search;
+    if (!s || query === s.query) return;
+    Object.assign(s, { query, pattern: searchPattern(query), current: null, reveal: false });
+  }
+
+  /** Moves to the next hit up (by = 1, older) or down (by = -1, newer), wrapping around. */
+  moveHit(by: 1 | -1): void {
+    const { hits, index } = this.#hits();
+    if (index >= 0) this.#select(hits[(((index - by) % hits.length) + hits.length) % hits.length]!);
+  }
+
+  /** Which hit is current, numbered from the newest (1), and how many there are. */
+  get searchStatus(): { index: number; total: number } {
+    const { hits, index } = this.#hits();
+    return { index: index < 0 ? 0 : hits.length - index, total: hits.length };
+  }
+
+  /** Folds or unfolds the long output the current hit is in. */
+  toggleHit(): void {
+    const { hits, index } = this.#hits();
+    const msg = hits[index]?.msg;
+    if (!msg || !this.#searchCache.get(msg)?.lines.some((l) => l.fold)) return;
+    if (this.#expanded.has(msg)) this.#expanded.delete(msg);
+    else this.#expanded.add(msg);
+    this.#search!.reveal = true;
+  }
+
+  /** Ends the search: the view stays on the current hit, or goes back to where it began. */
+  endSearch(goBack: boolean): void {
+    if (!this.#search) return;
+    if (goBack) this.#restore = this.#search.home;
+    this.#search = null;
+  }
+
+  /** The top row of the view, or null while it follows the bottom. */
+  #anchor(): Anchor {
+    const view = this.#view;
+    if (!view || this.#scroll === 0) return null;
+    let i = view.first;
+    while (i < view.all.length && !view.all[i]!.msg) i++;
+    const msg = view.all[i]?.msg;
+    if (!msg) return null;
+    return { msg, row: i - view.all.findIndex((e) => e.msg === msg) };
+  }
+
+  /** Every hit, oldest first, and the current one (-1 when there are none). */
+  #hits(): { hits: Hit[]; index: number } {
+    const s = this.#search;
+    const hits: Hit[] = [];
+    if (!s?.pattern || !this.#width) return { hits, index: -1 };
+    for (const m of this.#messages) for (const h of this.#hitsIn(m, s.pattern)) hits.push(h);
+    if (!hits.length) return { hits, index: -1 };
+    const current = s.current;
+    let index = current ? hits.findIndex((h) => sameHit(h, current)) : -1;
+    if (index < 0) {
+      // A new query starts at the hit nearest the view; one whose text went away moves there quietly.
+      index = this.#nearest(hits);
+      if (current) s.current = hits[index]!;
+      else this.#select(hits[index]!);
+    }
+    return { hits, index };
+  }
+
+  #hitsIn(m: Message, pattern: RegExp): Hit[] {
+    const key = `${this.#width}:${m.version}:${this.showThinking ? 1 : 0}`;
+    let entry = this.#searchCache.get(m);
+    if (entry?.key !== key) {
+      entry = { key, lines: linesFor(m, this.#width, this.showThinking, true), pattern: null, hits: [] };
+      this.#searchCache.set(m, entry);
+    }
+    if (entry.pattern !== pattern) {
+      entry.hits = findHits(m, entry.lines, pattern);
+      entry.pattern = pattern;
+    }
+    return entry.hits;
+  }
+
+  /** The newest hit not below the view, else the oldest one (all of them are below). */
+  #nearest(hits: Hit[]): number {
+    const view = this.#view;
+    if (!view) return hits.length - 1;
+    const heads = new Map<Message, number>();
+    view.all.forEach(({ msg }, i) => {
+      if (msg && !heads.has(msg)) heads.set(msg, i);
+    });
+    const bottom = view.first + view.height - 1;
+    for (let i = hits.length - 1; i >= 0; i--) {
+      const head = heads.get(hits[i]!.msg);
+      if (head !== undefined && head + hits[i]!.line <= bottom) return i;
+    }
+    return 0;
+  }
+
+  /** Makes `hit` current, unfolding the output that hides it, and brings it into view. */
+  #select(hit: Hit): void {
+    const s = this.#search!;
+    s.current = hit;
+    s.reveal = true;
+    const line = this.#searchCache.get(hit.msg)?.lines[hit.line];
+    if (line?.foldRow !== undefined && line.foldRow >= RESULT_LINES) this.#expanded.add(hit.msg);
+  }
+
+  render(buf: CellBuffer, r: Rect, spin: string, now = performance.now(), colors: Surfaces = DEFAULT_SURFACES): void {
     this.#foldHits = [];
     this.hasVisibleAnimation = false;
     const latestUser = this.#messages.findLast((m) => m.role === "user") ?? null;
@@ -340,6 +562,10 @@ export class ChatView {
     const breath = (1 - Math.cos(2 * Math.PI * elapsed / USER_BORDER_BREATH_MS)) / 2;
     const borderColor = mix(palette.faint, 0xffffff, breath);
     const contentWidth = Math.max(1, r.w - GUTTER);
+    // Before the layout: making a hit current can unfold the output it is in.
+    this.#width = contentWidth;
+    const found = this.#search ? this.#hits() : null;
+    const current = found?.hits[found.index] ?? null;
     const all: Array<{ line: Line; msg: Message | null }> = [];
     for (const m of this.#messages) {
       if (all.length) all.push({ line: { spans: [] }, msg: null });
@@ -358,7 +584,24 @@ export class ChatView {
       this.#foldAnchor = null;
     }
     this.#scroll = Math.max(0, Math.min(this.#scroll, this.#maxScroll));
+    if (this.#search?.reveal && current) {
+      // Scroll only when the hit is off screen (or at its edge), then put it a third of the way down.
+      this.#search.reveal = false;
+      let at = all.findIndex(({ line, msg }) => msg === current.msg && line.src?.some((s) => s.part === current.part && s.start < current.end && current.start < s.end));
+      if (at < 0) at = all.findIndex(({ msg }) => msg === current.msg); // folded away again
+      const top = this.#maxScroll - this.#scroll;
+      const margin = Math.min(2, Math.floor(r.h / 4));
+      if (at >= 0 && (at < top + margin || at > top + r.h - 1 - margin)) this.#scroll = this.#maxScroll - (at - Math.floor(r.h / 3));
+    }
+    if (this.#restore !== undefined) {
+      const home = this.#restore;
+      this.#restore = undefined;
+      const head = home ? all.findIndex(({ msg }) => msg === home.msg) : -1;
+      this.#scroll = head < 0 ? 0 : this.#maxScroll - (head + home!.row);
+    }
+    this.#scroll = Math.max(0, Math.min(this.#scroll, this.#maxScroll));
     const first = this.#maxScroll - this.#scroll;
+    this.#view = { all, first, height: r.h };
 
     // Build only visible targets, clipped to the chat pane (including trace mode).
     const scrollLabel = this.#scroll > 0 ? ` ↓ ${this.#scroll} more ` : "";
@@ -401,10 +644,32 @@ export class ChatView {
         const style = breathing ? { ...s.style, fg: borderColor } : highlight ? { ...s.style, fg: 0xffffff } : s.style;
         x = buf.text(x, y, s.text, style, r.x + r.w);
       }
+      if (found && msg && line.src) this.#paintHits(buf, line, msg, r.x + GUTTER + (line.offset ?? 0), y, r.x + r.w, current, colors);
     }
 
     if (this.#scroll > 0) {
       buf.text(r.x + r.w - scrollLabel.length, r.y + r.h - 1, scrollLabel, { fg: palette.muted, inverse: true });
+    }
+  }
+
+  /** Tints the search hits on one drawn line; the current one stands out. */
+  #paintHits(buf: CellBuffer, line: Line, msg: Message, x: number, y: number, limit: number, current: Hit | null, colors: Surfaces): void {
+    const entry = this.#searchCache.get(msg);
+    if (!entry?.pattern || entry.pattern !== this.#search?.pattern) return; // hits of an earlier query
+    const hits = entry.hits;
+    for (const s of line.src!) {
+      for (const h of hits) {
+        if (h.part !== s.part || h.end <= s.start || h.start >= s.end) continue;
+        const from = Math.max(h.start, s.start);
+        const x0 = x + s.x + stringWidth(s.text.slice(s.start, from));
+        const x1 = Math.min(limit, buf.width, x0 + stringWidth(s.text.slice(from, Math.min(h.end, s.end))));
+        const style = h === current ? CURRENT_HIT : { bg: colors.match };
+        for (let col = Math.max(0, x0); col < x1; col++) {
+          const i = y * buf.width + col;
+          buf.bg[i] = style.bg!;
+          if (style.fg !== undefined) buf.fg[i] = style.fg;
+        }
+      }
     }
   }
 

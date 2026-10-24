@@ -26,6 +26,8 @@ test("CSI keys with modifiers", () => {
   expect(parse("\x1b[A\x1b[1;5C\x1b[3~\x1b[5~\x1b[Z")).toEqual(["up", "ctrl+right", "delete", "pageup", "shift+tab"]);
   expect(parse("\x1bOP")).toEqual(["f1"]);
   expect(parse("\x1b[13;2u")).toEqual(["shift+enter"]);
+  // Cmd (super) keys a terminal passes on, such as cmd+f once Ghostty unbinds it.
+  expect(parse("\x1b[102;9u\x1b[102;13u\x1b[1;9A")).toEqual(["super+f", "super+ctrl+f", "super+up"]);
 });
 
 test("invalid CSI-u code points are ignored without losing later input", () => {

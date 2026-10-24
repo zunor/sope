@@ -22,6 +22,8 @@ export interface CommandHost {
   useModel(id: string): void;
   openModes(): void;
   openEffort(): void;
+  /** Opens the search bar; with a query, browses its hits. */
+  openSearch(query?: string): void;
   /** This session's reasoning effort from its next turn; also the default for new sessions. */
   setEffort(effort: Effort): void;
   setMode(mode: PermissionMode): void;
@@ -77,6 +79,7 @@ export const COMMANDS: Command[] = [
       h.openModes();
     },
   },
+  { name: "find", args: "[text]", description: "Search this conversation; n/N step through the hits", keys: "ctrl+f", run: (h, args) => h.openSearch(args.join(" ")) },
   { name: "context", description: "Show what fills the model's context window", run: (h) => h.session.showContext() },
   { name: "compact", args: "[focus]", description: "Summarize the conversation to free context (also automatic)", run: (h, args) => h.session.compact(args.join(" ")) },
   { name: "recover", args: "[resume|resolve <id> <ok|error> <outcome>]", description: "Inspect and resume an interrupted task after verifying tool outcomes", run: (h, args) => h.session.recover(args) },

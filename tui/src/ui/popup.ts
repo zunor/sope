@@ -37,9 +37,11 @@ export interface Popup {
   render(buf: CellBuffer, x: number, y: number, w: number, h: number, colors: Surfaces): PopupFrame;
   key(id: string): Reply;
   /** Typed or pasted text. Without it, a typed character is a key. */
-  type?(text: string): void;
+  type?(text: string): Reply | void;
   /** The pointer is on choice `index`; a click then presses enter. */
   select(index: number): void;
+  /** A click on choice `index`, for popups whose choices are buttons rather than a list. */
+  click?(index: number): void;
   /** The wheel turned over the popup (-1 up, 1 down). */
   wheel?(by: number): void;
 }

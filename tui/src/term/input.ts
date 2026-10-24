@@ -11,6 +11,8 @@ export interface Mods {
   ctrl: boolean;
   alt: boolean;
   shift: boolean;
+  /** Cmd on macOS; only kitty-protocol keys report it, and only when the terminal does not take the key itself. */
+  super?: boolean;
 }
 
 export type KeyEvent = { type: "key"; name: string } & Mods;
@@ -40,13 +42,15 @@ function key(name: string, mods: Partial<Mods> = {}): KeyEvent {
 
 /** Canonical id such as "ctrl+shift+left", for matching bindings. */
 export function keyId(ev: KeyEvent): string {
-  return `${ev.ctrl ? "ctrl+" : ""}${ev.alt ? "alt+" : ""}${ev.shift ? "shift+" : ""}${ev.name}`;
+  return `${ev.super ? "super+" : ""}${ev.ctrl ? "ctrl+" : ""}${ev.alt ? "alt+" : ""}${ev.shift ? "shift+" : ""}${ev.name}`;
 }
 
 function modsFrom(param: number | undefined): Mods {
   if (!param || param < 2) return { ...NO_MODS };
   const bits = param - 1;
-  return { shift: (bits & 1) !== 0, alt: (bits & 2) !== 0, ctrl: (bits & 4) !== 0 };
+  const mods: Mods = { shift: (bits & 1) !== 0, alt: (bits & 2) !== 0, ctrl: (bits & 4) !== 0 };
+  if (bits & 8) mods.super = true;
+  return mods;
 }
 
 function controlKey(code: number, alt = false): KeyEvent {
