@@ -10,6 +10,7 @@
  */
 #include "sope_internal.h"
 
+#include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -23,7 +24,9 @@ static const char INSTRUCTIONS[] =
     "Include everything needed to continue seamlessly:\n"
     "1. The user's requests and intent, in order, quoting key wording.\n"
     "2. Key facts, decisions and constraints established so far.\n"
-    "3. Files, commands, code and tool results that still matter, with exact names, paths and values.\n"
+    "3. Files, commands, code and tool results that still matter, with exact names, paths and values. "
+    "Preserve call IDs with their actual invocation and result; IDs cited inside files from other runs "
+    "are not IDs of this transcript's tool executions.\n"
     "4. Errors encountered and how they were resolved. Preserve failed, cancelled, pending and unverified states; "
     "never promote them to success. Separate observations, hypotheses and model-written claims.\n"
     "5. Work completed, work in progress, and the next step (if the latest request is unfinished).\n"
@@ -83,12 +86,16 @@ static void transcript(sope_buf *b, const sope_history *h, const sope_message *e
             sope__buf_appends(b, "\n[assistant]\n");
             append_clipped(b, m->content, m->content_len, cap);
             for (i = 0; i < m->n_tool_uses; i++) {
-                sope__buf_appendf(b, "\n[assistant called tool %s]\n", m->tool_uses[i].name);
+                const sope_tool_use *u = &m->tool_uses[i];
+                sope__buf_appendf(b, "\n[assistant called tool %s; provider_id=%s", u->name, u->id ? u->id : "unknown");
+                if (u->call_id) sope__buf_appendf(b, "; call_id=%" PRIu64, u->call_id);
+                sope__buf_appends(b, "]\n");
                 append_clipped(b, m->tool_uses[i].input, m->tool_uses[i].input_len, cap);
             }
             break;
         case SOPE__MSG_TOOL:
-            sope__buf_appendf(b, "\n[%s %s]\n", m->tool_name, m->is_error ? "failed" : "returned");
+            sope__buf_appendf(b, "\n[%s %s; provider_id=%s]\n", m->tool_name, m->is_error ? "failed" : "returned",
+                              m->tool_use_id ? m->tool_use_id : "unknown");
             /* Important evidence can be anywhere in a tool result. Only clip
              * when the complete transcript exceeds the actual input budget. */
             append_clipped(b, m->content, m->content_len, cap);

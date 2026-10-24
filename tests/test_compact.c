@@ -21,13 +21,14 @@ static void test_transcript_budget_and_utf8(void)
     use.input_len = body.len;
     sope_message *call = sope__message_new(SOPE__MSG_ASSISTANT, "", 0);
     call->tool_uses = calloc(1, sizeof *call->tool_uses);
-    call->tool_uses[0] = (sope_tool_use){ .id = sope__strdup("call"), .name = sope__strdup("bash"),
+    call->tool_uses[0] = (sope_tool_use){ .call_id = 42, .id = sope__strdup("call"), .name = sope__strdup("bash"),
                                         .input = sope__strdup(body.ptr), .input_len = body.len };
     call->n_tool_uses = 1;
     sope__history_append(&h, call);
     sope__history_append(&h, sope__tool_message(&use, body.ptr, body.len, 1));
     CHECK(sope__compact_request(&h, NULL, NULL, 0, 2200, &text, &len) == SOPE_OK);
     if (text) {
+        CHECK(strstr(text, "call_id=42") && strstr(text, "provider_id=call"));
         CHECK(strstr(text, "HEAD: compile started") != NULL);
         CHECK(strstr(text, "TAIL: tests failed, exit 1") != NULL);
         CHECK(strstr(text, "bytes omitted") != NULL);

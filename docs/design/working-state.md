@@ -19,7 +19,8 @@ in the durable inbox, so crash recovery preserves its original text too.
 These are different sources of information: the request is user-authored;
 todos are model-authored assertions; execution receipts are native observations.
 An exit status does not certify test assertions, coverage, source freshness or
-correctness. Old plans remain visible across turns, but only a plan updated in
+correctness. Compaction transcripts keep native call IDs attached to their
+invocations and retain provider IDs linking each result to its call. Old plans remain visible across turns, but only a plan updated in
 the current turn participates in completion reconciliation.
 
 `evidence({session_id, call_id, offset, limit})` reads an original committed tool result

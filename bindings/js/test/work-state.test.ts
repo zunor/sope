@@ -49,6 +49,7 @@ test("a lossy summary cannot replace current intent, task status or execution ou
  const events=await drain(a,e=>a.toolResult(e.callId,"bulk data ".repeat(10000)));
  expect(events.at(-1)).toMatchObject({stopReason:"end_turn"});
  expect(events.filter(e=>e.type==="compact")).toHaveLength(1);
+ expect(String(requests.find(isCompact)!.messages![1]!.content)).toContain("call_id=2");
  const after=requests.filter(r=>!isCompact(r))[2]!;
  expect(working(after)).toContain("EXACT TASK: verify; never change production files. 中文约束");
  expect(working(after)).toContain('"status":"pending"');
