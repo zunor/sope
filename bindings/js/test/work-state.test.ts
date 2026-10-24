@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type SopeEvent } from "../src";
+import { Database } from "bun:sqlite";
 
 type Request = { messages?: {role:string;content:unknown}[]; input?: {role?:string;content?:unknown}[]; instructions?: string };
 const requests: Request[] = [];
@@ -107,7 +108,9 @@ test("evidence recalls exact paginated tool results after compaction and reopen 
  a.send("Observe once");await drain(a,e=>{runs++;a.toolResult(e.callId,"A😀B中文C",true);});
  a.compact();await drain(a);a.free();agents.splice(agents.indexOf(a),1);
  a=create(dir);a.registerTool({name:"probe",description:"observation",inputSchema:{type:"object"}});
- round=0;respond=()=>++round===1?tools({name:"evidence",input:{call_id:1,offset:0,limit:5}}):round===2?tools({name:"evidence",input:{call_id:1,offset:5,limit:8}}):text("historical error, not a pass");
+ const db=new Database(join(dir,"execution.sqlite"),{readonly:true});
+ const session=(db.query("SELECT session_id FROM runtime WHERE id=1").get() as {session_id:string}).session_id;db.close();
+ round=0;respond=()=>++round===1?tools({name:"evidence",input:{session_id:session,call_id:1,offset:0,limit:5}}):round===2?tools({name:"evidence",input:{session_id:session,call_id:1,offset:5,limit:8}}):text("historical error, not a pass");
  a.send("Retrieve the observation; do not rerun");const events=await drain(a,()=>{throw new Error("replayed probe");});
  const results=events.flatMap(e=>e.type==="tool_end"&&e.name==="evidence"?[JSON.parse(e.result)]:[]);
  expect(results).toHaveLength(2);
@@ -131,4 +134,29 @@ test("oversized plan replacements fail without losing the last valid plan",async
  a.send("Verify");const events=await drain(a);
  expect(events.some(e=>e.type==="tool_end"&&e.isError&&e.result.includes("16000 bytes"))).toBe(true);
  expect(working(requests.at(-1)!)).toContain('"status":"completed"');
+});
+
+test("receipt identity cannot join a different session's test claim to an unrelated command",async()=>{
+ const firstDir=mkdtempSync(join(tmpdir(),"sope-origin-a-"));const secondDir=mkdtempSync(join(tmpdir(),"sope-origin-b-"));dirs.push(firstDir,secondDir);
+ const first=create(firstDir);let round=0;
+ respond=()=>++round===1?tools({name:"check",input:{argv:["/usr/bin/false"]}}):round===2?tools({name:"evidence",input:{}}):text("observed failure");
+ first.send("Observe test failure");const firstEvents=await drain(first);
+ const firstResult=firstEvents.find((e):e is Extract<SopeEvent,{type:"tool_end"}>=>e.type==="tool_end"&&e.name==="evidence");
+ const ledger=JSON.parse(firstResult!.result);
+ expect(ledger.receipts[0]).toMatchObject({version:2,session_id:ledger.session_id,call_id:1,exit_code:1});
+ const second=create(secondDir);round=0;let ownSession="";
+ respond=r=>{
+  if(++round===1)return tools({name:"check",input:{argv:["/bin/echo","directory listing is not a test"]}});
+  const state=JSON.parse(working(r).split("\n").slice(1).join("\n"));ownSession=state.session_id;
+  if(round===2)return tools({name:"evidence",input:{session_id:ledger.session_id,call_id:1}});
+  if(round===3)return tools({name:"evidence",input:{call_id:1}});
+  if(round===4)return tools({name:"evidence",input:{session_id:ownSession,call_id:1}});
+  return text("Unrelated command is not a test result");
+ };
+ second.send("Inspect local observation");const events=await drain(second);
+ const recalls=events.filter(e=>e.type==="tool_end"&&e.name==="evidence") as Extract<SopeEvent,{type:"tool_end"}>[];
+ expect(recalls.map(e=>e.isError)).toEqual([true,true,false]);
+ expect(ownSession).not.toBe(ledger.session_id);
+ expect(working(requests.at(-1)!)).toContain('"argv":["/bin/echo","directory listing is not a test"]');
+ expect(JSON.parse(recalls[2]!.result)).toMatchObject({session_id:ownSession,call_id:1});
 });

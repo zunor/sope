@@ -22,8 +22,12 @@ An exit status does not certify test assertions, coverage, source freshness or
 correctness. Old plans remain visible across turns, but only a plan updated in
 the current turn participates in completion reconciliation.
 
-`evidence({call_id, offset, limit})` reads an original committed tool result
-from the durable journal, scoped to the calling agent. Results remain available
+`evidence({session_id, call_id, offset, limit})` reads an original committed tool result
+from the durable journal, scoped to the calling session and agent. Bare call
+IDs or a different session ID are rejected; unrelated runs can reuse the same
+call number. Working state and receipts carry session/agent/turn provenance;
+recent execution entries include the exact bounded command, or explicitly mark
+it omitted. A directory listing cannot stand in for a cited test invocation. Results remain available
 after compaction and reopening. This is paginated historical retrieval, not
 reexecution or a cache hit asserting current file validity. Offsets and limits
 are bytes; pages preserve UTF-8 boundaries and return `next_offset`. Without

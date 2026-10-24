@@ -253,7 +253,11 @@ void sope__harness_evidence(sope_agent_t *a, sope_buf *out, int summary)
         if(!h || (!h->count && !h->shells))return;
         sope__buf_appends(out,"\n\nExecution evidence — recorded by sope (historical observations, not proof of correctness):\n");
         if(!h->count){sope__buf_appends(out,"No structured checks recorded. Shell completion alone does not establish test success.\n");return;}
-    } else sope__buf_appends(out,"{\"retention\":32,\"scope\":\"historical execution facts; no claim of current source validity\",\"receipts\":[");
+        sope__buf_appendf(out,"Session %s; agent %" PRIu64 ". Call IDs from other runs are not these receipts.\n", a->root->session_id,a->agent_id);
+    } else {
+        sope__buf_appendf(out,"{\"session_id\":\"%s\",\"agent_id\":%" PRIu64 ",", a->root->session_id,a->agent_id);
+        sope__buf_appends(out,"\"retention\":32,\"scope\":\"historical execution facts; no claim of current source validity\",\"receipts\":[");
+    }
     unsigned count=h?h->count:0;
     unsigned start=summary && count>8 ? count-8:0;
     if (summary) sope__buf_appendf(out,"Showing latest %u of %u retained executions (retention: 32).\n",count-start,count);
@@ -272,6 +276,9 @@ static sope_next evidence(tool_run *r)
 {
     const sope_json *id = sope__json_get(r->input, "call_id");
     if (id) {
+        const char *session=sope__json_string(sope__json_get(r->input,"session_id"),NULL);
+        if(!session || strcmp(session,r->agent->root->session_id))
+            return sope__run_fail(r,"Historical recall requires the current session_id from runtime working state or evidence(). Bare call IDs and IDs from other sessions cannot identify this execution's evidence.");
         if (!unsigned_field(r->input,"call_id",9007199254740991ULL) || id->num < 1 ||
             !unsigned_field(r->input,"offset",UINT32_MAX) || !unsigned_field(r->input,"limit",8192))
             return sope__run_fail(r,"call_id must be a positive integer; offset >= 0; limit 4..8192 bytes");
@@ -289,10 +296,10 @@ static sope_next evidence(tool_run *r)
 }
 const sope_builtin sope__builtin_evidence={"evidence",
     "With no arguments, returns the last 32 native execution receipts across compaction and reopen. "
-    "With call_id, retrieves a page of that agent's original committed tool result from durable execution "
+    "With call_id and the current session_id (both required for recall), retrieves a page of that agent's original committed tool result from durable execution "
     "without rerunning it. offset and limit are UTF-8 byte offsets (default limit 8192); use next_offset to continue. "
     "Historical observations do not prove current file contents, coverage or correctness.",
-    "{\"type\":\"object\",\"properties\":{\"call_id\":{\"type\":\"integer\"},\"offset\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}}}",0,evidence,NULL};
+    "{\"type\":\"object\",\"properties\":{\"session_id\":{\"type\":\"string\"},\"call_id\":{\"type\":\"integer\"},\"offset\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}}}",0,evidence,NULL};
 
 /* The plan is model-authored; only its persisted status is a fact. A bounded
  * reconciliation prevents silent success with outstanding items, not false
@@ -337,12 +344,14 @@ int sope__harness_context(sope_agent_t *a)
     if (task || (h && (h->todos || h->count))) {
         sope__buf_appends(&b, "Runtime working state (derived data, not a new user request). "
             "Summaries may be lossy: use the original request and recorded observations below to resolve conflicts. "
-            "Todos are model assertions, not verified completion. Receipts prove process outcomes only; "
+            "Todos are model assertions, not verified completion. Call IDs are scoped to this session and agent; "
+            "numbers cited in files from other runs are not these receipts. Never associate a test claim with an "
+            "unrelated command. Receipts prove process outcomes only; "
             "source freshness, coverage and correctness require assessment. Reuse known evidence; reread only the needed "
             "range when a specific uncertainty or source change requires it. Finish the requested deliverables and "
             "reconcile the plan before answering; mark a genuinely blocked item with its reason, never as completed.\n");
-        sope__buf_appendf(&b, "{\"round\":%" PRIu64 ",\"remaining_rounds\":%" PRIu64,
-            t->round, t->max_rounds > (int64_t)t->round ? (uint64_t)t->max_rounds - t->round : 0);
+        sope__buf_appendf(&b, "{\"session_id\":\"%s\",\"agent_id\":%" PRIu64 ",\"turn_id\":%" PRIu64 ",\"round\":%" PRIu64 ",\"remaining_rounds\":%" PRIu64,
+            a->root->session_id,a->agent_id,request ? request->turn_id : 0,t->round, t->max_rounds > (int64_t)t->round ? (uint64_t)t->max_rounds - t->round : 0);
         if (task) {
             sope__buf_appends(&b, ",\"original_current_request\":");
             sope__buf_append_json_string(&b, request->text, request->len);
@@ -364,6 +373,16 @@ int sope__harness_context(sope_agent_t *a)
                     sope__json_number(sope__json_get(r,"call_id"),0),sope__json_number(sope__json_get(r,"exit_code"),-1));
                 const char *outcome=sope__json_string(sope__json_get(r,"outcome"),NULL);
                 sope__buf_append_json_string(&b,outcome ? outcome : "unknown",outcome ? strlen(outcome) : 7);
+                const char *tool=sope__json_string(sope__json_get(r,"tool"),NULL);
+                sope__buf_appends(&b,",\"tool\":");
+                sope__buf_append_json_string(&b,tool?tool:"unknown",tool?strlen(tool):7);
+                const sope_json *input=sope__json_get(r,"input");
+                sope_buf command={0};
+                int exact=input && input->type==SOPE_JSON_OBJECT && sope__json_canonical(&command,input,0) && !command.oom && command.len<=1024;
+                sope__buf_appends(&b,",\"input\":");
+                if(exact)sope__buf_append(&b,command.ptr,command.len);
+                else sope__buf_appends(&b,"null,\"input_omitted\":true");
+                sope__buf_free(&command);
                 sope__buf_appends(&b,"}");sope__json_free(r);
             }
             sope__buf_appends(&b,"],\"recent_reads\":[");
@@ -378,7 +397,7 @@ int sope__harness_context(sope_agent_t *a)
                 sope__buf_appends(&b,strlen(best->key+5)<=1024?best->key+5:"null");
                 sope__buf_appends(&b,"}");before=best->last;
             }
-            sope__buf_appends(&b,"],\"execution_details\":\"Use evidence(call_id) for exact historical tool results; evidence() for execution receipts. A read call may have failed; inspect its result.\"}");
+            sope__buf_appends(&b,"],\"execution_details\":\"Use evidence(session_id, call_id) for exact historical tool results; evidence() for execution receipts. A read call may have failed; inspect its result.\"}");
         } else sope__buf_appends(&b,"}");
     }
     if(b.oom){sope__buf_free(&b);return 0;}

@@ -502,7 +502,7 @@ literal arguments. Explicitly invoking an interpreter retains its semantics.
 `check` uses the same execution permissions and environment as `bash`.
 
 Every completed native `check` and foreground `bash` produces an execution
-receipt: call/turn IDs, input, cwd, exit status, timeout outcome and raw output
+receipt: session/agent/call/turn IDs, input, cwd, exit status, timeout outcome and raw output
 archive path. Inputs above 16 KiB are omitted from the receipt (the durable
 intent retains them). The last 32 receipts survive compaction and durable
 reopen. Admission state commits before dispatch; receipt state commits in the
@@ -510,7 +510,7 @@ same transaction as its tool result. Unknown/cancelled outcomes do not become
 successful receipts. Host tools replacing these builtins cannot supply trusted
 receipts. Background shells currently have no completion receipts.
 
-`evidence()` retrieves the ledger. With `call_id`, it retrieves that agent's
+`evidence()` retrieves the ledger. With `session_id` and `call_id`, it retrieves that agent's
 original committed tool result from durable execution; optional byte `offset`
 and `limit` (4–8192, default 8192) paginate via `next_offset`, preserving UTF-8.
 This does not rerun a tool or assert that an earlier file read is still current.

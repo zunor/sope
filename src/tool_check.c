@@ -39,11 +39,11 @@ static int command(tool_run *r, sope_buf *cmd)
 void sope__execution_receipt(tool_run *r, int status)
 {
     sope_buf b = {0};
-    sope__buf_appendf(&b, "{\"version\":1,\"call_id\":%" PRIu64 ",\"turn_id\":%" PRIu64 ",\"tool\":\"%s\",\"input\":", r->call_id, r->turn_id, r->tool->name);
+    sope__buf_appendf(&b, "{\"version\":2,\"session_id\":\"%s\",\"agent_id\":%" PRIu64 ",\"call_id\":%" PRIu64 ",\"turn_id\":%" PRIu64 ",\"tool\":\"%s\",\"input\":", r->agent->root->session_id, r->agent->agent_id, r->call_id, r->turn_id, r->tool->name);
     sope_buf input = {0};
     int valid = sope__json_canonical(&input, r->input, 0) && !input.oom;
     /* Large shell scripts already live in their tool intent; don't duplicate
-     * them in every bounded ledger checkpoint. Call ID is the join key. */
+     * them in every bounded ledger checkpoint. Session, agent and call IDs identify the observation. */
     if (valid && input.len <= 16384) sope__buf_append(&b, input.ptr, input.len);
     else sope__buf_appends(&b, "null,\"input_omitted\":true");
     sope__buf_free(&input);
@@ -64,8 +64,8 @@ void sope__execution_receipt(tool_run *r, int status)
     r->receipt = b.ptr;
     sope__buf_appends(&r->out, "\n[sope execution receipt; test assertions and coverage unverified]\n");
     sope__buf_appendf(&r->out,
-        "{\"execution_id\":%" PRIu64 ",\"outcome\":\"%s\",\"exit_code\":%d,\"test_verdict\":\"unverified\"}",
-        r->call_id, r->timed_out ? "timed_out" : status ? "process_failed" : "process_exited_zero", status);
+        "{\"session_id\":\"%s\",\"agent_id\":%" PRIu64 ",\"call_id\":%" PRIu64 ",\"outcome\":\"%s\",\"exit_code\":%d,\"test_verdict\":\"unverified\"}",
+        r->agent->root->session_id, r->agent->agent_id, r->call_id, r->timed_out ? "timed_out" : status ? "process_failed" : "process_exited_zero", status);
 }
 
 static sope_next check(tool_run *r)

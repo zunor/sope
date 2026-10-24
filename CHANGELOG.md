@@ -4,6 +4,8 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
+- Scope execution evidence by session and agent, include exact bounded invocations in working state, and reject ambiguous historical-result references.
+
 - Preserve task plans and execution observations outside model summaries; retrieve historical tool results without rerunning them, reconcile unfinished plans before completion, and trace repeated reads.
 
 - Retry transient provider and interrupted-stream failures with bounded attempts, jittered backoff, Retry-After and shared deadlines; expose explicit discarded-attempt events in the ABI, bindings, TUI and print mode.

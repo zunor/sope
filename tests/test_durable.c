@@ -454,7 +454,11 @@ static void test_execution_receipts(void)
         if (ev.type == SOPE_EVENT_TURN_END) break;
     }
     REQUIRE(seen == 1);
-    send_text(a, "!evidence {\"call_id\":1,\"limit\":8192}");
+    const char *status;char session[128],command[512];
+    REQUIRE(sope_agent_status(a,&status,NULL)==SOPE_OK);
+    REQUIRE(sscanf(status,"{\"session_id\":\"%127[^\"]",session)==1);
+    snprintf(command,sizeof command,"!evidence {\"session_id\":\"%s\",\"call_id\":1,\"limit\":8192}",session);
+    send_text(a,command);
     seen=0;
     for (;;) {
         sope_event_t ev=poll_event(a);

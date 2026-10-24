@@ -661,8 +661,8 @@ int sope__journal_recall(sope_agent_t *a, uint64_t call, size_t offset, size_t l
             while (start < m->content_len && ((unsigned char)m->content[start] & 0xc0) == 0x80) start++;
             size_t end = m->content_len-start > limit ? start+limit : m->content_len;
             while (end > start && end < m->content_len && ((unsigned char)m->content[end] & 0xc0) == 0x80) end--;
-            sope__buf_appendf(out,"{\"call_id\":%" PRIu64 ",\"is_error\":%s,\"offset\":%zu,\"next_offset\":%zu,\"total_bytes\":%zu,\"historical\":true,\"content\":",
-                call,m->is_error?"true":"false",start,end,m->content_len);
+            sope__buf_appendf(out,"{\"session_id\":\"%s\",\"agent_id\":%" PRIu64 ",\"call_id\":%" PRIu64 ",\"is_error\":%s,\"offset\":%zu,\"next_offset\":%zu,\"total_bytes\":%zu,\"historical\":true,\"content\":",
+                a->root->session_id,a->agent_id,call,m->is_error?"true":"false",start,end,m->content_len);
             sope__buf_append_json_string(out,m->content+start,end-start);
             sope__buf_appends(out,"}");rc=out->oom?SOPE_ENOMEM:SOPE_OK;
         }
