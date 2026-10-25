@@ -4,6 +4,8 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
+- Recover output-truncated model responses with bounded output-budget growth, preserving committed tools and reported usage; expose output-limit exhaustion and budget changes in events and traces.
+
 - Close a quiescent accepted/rejected/incomplete report directly in the runtime once todos are resolved, eliminating a final provider request and unnecessary compaction.
 
 - Evaluate host-defined acceptance criteria against original native check observations; publish structured verdicts, preserve contracts through compaction, and prevent unsupported prose or todo completion from establishing acceptance.

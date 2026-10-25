@@ -13,7 +13,8 @@ const success = () => new Response(chunk({ content: "recovered" }, "stop") + "da
 async function run(reply: (attempt: number) => Response, options: Record<string, string> = {}) {
   let attempts = 0;
   const times: number[] = [];
-  const server = Bun.serve({ port: 0, fetch() { times.push(performance.now()); return reply(++attempts); } });
+  const bodies: Record<string, unknown>[] = [];
+  const server = Bun.serve({ port: 0, async fetch(req) { bodies.push(await req.json() as Record<string, unknown>); times.push(performance.now()); return reply(++attempts); } });
   const agent = Agent.create({ provider: "openai", model: "fixture",
     "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": "10",
     "openai.request_timeout_ms": "3000", ...options });
@@ -25,7 +26,7 @@ async function run(reply: (attempt: number) => Response, options: Record<string,
       const ev = agent.poll(0);
       if (!ev) { await Bun.sleep(2); continue; }
       events.push(ev);
-      if (ev.type === "turn_end") return { attempts, events, times, history: agent.history() };
+      if (ev.type === "turn_end") return { attempts, events, times, bodies, history: agent.history() };
       if (ev.type === "tool_call" || ev.type === "tool_start") throw new Error("failed attempt dispatched a tool");
     }
     throw new Error("fixture timed out");
@@ -69,7 +70,6 @@ for (const [name, response] of [
   ["SSE auth", () => new Response('data: {"error":{"code":"invalid_api_key"}}\n\n')],
   ["JSON auth with status 200", () => Response.json({ error: { code: "invalid_api_key" } })],
   ["context overflow", () => Response.json({ error: { code: "context_length_exceeded" } }, { status: 500 })],
-  ["output limit", () => new Response(chunk({ content: "limited" }, "length") + "data: [DONE]\n\n")],
   ["malformed data", () => new Response("data: {bad json}\n\n")],
 ] as const) test(`${name} is terminal, not transient`, async () => {
   const r = await run(response);
@@ -161,13 +161,13 @@ for (const cancel of [false, true]) test(cancel ? "cancellation interrupts backo
   } finally { agent.free(); server.stop(true); }
 });
 
-test("retry after a committed tool does not replay it, and durable history excludes the abandoned attempt", async () => {
+for (const length of [false, true]) test(`retry after a committed tool preserves durable evidence (output limit: ${length})`, async () => {
   const dir = mkdtempSync(join(tmpdir(), "sope-retry-durable-"));
   const bodies: unknown[] = [];
   const server = Bun.serve({ port: 0, async fetch(req) {
     bodies.push(await req.json());
     if (bodies.length === 1) return new Response(chunk({ tool_calls: [{ index: 0, id: "once", type: "function", function: { name: "effect", arguments: "{}" } }] }, "tool_calls") + "data: [DONE]\n\n");
-    if (bodies.length === 2) return new Response(chunk({ content: "abandoned" }));
+    if (bodies.length === 2) return new Response(chunk({ content: "abandoned" }, length ? "length" : null) + (length ? "data: [DONE]\n\n" : ""));
     return success();
   } });
   let agent = Agent.open(dir, { provider: "openai", model: "fixture", "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": "10" });
@@ -185,7 +185,7 @@ test("retry after a committed tool does not replay it, and durable history exclu
     expect(ended).toBe(true);
     expect(effects).toBe(1);
     expect(bodies).toHaveLength(3);
-    expect(bodies[1]).toEqual(bodies[2]);
+    expect(bodies[2]).toEqual(length ? { ...bodies[1] as object, max_tokens: 8192 } : bodies[1]);
     agent.free();
     agent = Agent.open(dir);
     expect(agent.history()).toContain("committed result");
@@ -246,4 +246,126 @@ test("Retry-After is honored for a transient error inside HTTP 200", async () =>
   expect(r.attempts).toBe(2);
   expect(r.times[1]! - r.times[0]!).toBeGreaterThanOrEqual(950);
   expect(r.events.at(-1)).toMatchObject({ stopReason: "end_turn" });
+});
+
+const limited = () => new Response(chunk({ reasoning_content: "unfinished reasoning" }) +
+  chunk({ content: "discard me", tool_calls: [{ index: 0, id: "abandoned", type: "function",
+    function: { name: "bash", arguments: '{"command":"never execute"}' } }] }, "length") +
+  'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":4096}}\n\n' + 'data: [DONE]\n\n');
+
+test("output truncation raises only the output budget and preserves usage and the discard boundary", async () => {
+  const r = await run(n => n === 1 ? limited() : success());
+  expect(r.bodies.map(b => b.max_tokens)).toEqual([4096, 8192]);
+  expect(r.bodies[1]).toEqual({ ...r.bodies[0], max_tokens: 8192 });
+  expect(r.events.find(e => e.type === "model_retry")).toMatchObject({ reason: "output_limit", maxTokens: 4096,
+    nextMaxTokens: 8192, discardedTextBytes: 10, discardedThinkingBytes: 20 });
+  expect(r.events.find(e => e.type === "usage")).toMatchObject({ inputTokens: 100, outputTokens: 4096 });
+  expect(r.events.some(e => e.type === "error")).toBe(false);
+  expect(r.events.at(-1)).toMatchObject({ stopReason: "end_turn" });
+  expect(r.history).not.toContain("discard me");
+  expect(r.history).not.toContain("abandoned");
+});
+
+test("output recovery stops at the configured ceiling and accounts for its final rejected attempt", async () => {
+  const r = await run(limited, { "openai.max_tokens_ceiling": "10000" });
+  expect(r.bodies.map(b => b.max_tokens)).toEqual([4096, 8192, 10000]);
+  expect(r.events.filter(e => e.type === "usage")).toHaveLength(3);
+  expect(r.events.at(-1)).toMatchObject({ stopReason: "error" });
+  expect(r.events.find(e => e.type === "error")).toMatchObject({ code: -10, message: expect.stringContaining("output_limit exhausted") });
+  expect(r.history).not.toContain("discard me");
+});
+
+test("output recovery shares the general attempt limit", async () => {
+  const r = await run(limited, { "openai.max_retries": "1" });
+  expect(r.bodies.map(b => b.max_tokens)).toEqual([4096, 8192]);
+  expect(r.events.at(-1)).toMatchObject({ stopReason: "error" });
+});
+
+test("output recovery can be disabled without dropping usage", async () => {
+  const r = await run(limited, { "openai.max_tokens_ceiling": "4096" });
+  expect(r.attempts).toBe(1);
+  expect(r.events.filter(e => e.type === "usage")).toHaveLength(1);
+  expect(r.events.some(e => e.type === "model_retry")).toBe(false);
+});
+
+test("output recovery is bounded by the model window and the reported input size", async () => {
+  const r = await run(() => new Response(chunk({}, "length") +
+    'data: {"choices":[],"usage":{"prompt_tokens":85000,"completion_tokens":4096}}\n\n' + 'data: [DONE]\n\n'),
+    { "context.window": "100000" });
+  expect(r.bodies.map(b => b.max_tokens)).toEqual([4096, 8192, 15000]);
+  expect(r.events.at(-1)).toMatchObject({ stopReason: "error" });
+});
+
+test("invalid output ceilings fail before contacting the provider", async () => {
+  const r = await run(success, { "openai.max_tokens_ceiling": "2048" });
+  expect(r.attempts).toBe(0);
+  expect(r.events.find(e => e.type === "error")).toMatchObject({ code: -2 });
+});
+
+test("Responses max_output_tokens truncation uses the same bounded recovery", async () => {
+  const r = await run(n => n === 1 ? new Response('data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":100,"output_tokens":4096}}}\n\n')
+    : new Response('data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"recovered"}]}]}}\n\n'),
+    { "openai.wire_api": "responses" });
+  expect(r.bodies.map(b => b.max_output_tokens)).toEqual([4096, 8192]);
+  expect(r.events.find(e => e.type === "model_retry")).toMatchObject({ reason: "output_limit" });
+  expect(r.events.find(e => e.type === "usage")).toMatchObject({ inputTokens: 100, outputTokens: 4096 });
+  expect(r.events.at(-1)).toMatchObject({ stopReason: "end_turn" });
+});
+
+test("output-budget backoff cannot extend the logical request deadline", async () => {
+  const r = await run(limited, { "openai.retry_delay_ms": "1000", "openai.request_timeout_ms": "80" });
+  expect(r.attempts).toBe(1);
+  expect(r.events.find(e => e.type === "model_retry")).toMatchObject({ reason: "output_limit" });
+  expect(r.events.find(e => e.type === "error")).toMatchObject({ code: -9 });
+});
+
+test("cancel during output-budget recovery prevents another request", async () => {
+  let attempts = 0;
+  const server = Bun.serve({ port: 0, fetch() { attempts++; return limited(); } });
+  const agent = Agent.create({ provider: "openai", model: "fixture", "openai.base_url": `http://127.0.0.1:${server.port}` });
+  try {
+    agent.send("test cancellation");
+    let ended = false;
+    const end = performance.now() + 3000;
+    while (!ended && performance.now() < end) {
+      const e = agent.poll(0);
+      if (!e) { await Bun.sleep(2); continue; }
+      if (e.type === "model_retry") agent.cancel();
+      if (e.type === "turn_end") { ended = true; expect(e.stopReason).toBe("cancelled"); }
+    }
+    expect(ended).toBe(true);
+    expect(attempts).toBe(1);
+    expect(agent.history()).not.toContain("discard me");
+  } finally { agent.free(); server.stop(true); }
+});
+
+test("learned output budget survives later tool rounds and transient retries", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const server = Bun.serve({ port: 0, async fetch(req) {
+    bodies.push(await req.json() as Record<string, unknown>);
+    if (bodies.length === 1) return limited();
+    if (bodies.length === 2) return new Response(chunk({ tool_calls: [{ index: 0, id: "once", type: "function",
+      function: { name: "effect", arguments: "{}" } }] }, "tool_calls") + 'data: [DONE]\n\n');
+    if (bodies.length === 3) return new Response("busy", { status: 503 });
+    return success();
+  } });
+  const agent = Agent.create({ provider: "openai", model: "fixture", "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": "1" });
+  try {
+    agent.registerTool({ name: "effect", inputSchema: { type: "object" } });
+    agent.send("test learned budget");
+    let effects = 0, ended = false;
+    const end = performance.now() + 3000;
+    while (!ended && performance.now() < end) {
+      const e = agent.poll(0);
+      if (!e) { await Bun.sleep(2); continue; }
+      if (e.type === "tool_call") { effects++; agent.toolResult(e.callId, "committed"); }
+      if (e.type === "tool_start") throw new Error("partial tool escaped");
+      if (e.type === "turn_end") { ended = true; expect(e.stopReason).toBe("end_turn"); }
+    }
+    expect(ended).toBe(true);
+    expect(effects).toBe(1);
+    expect(bodies.map(b => b.max_tokens)).toEqual([4096, 8192, 8192, 8192]);
+    expect(bodies[2]).toEqual(bodies[3]);
+    expect(agent.history()).not.toContain("discard me");
+  } finally { agent.free(); server.stop(true); }
 });

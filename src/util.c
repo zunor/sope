@@ -65,6 +65,7 @@ const char *sope_strerror(int code)
     case SOPE_EBUSY: return "busy";
     case SOPE_ECONFLICT: return "conflict";
     case SOPE_ETIMEOUT: return "timeout";
+    case SOPE_EOUTPUT_LIMIT: return "output limit exhausted";
     default: return "unknown error";
     }
 }

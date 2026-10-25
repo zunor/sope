@@ -144,6 +144,12 @@ int sope__context_configure(sope_agent_t *a)
         !option(a, "compact.input_tokens", 64000, 0, &t->compact_input_tokens)) return 0;
     if (max_output > t->output_reserve) t->output_reserve = max_output;
     t->output_limit = max_output;
+    if (!option(a, "openai.max_tokens_ceiling", max_output > 32768 ? max_output : 32768, 0, &t->output_ceiling)) return 0;
+    if (t->output_ceiling < max_output) {
+        const char *error = "openai.max_tokens_ceiling must be at least openai.max_tokens";
+        sope__push_event(a, SOPE_EVENT_ERROR, sope__turn_id(a), 0, SOPE_EINVAL, NULL, 0, error, strlen(error));
+        return 0;
+    }
     if (t->context_window && (t->output_reserve >= t->context_window || t->summary_tokens >= t->context_window)) {
         const char *error = "context.window must exceed both output and summary reserves";
         sope__push_event(a, SOPE_EVENT_ERROR, sope__turn_id(a), 0, SOPE_EINVAL, NULL, 0, error, strlen(error));

@@ -77,6 +77,7 @@ SOPE_API const char *sope_version(void);
 #define SOPE_EBUSY      (-7) /* not allowed in the current state */
 #define SOPE_ECONFLICT  (-8) /* request key or execution configuration differs */
 #define SOPE_ETIMEOUT   (-9) /* wait deadline expired; object remains owned */
+#define SOPE_EOUTPUT_LIMIT (-10) /* incomplete model output; recovery budget exhausted */
 
 /* Static description of a result code. Never NULL. */
 SOPE_API const char *sope_strerror(int code);
@@ -398,7 +399,8 @@ SOPE_API int sope_agent_fd(sope_agent_t *agent);
 #define SOPE_EVENT_TOOL_END       13 /* call_id, name, code: 1 if it failed, data: the result the model sees */
 #define SOPE_EVENT_PERMISSION     14 /* call_id, name, data: JSON input. Answer with sope_permit */
 #define SOPE_EVENT_MODEL_RETRY    15 /* call_id: model round, code: next attempt, name: failure class.
-                                    * data: {delay_ms,compaction,discarded_text_bytes,discarded_thinking_bytes}.
+                                    * data: {delay_ms,compaction,discarded_text_bytes,discarded_thinking_bytes,
+                                    *        max_tokens,next_max_tokens}.
                                     * Prior attempt output is provisional and discarded from history.
                                     * Hosts must mark/separate it before displaying the next attempt. */
 

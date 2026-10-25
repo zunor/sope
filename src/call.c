@@ -162,6 +162,7 @@ void sope__call_usage(sope_call *c, uint64_t input_tokens, uint64_t output_token
     int n = snprintf(buf, sizeof buf, "{\"input_tokens\":%" PRIu64 ",\"output_tokens\":%" PRIu64 "}", input_tokens,
                      output_tokens);
     c->has_usage = 1;
+    c->usage_input_tokens = input_tokens;
     c->usage_tokens = input_tokens > UINT64_MAX - output_tokens ? UINT64_MAX : input_tokens + output_tokens;
     sope__push_event(c->agent, SOPE_EVENT_USAGE, sope__turn_id(c->agent), 0, 0, NULL, 0, buf, (size_t)n);
 }

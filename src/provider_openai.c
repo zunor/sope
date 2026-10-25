@@ -19,7 +19,7 @@
 
 #define MAX_TOOL_CALLS 64
 #define MAX_ERROR_BODY 1500
-enum { RETRY_NONE, RETRY_RATE, RETRY_SERVER, RETRY_TRANSPORT, RETRY_TIMEOUT, RETRY_INCOMPLETE };
+enum { RETRY_NONE, RETRY_RATE, RETRY_SERVER, RETRY_TRANSPORT, RETRY_TIMEOUT, RETRY_INCOMPLETE, RETRY_OUTPUT_LIMIT };
 
 typedef struct {
     sope_buf id, name, args;
@@ -37,6 +37,8 @@ typedef struct {
     size_t received;
     int first_byte;
     sope_buf url, body, auth; /* kept for retries */
+    char *model;
+    uint64_t next_output_tokens;
     char *ca_file;            /* option tls.ca_file, or NULL */
     sope_http *http;          /* NULL while waiting to retry */
     int responses;
@@ -44,7 +46,7 @@ typedef struct {
     sope_buf in; /* received bytes not yet parsed */
     long status;
     int saw_done; /* data: [DONE] */
-    int finish; /* 1: stop, 2: tool_calls; other reasons fail the call */
+    int finish; /* 1: stop, 2: tool_calls, 3: output budget exhausted */
     tool_call_acc calls[MAX_TOOL_CALLS];
 } oa_state;
 
@@ -309,13 +311,16 @@ static void trace_request(oa_state *s, const char *phase)
         "{\"event\":\"provider.%s\",\"round\":%llu,\"compaction\":%d,\"attempt\":%d,"
         "\"status\":%ld,\"elapsed_ms\":%lld,\"request_bytes\":%zu,\"received_bytes\":%zu,"
         "\"complete\":%d,\"failed\":%d,\"finish_state\":%d,\"stream_done\":%d,\"failure_kind\":%d,\"delay_ms\":%d,\"remaining_ms\":%lld,\"logical_ms\":%lld,"
-        "\"text_bytes\":%zu,\"thinking_bytes\":%zu,\"tool_calls\":%zu,\"tool_argument_bytes\":%zu}",
+        "\"text_bytes\":%zu,\"thinking_bytes\":%zu,\"tool_calls\":%zu,\"tool_argument_bytes\":%zu,"
+        "\"max_tokens\":%llu,\"next_max_tokens\":%llu,\"max_tokens_ceiling\":%llu}",
         phase, (unsigned long long)sope__call_round(s->call), sope__call_is_compaction(s->call),
         s->attempts, s->status, (long long)(trace_now() - s->started_ms), s->body.len,
         s->received, s->call->complete, s->call->failed, s->finish, s->saw_done, s->failure, s->delay_ms,
         (long long)(s->deadline_ms > trace_now() ? s->deadline_ms - trace_now() : 0),
         (long long)(trace_now() - s->request_started_ms), s->call->text.len,
-        s->thinking_bytes, tool_calls, tool_bytes);
+        s->thinking_bytes, tool_calls, tool_bytes,
+        (unsigned long long)sope__call_max_tokens(s->call), (unsigned long long)s->next_output_tokens,
+        (unsigned long long)s->call->agent->turn.output_ceiling);
 }
 
 /* Deadlines bound one logical model request, including retry backoff. A new
@@ -387,6 +392,7 @@ static void oa_free(oa_state *s)
     sope__buf_free(&s->body);
     sope__buf_free(&s->auth);
     free(s->ca_file);
+    free(s->model);
     sope__buf_free(&s->in);
     for (i = 0; i < MAX_TOOL_CALLS; i++) {
         sope__buf_free(&s->calls[i].id);
@@ -432,7 +438,9 @@ static void *oa_start(sope_call *c)
     s->url.len = base_len;
     sope__buf_appends(&s->url, s->responses ? "/responses" : "/chat/completions");
     /* A model that reads images takes over once the conversation has any. */
-    (s->responses ? build_responses : build_body)(c, &s->body, image_model && *image_model && history_has_images(sope__call_history(c)) ? image_model : model);
+    s->model = sope__strdup(image_model && *image_model && history_has_images(sope__call_history(c)) ? image_model : model);
+    if (!s->model) { sope__call_error(c, SOPE_ENOMEM, "openai: out of memory"); oa_free(s); s = NULL; goto done; }
+    (s->responses ? build_responses : build_body)(c, &s->body, s->model);
     if (key && *key) sope__buf_appendf(&s->auth, "Authorization: Bearer %s", key);
     s->ca_file = sope__call_option(c, "tls.ca_file");
     if (s->url.oom || s->body.oom || s->auth.oom) {
@@ -524,6 +532,8 @@ static int usage_count(const sope_json *usage, const char *key, uint64_t *out)
 static int response_chunk(sope_call *c, oa_state *s, const sope_json *root)
 {
     const char *type = sope__json_string(sope__json_get(root, "type"), NULL);
+    const sope_json *response = sope__json_get(root, "response");
+    const char *incomplete = sope__json_string(sope__json_get(sope__json_get(response, "incomplete_details"), "reason"), NULL);
     if (!type) goto invalid;
     if (!strcmp(type, "response.output_text.delta")) {
         size_t n; const char *text = sope__json_string(sope__json_get(root, "delta"), &n);
@@ -534,7 +544,6 @@ static int response_chunk(sope_call *c, oa_state *s, const sope_json *root)
         if (!text) goto invalid;
         sope__call_thinking(c, text, n); s->thinking_bytes += n;
     } else if (!strcmp(type, "response.completed")) {
-        const sope_json *response = sope__json_get(root, "response");
         const char *status = sope__json_string(sope__json_get(response, "status"), NULL);
         const sope_json *output = sope__json_get(response, "output");
         if (!status || strcmp(status, "completed") || !output || output->type != SOPE_JSON_ARRAY) goto invalid;
@@ -585,6 +594,11 @@ static int response_chunk(sope_call *c, oa_state *s, const sope_json *root)
         } else ok = 0;
         sope__buf_free(&text); sope__buf_free(&items);
         if (!ok) goto invalid;
+    } else if (!strcmp(type, "response.incomplete") && incomplete && !strcmp(incomplete, "max_output_tokens")) {
+        const sope_json *usage = sope__json_get(sope__json_get(root, "response"), "usage");
+        uint64_t input, output;
+        if (usage_count(usage, "input_tokens", &input) && usage_count(usage, "output_tokens", &output)) sope__call_usage(c, input, output);
+        s->finish = 3; s->saw_done = 1;
     } else if (!strcmp(type, "response.failed") || !strcmp(type, "response.incomplete") || !strcmp(type, "error")) {
         const sope_json *error = sope__json_get(sope__json_get(root, "response"), "error");
         if (!error) error = sope__json_get(root, "error");
@@ -640,6 +654,7 @@ static int handle_chunk(sope_call *c, oa_state *s, const char *data, size_t n)
     if (str) {
         if (!strcmp(str, "stop")) s->finish = 1;
         else if (!strcmp(str, "tool_calls") && !sope__call_is_compaction(c)) s->finish = 2;
+        else if (!strcmp(str, "length")) s->finish = 3;
         else {
             sope__call_error(c, SOPE_ERROR, "openai: incomplete response (finish_reason=%s)", str);
             sope__json_free(root);
@@ -719,6 +734,7 @@ static const char *failure_name(int failure)
     case RETRY_TRANSPORT: return "transport";
     case RETRY_TIMEOUT: return "timeout";
     case RETRY_INCOMPLETE: return "incomplete_stream";
+    case RETRY_OUTPUT_LIMIT: return "output_limit";
     default: return "permanent";
     }
 }
@@ -742,13 +758,29 @@ static sope_step retry(sope_call *c, oa_state *s)
     sope__call_log(c, SOPE_LOG_WARN, "openai: %s (HTTP %ld); retrying in %d ms (attempt %d of %d)",
                    failure_name(s->failure), s->status, s->delay_ms, s->attempts + 1, s->max_retries + 1);
     trace_request(s, "retry");
-    char data[256];
+    char data[384];
     int n = snprintf(data, sizeof data,
-        "{\"delay_ms\":%d,\"compaction\":%d,\"discarded_text_bytes\":%zu,\"discarded_thinking_bytes\":%zu}",
-        s->delay_ms, c->compaction, c->text.len, s->thinking_bytes);
+        "{\"delay_ms\":%d,\"compaction\":%d,\"discarded_text_bytes\":%zu,\"discarded_thinking_bytes\":%zu,\"max_tokens\":%llu,\"next_max_tokens\":%llu}",
+        s->delay_ms, c->compaction, c->text.len, s->thinking_bytes,
+        (unsigned long long)sope__call_max_tokens(c),
+        (unsigned long long)(s->next_output_tokens ? s->next_output_tokens : sope__call_max_tokens(c)));
     const char *reason = failure_name(s->failure);
     sope__push_event(c->agent, SOPE_EVENT_MODEL_RETRY, sope__turn_id(c->agent), c->round,
                      s->attempts + 1, reason, strlen(reason), data, (size_t)n);
+    if (s->next_output_tokens) {
+        /* Retain the learned budget for subsequent rounds of this turn. Future
+         * context admission reserves it before another tool/model round. */
+        c->agent->turn.output_limit = s->next_output_tokens;
+        if (c->agent->turn.output_reserve < s->next_output_tokens)
+            c->agent->turn.output_reserve = s->next_output_tokens;
+        s->next_output_tokens = 0;
+        sope__buf_free(&s->body);
+        (s->responses ? build_responses : build_body)(c, &s->body, s->model);
+        if (s->body.oom) {
+            sope__call_error(c, SOPE_ENOMEM, "openai: out of memory rebuilding output-budget retry");
+            return (sope_step){ SOPE__STEP_DONE, SOPE_ENOMEM };
+        }
+    }
     sope__http_release(s->http);
     s->http = NULL;
     sope__buf_free(&s->in);
@@ -759,7 +791,7 @@ static sope_step retry(sope_call *c, oa_state *s)
     sope__buf_free(&c->text);
     sope__tool_uses_free(c->uses, c->n_uses); c->uses = NULL; c->n_uses = c->cap_uses = 0;
     free(c->response_items); c->response_items = NULL;
-    c->has_usage = c->complete = 0; c->usage_tokens = 0;
+    c->has_usage = c->complete = 0; c->usage_tokens = c->usage_input_tokens = 0;
     s->thinking_bytes = 0;
     s->status = s->saw_done = s->finish = 0;
     return (sope_step){ SOPE__STEP_SLEEP, s->delay_ms };
@@ -770,6 +802,30 @@ static sope_step failed_attempt(sope_call *c, oa_state *s)
     if (!c->failed && retry_allowed(s)) return retry(c, s);
     if (!c->failed) sope__call_error(c, SOPE_ERROR, "openai: %s; retry allowance exhausted (%d attempts)", failure_name(s->failure), s->attempts);
     return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
+}
+
+/* Length is a complete protocol result, not a disconnected stream. Retry only
+ * with a strictly larger budget; never dispatch its partial tool batch or
+ * append an artificial "continue" input. Summary budgets stay fixed. */
+static sope_step output_limited(sope_call *c, oa_state *s)
+{
+    turn_state *t = &c->agent->turn;
+    uint64_t current = sope__call_max_tokens(c), ceiling = c->compaction ? current : t->output_ceiling;
+    uint64_t input = sope__context_tokens(c->agent);
+    if (c->has_usage && c->usage_input_tokens > input) input = c->usage_input_tokens;
+    if (t->context_window) {
+        uint64_t available = input < t->context_window ? t->context_window - input : 0;
+        if (available < ceiling) ceiling = available;
+    }
+    s->failure = RETRY_OUTPUT_LIMIT;
+    if (ceiling > current && retry_allowed(s)) {
+        s->next_output_tokens = current * 2 < ceiling ? current * 2 : ceiling;
+        return retry(c, s);
+    }
+    sope__call_error(c, SOPE_EOUTPUT_LIMIT,
+        "openai: output_limit exhausted (max_tokens=%llu, available_ceiling=%llu, attempts=%d); incomplete output discarded",
+        (unsigned long long)current, (unsigned long long)ceiling, s->attempts);
+    return (sope_step){ SOPE__STEP_DONE, SOPE_EOUTPUT_LIMIT };
 }
 
 static sope_step oa_step(sope_call *c, void *state)
@@ -842,6 +898,7 @@ static sope_step oa_step(sope_call *c, void *state)
         s->failure = RETRY_INCOMPLETE;
         return failed_attempt(c, s);
     }
+    if (s->finish == 3) return output_limited(c, s);
     size_t used = 0;
     for (i = 0; i < MAX_TOOL_CALLS; i++) {
         tool_call_acc *acc = &s->calls[i];

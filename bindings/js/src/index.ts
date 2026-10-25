@@ -15,6 +15,7 @@ export const ErrorCode = {
   Busy: -7,
   Conflict: -8,
   Timeout: -9,
+  OutputLimit: -10,
 } as const;
 
 export class SopeError extends Error {
@@ -99,7 +100,8 @@ export type SopeEvent =
   | ({ type: "thinking_delta"; text: string } & Origin)
   /** The previous model attempt was discarded; tools have not been dispatched. */
   | ({ type: "model_retry"; round: number; attempt: number; reason: string; delayMs: number;
-       compaction: boolean; discardedTextBytes: number; discardedThinkingBytes: number } & Origin)
+       compaction: boolean; discardedTextBytes: number; discardedThinkingBytes: number;
+       maxTokens: number; nextMaxTokens: number } & Origin)
   /** A host tool call: answer it with toolResult(). */
   | ({ type: "tool_call"; callId: number; name: string; input: string } & Origin)
   /** A built-in tool call the library runs itself. */
@@ -489,6 +491,7 @@ export class Agent {
         const retry = JSON.parse(data());
         return { type: "model_retry", ...origin, round: callId, attempt: code, reason: name(),
           delayMs: retry.delay_ms, compaction: !!retry.compaction,
+          maxTokens: retry.max_tokens, nextMaxTokens: retry.next_max_tokens,
           discardedTextBytes: retry.discarded_text_bytes, discardedThinkingBytes: retry.discarded_thinking_bytes };
       }
       default:

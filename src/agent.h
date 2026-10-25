@@ -142,7 +142,7 @@ typedef struct turn_state {
     int compact_tried;          /* compaction already ran (or failed) before this round */
     sope_message *held;         /* the turn's user message, kept out of a compaction at turn start */
     sope_message *compact_keep; /* borrowed suffix, untouched until summary commit */
-    uint64_t context_window, output_reserve, output_limit, summary_tokens, retain_tokens, compact_input_tokens;
+    uint64_t context_window, output_reserve, output_limit, output_ceiling, summary_tokens, retain_tokens, compact_input_tokens;
     uint64_t compact_before;    /* local request estimate before compaction */
     uint64_t compact_request_budget;
     int compact_retries, overflow_retried;
@@ -168,6 +168,7 @@ struct sope_call { /* a model call, as the loop holds it (call.c) */
     int has_usage;
     int context_exceeded;
     uint64_t usage_tokens;
+    uint64_t usage_input_tokens;
 };
 
 struct sope_agent {

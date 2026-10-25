@@ -31,16 +31,17 @@ import (
 type Code int
 
 const (
-	OK        Code = 0
-	Failure   Code = -1
-	Invalid   Code = -2
-	NoMemory  Code = -3
-	NotFound  Code = -4
-	Closed    Code = -5
-	Cancelled Code = -6
-	Busy      Code = -7
-	Conflict  Code = -8
-	Timeout   Code = -9
+	OK          Code = 0
+	Failure     Code = -1
+	Invalid     Code = -2
+	NoMemory    Code = -3
+	NotFound    Code = -4
+	Closed      Code = -5
+	Cancelled   Code = -6
+	Busy        Code = -7
+	Conflict    Code = -8
+	Timeout     Code = -9
+	OutputLimit Code = -10
 )
 
 type Error struct {

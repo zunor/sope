@@ -30,6 +30,9 @@
 | `SOPE_ECLOSED` | -5 | Agent is closed |
 | `SOPE_ECANCELLED` | -6 | Operation was cancelled |
 | `SOPE_EBUSY` | -7 | Operation is not allowed in the current state (e.g. changing the thread count after the pool has started) |
+| `SOPE_ECONFLICT` | -8 | Request key or sealed execution configuration differs |
+| `SOPE_ETIMEOUT` | -9 | Wait or model-request deadline expired |
+| `SOPE_EOUTPUT_LIMIT` | -10 | Model output was truncated and bounded budget recovery is exhausted |
 
 ## 2. Architecture and threading model
 
@@ -294,7 +297,8 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 | `openai.api_key` | Sent as a Bearer token | — |
 | `openai.wire_api` | `chat` (Chat Completions) or `responses` (stateless Responses with encrypted reasoning replay) | `chat` |
 | `reasoning.effort` | `none`, `minimal`, `low`, `medium`, `high` or `xhigh`; support depends on the model | Provider default |
-| `openai.max_tokens` | Normal response output token limit; increases the output reservation when larger | `context.reserve` |
+| `openai.max_tokens` | Initial normal response output token limit; increases the output reservation when larger | `context.reserve` |
+| `openai.max_tokens_ceiling` | Maximum output budget after truncation recovery; must be at least the initial limit | `max(32768, openai.max_tokens)` |
 | `tls.ca_file` | PEM file of trusted CAs, needed only for bundled builds (see section 12); used by both model calls and `web_fetch` | `$SSL_CERT_FILE`, otherwise a system certificate file |
 | `mock.delay_ms` | Delay between mock output chunks | `25` |
 
@@ -555,9 +559,26 @@ One model round may have multiple HTTP attempts. Rate limits (429), request
 timeouts (408), transient 5xx (excluding 501/505), classified transport errors,
 structured transient provider errors (including errors inside HTTP 200), and
 truncated streams are retryable. Authentication, invalid requests, context
-window overflow, refusals, output limits and complete malformed tool batches
+window overflow, refusals and complete malformed tool batches
 are terminal for this retry policy. Context overflow uses compaction recovery.
 The policy is provider-independent; it does not match human error prose.
+
+Chat `finish_reason="length"` and Responses `response.incomplete` with
+`incomplete_details.reason="max_output_tokens"` use a separate `output_limit`
+recovery path. Each retry doubles the normal output limit, capped by
+`openai.max_tokens_ceiling` and the known model window minus the larger of
+estimated and reported input tokens. It shares the general attempt allowance
+and absolute request deadline. The same turn retains the increased limit for
+subsequent model rounds and reserves it before context admission. Set the
+ceiling equal to the initial limit to disable growth. Hosts should configure
+the ceiling and window for their model; an unknown window cannot be enforced.
+Summary calls retain their fixed `compact.max_tokens` budget.
+
+Only a strictly larger budget permits an output-limit retry. Otherwise the
+error event has code `SOPE_EOUTPUT_LIMIT` (-10), and no partial output is
+accepted. Reported usage from rejected attempts is still emitted; absent
+usage remains unknown. Chat usage after the finish marker is consumed before
+recovery. A completed summary alone may replace history; truncation never does.
 
 Retry backoff is exponential with 20% jitter, capped at 10 seconds. A valid
 `Retry-After` delta-seconds or HTTP date imposes a minimum wait, capped at 15
@@ -566,9 +587,9 @@ input cannot bypass that wait. Cancellation interrupts backoff and I/O.
 
 `SOPE_EVENT_MODEL_RETRY` (15) marks an abandoned attempt. `call_id` identifies
 the model round (not a tool), `code` is the next attempt number, and `name` is
-`rate_limit`, `server`, `transport`, `timeout` or `incomplete_stream`.
+`rate_limit`, `server`, `transport`, `timeout`, `incomplete_stream` or `output_limit`.
 The JSON data contains `delay_ms`, `compaction`, `discarded_text_bytes` and
-`discarded_thinking_bytes`. JS exposes `model_retry`; Go exposes `EventModelRetry`.
+`discarded_thinking_bytes`, `max_tokens` and `next_max_tokens`. JS exposes `model_retry`; Go exposes `EventModelRetry`.
 Text and reasoning deltas before this boundary are provisional: hosts must mark
 or separate the abandoned output before rendering the next attempt. The TUI
 inserts a notice and starts new blocks; print mode marks abandoned stdout text
