@@ -10,6 +10,7 @@
  * Options: openai.base_url (default https://api.openai.com/v1),
  * openai.api_key, model (required), openai.max_tokens.
  */
+#define _POSIX_C_SOURCE 200809L
 #include "agent.h"
 
 #include <stdio.h>
