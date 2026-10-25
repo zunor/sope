@@ -310,6 +310,24 @@ unlock:
     return NULL;
 }
 
+/* Lifecycle belongs to the runtime; model prose is only an interpretation. */
+int sope__subagent_envelope(sope_agent_t *a, uint64_t child, int stop, const char *state,
+                           const char *text, size_t len, sope_buf *out)
+{
+    sope_buf observations = {0};
+    sope__buf_appendf(out,"{\"session_id\":\"%s\",\"agent_id\":%llu,\"stop_reason\":%d,\"state\":\"%s\",\"completed\":%s,\"model_report_unverified\":",
+        a->root->session_id,(unsigned long long)child,stop,state,stop==SOPE_STOP_END_TURN?"true":"false");
+    sope__buf_append_json_string(out,text,len);
+    sope__buf_appends(out,",\"evidence\":");
+    if (sope__journal_observations(a,child,&observations)) sope__buf_append(out,observations.ptr,observations.len);
+    else if (a->root->journal && sope__journal_access(a,child,0)) out->oom=1;
+    else sope__buf_appends(out,"null");
+    sope__buf_appends(out,",\"host_reconciliations\":");
+    if (!sope__journal_reconciliations(a,child,out)) out->oom=1;
+    sope__buf_appends(out,"}");sope__buf_free(&observations);
+    return !out->oom;
+}
+
 /* Runs on a pool thread once a child closed: hands its final message to the
  * parent as the `agent` tool result, then frees the child. */
 static void child_closed(sope_task *task)
@@ -333,13 +351,10 @@ static void child_closed(sope_task *task)
     if (!result.len) sope__buf_appends(&result, "(no output)");
 
     pthread_mutex_lock(child->mu);
-    sope_buf envelope={0},observations={0};
-    sope__buf_appendf(&envelope,"{\"session_id\":\"%s\",\"agent_id\":%llu,\"stop_reason\":%d,\"completed\":%s,\"model_report_unverified\":",child->root->session_id,(unsigned long long)child->agent_id,stop,stop==SOPE_STOP_END_TURN?"true":"false");
-    sope__buf_append_json_string(&envelope,result.ptr?result.ptr:"",result.len);
-    sope__buf_appends(&envelope,",\"evidence\":");
-    if(sope__journal_observations(child,child->agent_id,&observations))sope__buf_append(&envelope,observations.ptr,observations.len);
-    else sope__buf_appends(&envelope,"null");
-    sope__buf_appends(&envelope,"}");sope__buf_free(&observations);
+    sope_buf envelope={0};
+    sope__subagent_envelope(child,child->agent_id,stop,
+        stop==SOPE_STOP_END_TURN?"completed":stop==SOPE_STOP_CANCELLED?"cancelled":"failed",
+        result.ptr?result.ptr:"",result.len,&envelope);
     if(result.oom)envelope.oom=1;
     sope__buf_free(&result);result=envelope;
     p = sope__pending_find_locked(child, child->agent_id, PENDING_SUBAGENT);
@@ -384,6 +399,10 @@ int sope_subagent_cancel(sope_agent_t *a, uint64_t agent_id, const char *note, s
         return sope__set_error(SOPE_ENOTFOUND, "sope_subagent_cancel: no subagent %llu is running", (unsigned long long)agent_id);
     }
     if (!c->closing) { /* a second stop keeps the first note */
+        if (!sope__journal_child_cancel(a->root,agent_id,note?note:"",len)) {
+            pthread_mutex_unlock(a->mu); free(copy);
+            return sope__set_error(SOPE_ERROR,"Cannot commit child cancellation request");
+        }
         c->stop_note = copy;
         copy = NULL;
         c->closing = 1;

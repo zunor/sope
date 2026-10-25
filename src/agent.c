@@ -95,6 +95,7 @@ void sope__pending_free(pending_call *p)
     free(p->harness_key);
     free(p->receipt);
     free(p->observation);
+    free(p->recovery_id); free(p->recovery_input);
     free(p);
 }
 

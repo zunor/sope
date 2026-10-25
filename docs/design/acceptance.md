@@ -103,7 +103,7 @@ truth of arbitrary semantic conclusions. The report says so explicitly.
 ## Native subagents
 
 The parent gets a structured result: session ID, child agent ID, native stop
-reason, `completed`, `model_report_unverified`, and a bounded index of native
+reason, explicit `state`, `completed`, `model_report_unverified`, and a bounded index of native
 receipts. Cancelled/failed children retain partial text without being marked
 complete. Children inherit the provider/model/options and isolated history, but
 not the parent's acceptance contract; the parent owns final acceptance.
@@ -119,7 +119,28 @@ This follows Soren's useful separation of child identity, lifecycle and saved
 results. sope retains its existing non-recursive shared-pool task model. Child
 results are evidence-bearing messages rather than trusted verification prose.
 This change does not add background child resumption or isolated worktrees:
-interrupted child execution still requires reconciliation before recovery.
+interrupted child execution requires reconciliation of unknown leaf operations before
+recovery. The reconstructed envelope includes separately labelled `host_reconciliations`
+with bounded excerpts and call IDs. The working-state index retains
+`host_reconciled_call_ids`; `evidence` can recall their full stored results.
+These host assertions never create native check observations. The runtime
+reconstructs the delegated outcome; the host cannot replace
+an entire child result with a success assertion. A completed local check can be
+valid evidence even when the child later fails, is cancelled, or is interrupted.
+All native child state counts, the task's recent 32 child states, and latest eight check IDs per recent child are
+re-rendered outside the model summary on every request, and copied into the
+acceptance report as `delegations` (`total`, `states`, `recent`). Counts cover all
+started children of the current task; the recent index is bounded so older
+failures cannot disappear merely because their detailed entries were evicted.
+Original tool results and the full journal remain authoritative. Native lifecycle
+events supply these states; the projection does not interpret child prose.
+Changes in this lifecycle snapshot invalidate an in-flight or saved report,
+just as later workspace mutations invalidate its observations.
+
+On resume, a committed report whose todos are resolved and evidence remains
+current closes before any round-limit check, compaction, or provider request.
+A process failure between report commit and terminal commit cannot turn completed
+acceptance work into a dependency on another model response.
 
 Metadata traces record report status and satisfied/failed/unverified counts,
 without storing command output or interpretation text. The durable native outcome

@@ -180,7 +180,10 @@ static sope_next report(tool_run* r)
         }
         sope__buf_appends(&result, "}");
     }
-    sope__buf_appendf(&result, "],\"status\":\"%s\"}", failed ? "rejected" : unknown ? "incomplete" : "accepted");
+    sope__buf_appends(&result, "],\"delegations\":");
+    if (!sope__journal_delegations(a, &result))
+        error = "Cannot read native delegation states";
+    sope__buf_appendf(&result, ",\"status\":\"%s\"}", failed ? "rejected" : unknown ? "incomplete" : "accepted");
     pthread_mutex_unlock(a->mu);
     sope__json_free(contract);
     if (error || result.oom || result.len > 65536) {
@@ -197,7 +200,12 @@ int sope__report_current(sope_agent_t* a, const char* raw, size_t len)
 {
     sope_json* v = sope__json_parse(raw, len);
     const sope_json* cs = sope__json_get(v, "criteria");
-    int ok = cs && cs->type == SOPE_JSON_ARRAY;
+    sope_buf delegations = {0};
+    int loaded = sope__journal_delegations(a, &delegations);
+    sope_json *current = loaded ? sope__json_parse(delegations.ptr, delegations.len) : NULL;
+    int ok = cs && cs->type == SOPE_JSON_ARRAY && equal(sope__json_get(v, "delegations"), current);
+    sope__json_free(current);
+    sope__buf_free(&delegations);
     for (const sope_json* c = cs ? cs->child : NULL; ok && c; c = c->next) {
         const sope_json *verdict = sope__json_get(c, "verdict"), *obs = sope__json_get(c, "observation");
         if (text(verdict) && strcmp(verdict->str, "unverified") && obs)

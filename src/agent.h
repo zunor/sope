@@ -93,6 +93,10 @@ typedef struct pending_call {
     int harness_blocked;
     char *receipt; /* native check fact, never supplied by the model */
     char *observation; /* immutable native process output snapshot */
+    uint64_t recovery_agent; /* unknown leaf operation inside an exited process's child */
+    char *recovery_id, *recovery_input; /* original provider ID and literal input */
+    size_t recovery_input_len;
+    int recovery_terminal; /* synthesize interrupted child terminal with parent result */
     uint64_t read_digest;
     size_t read_size;
     int read_observed, read_reused;
@@ -274,6 +278,10 @@ int sope__journal_input(sope_agent_t *a, const msg_node *m);
 int sope__journal_duplicate(sope_agent_t *a, const msg_node *m, uint64_t *id);
 int sope__journal_event(sope_agent_t *a, ev_node *event);
 int sope__journal_terminal(sope_agent_t *a, int stop);
+int sope__journal_reconciliations(sope_agent_t *a, uint64_t child, sope_buf *out);
+int sope__journal_delegations(sope_agent_t *a, sope_buf *out);
+int sope__journal_child_cancel(sope_agent_t *a, uint64_t child, const char *note, size_t len);
+int sope__subagent_envelope(sope_agent_t *a, uint64_t child, int stop, const char *state, const char *text, size_t len, sope_buf *out);
 int sope__journal_restore(sope_agent_t *a);
 int sope__journal_seal(sope_agent_t *a, const char *manifest);
 int sope__contract_ready_locked(sope_agent_t *a);

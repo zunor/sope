@@ -75,9 +75,12 @@ in this SDK.
 
 1. `Open`, then `Recovery`. If unfinished work exists, reconcile every unknown
    call against the host's own execution receipts using `Resolve`. Interrupted
-   child agents are represented by their parent `agent` call, with their output
-   artifacts and public child events available as evidence. `Resume` refuses
-   unknown outcomes; it never blindly repeats a tool.
+   children expose their actual unknown leaf calls with `AgentID`; native
+   invocations appear in `Recovery.Delegations`. `Resolve` cannot accept a
+   parent `agent` call as a fabricated success. `Resume` refuses unknown effects,
+   then reconstructs completed/failed/cancelled/interrupted child outcomes from
+   the journal and preserves their committed checks. It never blindly repeats
+   a tool or reattaches a running OS process.
 2. `Submit(requestKey, text)` durably admits input. A retry with the same key and
    payload returns the same turn ID, even after SIGKILL or completion. A changed
    payload returns `ErrConflict`. Admission does not mean completion.
@@ -94,8 +97,10 @@ in this SDK.
 5. `Outcome` is the authoritative terminal record. It commits atomically with
    the final history, completed inbox entry and durable `EventTurnEnd`. A host
    crash between native completion and host projection does not lose completion.
-   Tool receipts (including `Resolve`) also commit with their completion event;
-   a failed receipt commit emits an error, not a false tool completion.
+   Tool receipts commit with their completion event; `Resolve` records a host
+   reconciliation and emits completion only when cancellation has not already
+   ended that tool in the native stream. It does not mint a native check receipt.
+   A failed receipt commit emits an error, not a false tool completion.
    This is an explicit recovery protocol across two journals, not a distributed
    transaction or an exactly-once guarantee for arbitrary external side effects.
 

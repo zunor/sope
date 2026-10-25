@@ -194,7 +194,12 @@ static int commit_result(sope_agent_t *a, pending_call *p, uint32_t type, int32_
         char *body = one_message(&msg);
         sqlite3 *db = a->root->journal->db;
         uint64_t sequence = a->root->event_sequence;
-        int ok = body && sql(db, "BEGIN IMMEDIATE") && audit(a, "result", p->turn_id, p->call_id, body) &&
+        int ok = body && sql(db, "BEGIN IMMEDIATE");
+        if(ok && p->recovery_terminal){
+            ev_node ended={.type=SOPE_EVENT_TURN_END,.agent_id=p->call_id,.turn_id=1,.code=code};
+            ok=audit(a,"child_interrupted",p->turn_id,p->call_id,code==SOPE_STOP_CANCELLED?"cancelled":"interrupted") && stream_event(a,&ended);
+        }
+        if(ok)ok=audit(a, "result", p->turn_id, p->call_id, body) &&
             sql(db, "INSERT INTO results(call,payload) VALUES(%lld,%Q)", (long long)p->call_id, body) &&
             stream_event(a, &event);
         if (ok && p->observation) ok = sql(db, "INSERT INTO observations VALUES(%lld,%lld,%lld,%Q)", (long long)p->call_id, (long long)a->agent_id, (long long)p->turn_id, p->observation);
@@ -203,6 +208,10 @@ static int commit_result(sope_agent_t *a, pending_call *p, uint32_t type, int32_
         if (!ok) { sql(db, "ROLLBACK"); a->root->event_sequence = sequence; }
         free(body);
         if (!ok) return fail(a);
+    }
+    if(p->recovery_terminal){
+        sope_agent_t actor={.root=a->root,.agent_id=p->call_id};
+        sope__push_event_locked(&actor,SOPE_EVENT_TURN_END,1,0,code,NULL,0,NULL,0);
     }
     sope__push_event_locked(a, event.type, event.turn_id, event.call_id, event.code,
                            event.name, event.name_len, event.data, event.data_len);
@@ -249,6 +258,10 @@ static int answered(const sope_message *asst, const sope_tool_use *u)
         if (m->role == SOPE__MSG_TOOL && !strcmp(m->tool_use_id, u->id)) return 1;
     return 0;
 }
+
+static int restore_child_calls(sope_agent_t *a, pending_call *parent);
+static int finish_recovered_child(sope_agent_t *a, pending_call *parent);
+static int reconcile_child_call(sope_agent_t *a, pending_call *p);
 
 int sope__journal_restore(sope_agent_t *a)
 {
@@ -300,7 +313,7 @@ int sope__journal_restore(sope_agent_t *a)
         pending_call *p = calloc(1, sizeof *p);
         if (!p || !(p->name = sope__strdup(u->name))) { free(p); goto out; }
         p->harness_key = sope__harness_identity(u);
-        p->owner = a; p->kind = PENDING_TOOL; p->call_id = u->call_id; p->turn_id = active;
+        p->owner = a; p->kind = !strcmp(u->name,SOPE__AGENT_TOOL)?PENDING_SUBAGENT:PENDING_TOOL; p->call_id = u->call_id; p->turn_id = active;
         p->next = a->pending; a->pending = p;
         if (sqlite3_prepare_v2(db, "SELECT payload FROM results WHERE call=?", -1, &s, NULL) != SQLITE_OK) goto out;
         sqlite3_bind_int64(s, 1, (sqlite3_int64)u->call_id);
@@ -317,6 +330,8 @@ int sope__journal_restore(sope_agent_t *a)
         } else if (rc != SQLITE_DONE) goto out;
         sqlite3_finalize(s); s = NULL;
     }
+    for (pending_call *p=a->pending; p; p=p->next)
+        if (p->kind==PENDING_SUBAGENT && !p->done && !restore_child_calls(a,p)) goto out;
     if (sqlite3_prepare_v2(db, "SELECT payload FROM harness WHERE agent=0", -1, &s, NULL) != SQLITE_OK) goto out;
     rc = sqlite3_step(s);
     if (rc == SQLITE_ROW && !sope__harness_load(a, (const char *)sqlite3_column_text(s, 0))) goto out;
@@ -371,7 +386,10 @@ int sope_agent_open(sope_agent_t **out, const char *directory)
         "CREATE TABLE IF NOT EXISTS harness(agent INTEGER PRIMARY KEY,payload TEXT NOT NULL);"
         "CREATE TABLE IF NOT EXISTS observations(call INTEGER PRIMARY KEY,agent INTEGER NOT NULL,turn INTEGER NOT NULL,payload TEXT NOT NULL);"
         "CREATE INDEX IF NOT EXISTS stream_origin ON stream(agent,turn,type,seq);"
+        "CREATE INDEX IF NOT EXISTS stream_call ON stream(call,type);"
+        "CREATE INDEX IF NOT EXISTS child_lifecycle ON events(call,kind) WHERE kind='child_cancel' OR kind='child_interrupted';"
         "CREATE INDEX IF NOT EXISTS result_origin ON events(agent,call) WHERE kind='result';"
+        "CREATE INDEX IF NOT EXISTS reconciliation_origin ON events(agent,call) WHERE kind='reconcile';"
         "PRAGMA user_version=2;")) goto bad;
     if (!sql(j->db, "INSERT OR IGNORE INTO runtime VALUES(1,%Q,NULL)", a->session_id)) goto bad;
     sqlite3_stmt *identity = NULL;
@@ -402,12 +420,14 @@ int sope_agent_recovery(sope_agent_t *a, const char **json, size_t *len)
     sope__buf_appendf(&b, "{\"pending\":%s,\"calls\":[", a->recovering ? "true" : "false");
     int count = 0;
     if (a->recovering) for (pending_call *p = a->pending; p; p = p->next) {
-        if (p->done) continue;
+        if (p->done || p->kind==PENDING_SUBAGENT) continue;
         const sope_tool_use *u = find_use(a, p->call_id);
         sope__buf_appendf(&b, "%s{\"call_id\":\"%" PRIu64 "\",\"name\":", count++ ? "," : "", p->call_id);
         sope__buf_append_json_string(&b, p->name, strlen(p->name));
-        sope__buf_appends(&b, ",\"input\":");
-        sope__buf_append_json_string(&b, u ? u->input : "{}", u ? u->input_len : 2);
+        sope__buf_appendf(&b, ",\"agent_id\":\"%" PRIu64 "\",\"input\":",p->recovery_agent);
+        const char *input=p->recovery_input?p->recovery_input:u?u->input:"{}";
+        size_t input_len=p->recovery_input?p->recovery_input_len:u?u->input_len:2;
+        sope__buf_append_json_string(&b,input,input_len);
         sope__buf_appends(&b, ",\"artifacts\":[");
         sqlite3_stmt *artifacts = NULL;
         int prepared = sqlite3_prepare_v2(a->journal->db,
@@ -430,6 +450,12 @@ int sope_agent_recovery(sope_agent_t *a, const char **json, size_t *len)
             return sope__set_error(SOPE_ERROR, "cannot read recovery artifact references");
         }
         sope__buf_appends(&b, "]}");
+    }
+    sope__buf_appends(&b, "],\"delegations\":[");
+    count=0;
+    if(a->recovering)for(pending_call *p=a->pending;p;p=p->next)if(p->kind==PENDING_SUBAGENT&&!p->done){
+        unsigned unknown=0;for(pending_call *q=a->pending;q;q=q->next)if(q->recovery_agent==p->call_id&&!q->done)unknown++;
+        sope__buf_appendf(&b,"%s{\"agent_id\":\"%" PRIu64 "\",\"unknown_calls\":%u,\"action\":\"reconstruct_from_journal\"}",count++?",":"",p->call_id,unknown);
     }
     sope__buf_appends(&b, "]}");
     if (!b.oom) { free(a->history_json); a->history_json = b.ptr; *json = b.ptr; if (len) *len = b.len; }
@@ -459,9 +485,7 @@ int sope_agent_resolve(sope_agent_t *a, uint64_t call, int error, const char *co
         return sope__set_error(SOPE_ENOTFOUND, "interrupted call was already reconciled");
     }
     p->content = output.ptr; p->len = output.len; p->is_error = error != 0;
-    int ok = p->content && (!strcmp(p->name, SOPE__AGENT_TOOL)
-        ? sope__journal_subagent_result(a, p, p->is_error ? SOPE_STOP_ERROR : SOPE_STOP_END_TURN)
-        : sope__journal_result(a, p));
+    int ok = p->content && (p->recovery_agent ? reconcile_child_call(a,p) : sope__journal_result(a,p));
     if (ok) p->done = 1;
     else { free(p->content); p->content = NULL; p->len = 0; }
     pthread_mutex_unlock(a->mu);
@@ -473,14 +497,18 @@ int sope_agent_resume(sope_agent_t *a)
     if (!a) return sope__set_error(SOPE_EINVAL, "agent is required");
     pthread_mutex_lock(a->mu);
     if ((!a->recovering && !a->suspended) || a->closing || a->journal_failed || !sope__contract_ready_locked(a)) { pthread_mutex_unlock(a->mu); return sope__set_error(SOPE_EBUSY, "session is not awaiting resume, is closed, or has a storage failure"); }
-    for (pending_call *p = a->pending; p; p = p->next) if (!p->done) {
+    for (pending_call *p = a->pending; p; p = p->next) if (!p->done && p->kind!=PENDING_SUBAGENT) {
         pthread_mutex_unlock(a->mu);
         return sope__set_error(SOPE_EBUSY, "interrupted tools have unknown outcomes; reconcile each call before resuming");
+    }
+    for(pending_call *p=a->pending;p;p=p->next)if(p->kind==PENDING_SUBAGENT&&!p->done){
+        if(!finish_recovered_child(a,p)){pthread_mutex_unlock(a->mu);return sope__set_error(SOPE_ERROR,"Cannot reconstruct delegated outcome");}
     }
     const sope_message *asst = sope__history_last(&a->history, SOPE__MSG_ASSISTANT);
     if (asst) for (size_t i = 0; i < asst->n_tool_uses; i++) {
         const sope_tool_use *u = &asst->tool_uses[i];
         pending_call *p = sope__pending_find_locked(a, u->call_id, PENDING_TOOL);
+        if (!p) p=sope__pending_find_locked(a,u->call_id,PENDING_SUBAGENT);
         if (!p || answered(asst, u)) continue;
         sope_message *m = sope__tool_message(u, p->content, p->len, p->is_error);
         if (!m) { pthread_mutex_unlock(a->mu); return SOPE_ENOMEM; }
@@ -697,7 +725,7 @@ int sope__journal_access(sope_agent_t *a, uint64_t agent, int current)
     if(sqlite3_prepare_v2(a->root->journal->db,q,-1,&s,NULL)!=SQLITE_OK)return 0;
     sqlite3_bind_int(s,1,SOPE_EVENT_SUBAGENT_START);sqlite3_bind_int64(s,2,(sqlite3_int64)a->agent_id);
     sqlite3_bind_int64(s,3,(sqlite3_int64)agent);sqlite3_bind_int(s,4,current);
-    sqlite3_bind_int64(s,5,(sqlite3_int64)sope__turn_id(a));
+    sqlite3_bind_int64(s,5,(sqlite3_int64)(current && a->turn.msg ? sope__turn_id(a) : 0));
     int ok=sqlite3_step(s)==SQLITE_ROW;sqlite3_finalize(s);return ok;
 }
 
@@ -738,4 +766,209 @@ int sope__journal_stale(sope_agent_t *a, uint64_t call)
     const char *q="SELECT 1 FROM stream WHERE type IN (12,13) AND name IN ('write','edit','bash') AND seq>(SELECT MIN(seq) FROM stream WHERE type=12 AND call=?) LIMIT 1";
     if(sqlite3_prepare_v2(a->root->journal->db,q,-1,&s,NULL)!=SQLITE_OK)return 1;
     sqlite3_bind_int64(s,1,(sqlite3_int64)call);int step=sqlite3_step(s);sqlite3_finalize(s);return step!=SQLITE_DONE;
+}
+
+/* Recovery never replays delegated effects. Reconcile unknown leaves, then
+ * derive the delegation outcome from native lifecycle facts and receipts. */
+typedef struct { int started, ended, stop, cancelled, interrupted; } child_lifecycle;
+
+static int child_status(sope_agent_t *a, uint64_t child, child_lifecycle *state)
+{
+    sqlite3_stmt *s = NULL;
+    const char *q = "SELECT EXISTS(SELECT 1 FROM stream WHERE type=9 AND call=?),"
+        "(SELECT code FROM stream WHERE type=4 AND agent=? ORDER BY seq DESC LIMIT 1),"
+        "EXISTS(SELECT 1 FROM events WHERE kind='child_cancel' AND call=?),"
+        "EXISTS(SELECT 1 FROM events WHERE kind='child_interrupted' AND payload='interrupted' AND call=?)";
+    if (sqlite3_prepare_v2(a->root->journal->db,q,-1,&s,NULL)!=SQLITE_OK) return 0;
+    for(int i=1;i<=4;i++) sqlite3_bind_int64(s,i,(sqlite3_int64)child);
+    int ok=sqlite3_step(s)==SQLITE_ROW;
+    if(ok){state->started=sqlite3_column_int(s,0);state->ended=sqlite3_column_type(s,1)!=SQLITE_NULL;
+        state->stop=sqlite3_column_int(s,1);state->cancelled=sqlite3_column_int(s,2);state->interrupted=sqlite3_column_int(s,3);}
+    sqlite3_finalize(s);return ok;
+}
+
+static const char *child_state(const child_lifecycle *s)
+{
+    if(s->interrupted)return "interrupted";
+    if(s->ended)return s->stop==SOPE_STOP_END_TURN?"completed":s->stop==SOPE_STOP_CANCELLED?"cancelled":"failed";
+    return s->cancelled?"cancel_requested":s->started?"running":"not_started";
+}
+
+int sope__journal_child_cancel(sope_agent_t *a, uint64_t child, const char *note, size_t len)
+{
+    if(!a->root->journal)return 1;
+    if(a->root->journal_failed)return 0;
+    sope_buf b={0};sope__buf_appends(&b,"{\"note\":");
+    sope__buf_append_json_string(&b,note?note:"",len);sope__buf_appends(&b,"}");
+    int ok=!b.oom && audit(a,"child_cancel",a->active_turn,child,b.ptr);
+    sope__buf_free(&b);return ok||fail(a);
+}
+
+static int restore_child_calls(sope_agent_t *a, pending_call *parent)
+{
+    child_lifecycle state;
+    if(!child_status(a,parent->call_id,&state))return 0;
+    if(!state.started)return 1;
+    sqlite3_stmt *s=NULL;
+    const char *q="SELECT payload,turn FROM events WHERE kind='model' AND agent=? ORDER BY seq DESC LIMIT 1";
+    if(sqlite3_prepare_v2(a->journal->db,q,-1,&s,NULL)!=SQLITE_OK)return 0;
+    sqlite3_bind_int64(s,1,(sqlite3_int64)parent->call_id);
+    int step=sqlite3_step(s),ok=step==SQLITE_DONE;
+    sope_history h={0};uint64_t turn=0;
+    if(step==SQLITE_ROW){ok=parse_history(&h,s,0);turn=(uint64_t)sqlite3_column_int64(s,1);}
+    sqlite3_finalize(s);s=NULL;
+    const sope_message *m=sope__history_last(&h,SOPE__MSG_ASSISTANT);
+    if(ok&&m)for(size_t i=0;ok&&i<m->n_tool_uses;i++){
+        const sope_tool_use *u=&m->tool_uses[i];
+        if(sqlite3_prepare_v2(a->journal->db,"SELECT 1 FROM results WHERE call=?",-1,&s,NULL)!=SQLITE_OK){ok=0;break;}
+        sqlite3_bind_int64(s,1,(sqlite3_int64)u->call_id);step=sqlite3_step(s);
+        sqlite3_finalize(s);s=NULL;
+        if(step==SQLITE_ROW)continue;
+        if(step!=SQLITE_DONE){ok=0;break;}
+        pending_call *p=calloc(1,sizeof *p);
+        if(!p){ok=0;break;}
+        p->owner=a;p->kind=PENDING_TOOL;p->call_id=u->call_id;p->turn_id=turn;
+        p->recovery_agent=parent->call_id;p->name=sope__strdup(u->name);
+        p->recovery_id=sope__strdup(u->id);p->recovery_input=sope__strndup(u->input,u->input_len);p->recovery_input_len=u->input_len;
+        if(!p->name||!p->recovery_id||!p->recovery_input){sope__pending_free(p);ok=0;break;}
+        p->next=a->pending;a->pending=p;
+    }
+    sope__history_clear(&h);return ok;
+}
+
+static int reconcile_child_call(sope_agent_t *a, pending_call *p)
+{
+    sope_agent_t actor={.root=a->root,.agent_id=p->recovery_agent};
+    sope_message m={.role=SOPE__MSG_TOOL,.tool_use_id=p->recovery_id,.tool_name=p->name,
+        .content=p->content,.content_len=p->len,.is_error=p->is_error};
+    char *body=one_message(&m);
+    ev_node e={.type=SOPE_EVENT_TOOL_END,.agent_id=p->recovery_agent,.turn_id=p->turn_id,
+        .call_id=p->call_id,.code=p->is_error,.name=p->name,.name_len=strlen(p->name),.data=p->content,.data_len=p->len};
+    sqlite3 *db=a->journal->db;uint64_t sequence=a->event_sequence;
+    sqlite3_stmt *existing=NULL;
+    int terminal=-1;
+    if(sqlite3_prepare_v2(db,"SELECT EXISTS(SELECT 1 FROM stream WHERE type=13 AND agent=? AND call=?)",-1,&existing,NULL)==SQLITE_OK){
+        sqlite3_bind_int64(existing,1,(sqlite3_int64)p->recovery_agent);sqlite3_bind_int64(existing,2,(sqlite3_int64)p->call_id);
+        if(sqlite3_step(existing)==SQLITE_ROW)terminal=sqlite3_column_int(existing,0);
+    }
+    sqlite3_finalize(existing);
+    int ok=terminal>=0&&body&&sql(db,"BEGIN IMMEDIATE")&&audit(&actor,"reconcile",p->turn_id,p->call_id,"host verified unknown outcome")&&
+        audit(&actor,"result",p->turn_id,p->call_id,body)&&
+        sql(db,"INSERT INTO results VALUES(%lld,%Q)",(long long)p->call_id,body)&&(terminal||stream_event(a,&e))&&sql(db,"COMMIT");
+    if(!ok){sql(db,"ROLLBACK");a->event_sequence=sequence;}
+    free(body);if(!ok)return fail(a);
+    if(!terminal)sope__push_event_locked(&actor,e.type,e.turn_id,e.call_id,e.code,e.name,e.name_len,e.data,e.data_len);
+    p->reported=1;return 1;
+}
+
+static int finish_recovered_child(sope_agent_t *a, pending_call *p)
+{
+    child_lifecycle lifecycle;
+    if(!child_status(a,p->call_id,&lifecycle))return fail(a);
+    int started=lifecycle.started,ended=lifecycle.ended,cancelled=lifecycle.cancelled;
+    int stop=ended?lifecycle.stop:cancelled?SOPE_STOP_CANCELLED:SOPE_STOP_ERROR;
+    const char *state=ended?child_state(&lifecycle):cancelled?"cancelled":started?"interrupted":"not_started";
+    sope_buf prose={0},envelope={0};sqlite3_stmt *s=NULL;
+    if(!ended)sope__buf_appends(&prose,"Execution interrupted. Unknown tool outcomes were reconciled by the host; delegated reasoning did not finish.\n");
+    const char *q="SELECT payload FROM events WHERE agent=? AND kind IN ('model','end') ORDER BY seq DESC LIMIT 1";
+    int ok=sqlite3_prepare_v2(a->journal->db,q,-1,&s,NULL)==SQLITE_OK;
+    if(ok){sqlite3_bind_int64(s,1,(sqlite3_int64)p->call_id);int step=sqlite3_step(s);
+        if(step==SQLITE_ROW){sope_history h={0};ok=parse_history(&h,s,0);
+            if(ok&&h.tail&&h.tail->role==SOPE__MSG_ASSISTANT)sope__buf_append(&prose,h.tail->content,h.tail->content_len);
+            sope__history_clear(&h);
+        }else ok=step==SQLITE_DONE;}
+    sqlite3_finalize(s);s=NULL;
+    if(ok&&cancelled){
+        ok=sqlite3_prepare_v2(a->journal->db,"SELECT payload FROM events WHERE kind='child_cancel' AND call=? ORDER BY seq LIMIT 1",-1,&s,NULL)==SQLITE_OK;
+        if(ok){sqlite3_bind_int64(s,1,(sqlite3_int64)p->call_id);int step=sqlite3_step(s);
+            if(step==SQLITE_ROW){const char *raw=(const char *)sqlite3_column_text(s,0);sope_json *v=sope__json_parse(raw,strlen(raw));
+                const char *note=sope__json_string(sope__json_get(v,"note"),NULL);
+                if(note)sope__buf_appendf(&prose,"\nCancellation note: %s",note);
+                sope__json_free(v);
+            }else ok=step==SQLITE_DONE;
+        }
+        sqlite3_finalize(s);
+    }
+    if(ok&&!prose.oom)ok=sope__subagent_envelope(a,p->call_id,stop,state,prose.ptr?prose.ptr:"",prose.len,&envelope);
+    else ok=0;
+    sope__buf_free(&prose);
+    if(!ok){sope__buf_free(&envelope);return fail(a);}
+    p->content=envelope.ptr;p->len=envelope.len;p->is_error=stop!=SOPE_STOP_END_TURN;
+    p->recovery_terminal=started&&!ended;
+    ok=started?sope__journal_subagent_result(a,p,stop):sope__journal_result(a,p);
+    if(ok)p->done=1;
+    else{free(p->content);p->content=NULL;p->len=0;}
+    return ok;
+}
+
+/* Host assertions are discoverable after recovery, but remain separate from
+ * native process observations. Full stored results are available via evidence. */
+int sope__journal_reconciliations(sope_agent_t *a, uint64_t child, sope_buf *out)
+{
+    sope__buf_appends(out,"[");
+    if(!a->root->journal){sope__buf_appends(out,"]");return !out->oom;}
+    sqlite3_stmt *s=NULL;
+    const char *q="SELECT e.call,r.payload FROM events e JOIN results r ON e.call=r.call "
+        "WHERE e.kind='reconcile' AND e.agent=? ORDER BY e.seq DESC LIMIT 32";
+    if(sqlite3_prepare_v2(a->root->journal->db,q,-1,&s,NULL)!=SQLITE_OK)return 0;
+    sqlite3_bind_int64(s,1,(sqlite3_int64)child);int step,comma=0,ok=1;
+    while((step=sqlite3_step(s))==SQLITE_ROW){
+        sope_history h={0};
+        if(!parse_history(&h,s,1)||!h.head){sope__history_clear(&h);ok=0;break;}
+        const sope_message *m=h.head;size_t n=m->content_len<512?m->content_len:512;
+        while(n<m->content_len&&n&&((unsigned char)m->content[n]&0xc0)==0x80)n--;
+        sope__buf_appendf(out,"%s{\"call_id\":%lld,\"tool\":",comma++?",":"",sqlite3_column_int64(s,0));
+        sope__buf_append_json_string(out,m->tool_name,strlen(m->tool_name));
+        sope__buf_appendf(out,",\"source\":\"host assertion; not a native check\",\"is_error\":%s,\"result_bytes\":%zu,\"excerpt\":",m->is_error?"true":"false",m->content_len);
+        sope__buf_append_json_string(out,m->content,n);sope__buf_appends(out,"}");sope__history_clear(&h);
+    }
+    sqlite3_finalize(s);sope__buf_appends(out,"]");return ok&&step==SQLITE_DONE&&!out->oom;
+}
+
+/* Re-render native delegation state after every summary. Model prose cannot
+ * promote failed/cancelled/interrupted work to completed. Bounded by task. */
+int sope__journal_delegations(sope_agent_t *a, sope_buf *out)
+{
+    static const char *states[]={"running","cancel_requested","completed","failed","cancelled","interrupted","not_started"};
+    uint64_t counts[7]={0},total=0;
+    sope_buf recent={0};sqlite3_stmt *s=NULL;
+    int step=SQLITE_DONE,ok=1;
+    if(a->root->journal){
+        const char *q="SELECT call FROM stream WHERE type=9 AND agent=? AND turn=? ORDER BY seq DESC";
+        if(sqlite3_prepare_v2(a->root->journal->db,q,-1,&s,NULL)!=SQLITE_OK)return 0;
+        sqlite3_bind_int64(s,1,(sqlite3_int64)a->agent_id);sqlite3_bind_int64(s,2,(sqlite3_int64)sope__turn_id(a));
+        while((step=sqlite3_step(s))==SQLITE_ROW){
+            uint64_t child=(uint64_t)sqlite3_column_int64(s,0);child_lifecycle lifecycle;
+            if(!child_status(a,child,&lifecycle)){ok=0;break;}
+            const char *state=child_state(&lifecycle);
+            for(unsigned i=0;i<7;i++)if(!strcmp(state,states[i]))counts[i]++;
+            if(total++>=32)continue;
+            sope__buf_appendf(&recent,"%s{\"agent_id\":%" PRIu64 ",\"state\":",total>1?",":"",child);
+            sope__buf_append_json_string(&recent,state,strlen(state));
+            sope__buf_appends(&recent,",\"recent_evidence_call_ids\":[");
+            sqlite3_stmt *receipts=NULL;int rstep=SQLITE_ERROR,n=0;
+            if(sqlite3_prepare_v2(a->root->journal->db,"SELECT call FROM observations WHERE agent=? ORDER BY call DESC LIMIT 8",-1,&receipts,NULL)==SQLITE_OK){
+                sqlite3_bind_int64(receipts,1,(sqlite3_int64)child);
+                while((rstep=sqlite3_step(receipts))==SQLITE_ROW)
+                    sope__buf_appendf(&recent,"%s%lld",n++?",":"",sqlite3_column_int64(receipts,0));
+            }
+            sqlite3_finalize(receipts);if(rstep!=SQLITE_DONE)ok=0;
+            sope__buf_appends(&recent,"],\"host_reconciled_call_ids\":[");
+            receipts=NULL;rstep=SQLITE_ERROR;n=0;
+            if(sqlite3_prepare_v2(a->root->journal->db,"SELECT call FROM events WHERE kind='reconcile' AND agent=? ORDER BY call DESC LIMIT 8",-1,&receipts,NULL)==SQLITE_OK){
+                sqlite3_bind_int64(receipts,1,(sqlite3_int64)child);
+                while((rstep=sqlite3_step(receipts))==SQLITE_ROW)
+                    sope__buf_appendf(&recent,"%s%lld",n++?",":"",sqlite3_column_int64(receipts,0));
+            }
+            sqlite3_finalize(receipts);if(rstep!=SQLITE_DONE)ok=0;
+            sope__buf_appends(&recent,"]}");
+            if(!ok)break;
+        }
+        sqlite3_finalize(s);
+    }
+    sope__buf_appendf(out,"{\"total\":%" PRIu64 ",\"states\":{",total);
+    for(unsigned i=0;i<7;i++)sope__buf_appendf(out,"%s\"%s\":%" PRIu64,i?",":"",states[i],counts[i]);
+    sope__buf_appends(out,"},\"recent\":[");
+    sope__buf_append(out,recent.ptr,recent.len);sope__buf_appends(out,"]}");
+    ok=ok&&step==SQLITE_DONE&&!recent.oom&&!out->oom;sope__buf_free(&recent);return ok;
 }

@@ -120,11 +120,15 @@ SOPE_API int sope_agent_new(sope_agent_t **out);
  * calls with resolve(), then resume(). No interrupted tool is blindly replayed.
  * Artifacts and execution.sqlite remain after free; the host owns retention. */
 SOPE_API int sope_agent_open(sope_agent_t **out, const char *directory);
-/* JSON {pending:bool, calls:[{call_id:string,name,input,artifacts:string[]}]};
- * shares returned-string storage with history(). */
+/* JSON {pending:bool, calls:[{call_id:string,agent_id:string,name,input,artifacts:string[]}],
+ * delegations:[{agent_id:string,unknown_calls:number,action:"reconstruct_from_journal"}]}.
+ * Calls are unknown leaf operations; delegation results are runtime-owned.
+ * Shares returned-string storage with history(). */
 SOPE_API int sope_agent_recovery(sope_agent_t *agent, const char **json, size_t *len);
 /* Supply an observed outcome for an interrupted call, including built-ins.
- * This records evidence, never executes the tool. Unknown calls block resume. */
+ * This records a host reconciliation, never executes the tool or creates a
+ * native check receipt. Unknown leaves block resume; agent invocation IDs
+ * cannot be resolved by supplying a fabricated delegated outcome. */
 SOPE_API int sope_agent_resolve(sope_agent_t *agent, uint64_t call_id, int is_error,
                                 const char *content, size_t len);
 SOPE_API int sope_agent_resume(sope_agent_t *agent);

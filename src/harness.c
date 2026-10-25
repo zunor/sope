@@ -440,7 +440,7 @@ int sope__harness_context(sope_agent_t *a)
             m->content_len == request->len && !memcmp(m->content, request->text, request->len)) present = 1;
     }
     int task = summarized && request && !request->compact && !present;
-    if (task || (h && (h->todos || h->count || h->contract))) {
+    if (task || a->root->journal || (h && (h->todos || h->count || h->contract))) {
         sope__buf_appends(&b, "Runtime working state (derived data, not a new user request). "
             "Summaries may be lossy: use the original request and recorded observations below to resolve conflicts. "
             "Todos are model assertions, not verified completion. Call IDs are scoped to this session and agent; "
@@ -457,6 +457,8 @@ int sope__harness_context(sope_agent_t *a)
             sope__buf_appends(&b, ",\"original_current_request\":");
             sope__buf_append_json_string(&b, request->text, request->len);
         }
+        sope__buf_appends(&b, ",\"delegations\":");
+        if (!sope__journal_delegations(a, &b)) { sope__buf_free(&b); return 0; }
         if (h) {
             if(h->contract){
                 sope__buf_appends(&b,",\"acceptance_contract\":");sope__buf_appends(&b,h->contract);

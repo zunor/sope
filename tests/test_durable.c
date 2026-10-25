@@ -102,8 +102,11 @@ static void parallel_child(const char *mode, const char *dir)
     exit(failed ? 10 : 0);
 }
 
+static void child_fault(const char *mode, const char *dir);
+
 static void crash_child(const char *mode, const char *dir)
 {
+    if (!strncmp(mode, "child-", 6)) child_fault(mode, dir);
     if (!strcmp(mode, "atomic")) atomic_child(dir);
     if (!strncmp(mode, "parallel-", 9)) parallel_child(mode, dir);
     sope_agent_t *a = open_agent(dir);
@@ -480,6 +483,136 @@ static void test_execution_receipts(void)
     sope_agent_free(a);
 }
 
+static void child_fault(const char *mode, const char *dir)
+{
+    sope_agent_t *a=open_agent(dir);
+    char path[8192];snprintf(path,sizeof path,"%s/execution.sqlite",dir);
+    sqlite3 *db;REQUIRE(sqlite3_open(path,&db)==SQLITE_OK);
+    if(!strcmp(mode,"child-check")){
+        REQUIRE(sqlite3_exec(db,"CREATE TRIGGER fault BEFORE INSERT ON results WHEN NEW.call=2 BEGIN SELECT RAISE(ABORT,'check receipt not committed'); END",NULL,NULL,NULL)==SQLITE_OK);
+        send_text(a,"!agent !check {\"argv\":[\"/usr/bin/printf\",\"PASS\"]}");
+        while(poll_event(a).type!=SOPE_EVENT_ERROR){}
+        kill(getpid(),SIGKILL);
+    }
+    if(!strcmp(mode,"child-resume-fail")){
+        REQUIRE(sqlite3_exec(db,"CREATE TRIGGER fault BEFORE INSERT ON stream WHEN NEW.type=10 BEGIN SELECT RAISE(ABORT,'reconstructed result not committed'); END",NULL,NULL,NULL)==SQLITE_OK);
+        REQUIRE(sope_agent_resume(a)==SOPE_ERROR);
+        kill(getpid(),SIGKILL);
+    }
+    if(!strcmp(mode,"child-resolve")){
+        REQUIRE(strstr(recovery(a),"\"call_id\":3") || strstr(recovery(a),"second"));
+        sqlite3_stmt *s;REQUIRE(sqlite3_prepare_v2(db,"SELECT call FROM events WHERE kind='intent' AND agent>0 AND payload='{}' ORDER BY call DESC LIMIT 1",-1,&s,NULL)==SQLITE_OK);
+        REQUIRE(sqlite3_step(s)==SQLITE_ROW);uint64_t id=(uint64_t)sqlite3_column_int64(s,0);sqlite3_finalize(s);
+        REQUIRE(sope_agent_resolve(a,id,1,"host verified exactly one effect",31)==SOPE_OK);
+        kill(getpid(),SIGKILL);
+    }
+    if(!strcmp(mode,"child-completed")||!strcmp(mode,"child-cancel-ended"))REQUIRE(sqlite3_exec(db,"CREATE TRIGGER fault BEFORE INSERT ON stream WHEN NEW.type=10 BEGIN SELECT RAISE(ABORT,'completion window'); END",NULL,NULL,NULL)==SQLITE_OK);
+    send_text(a,"!agent !check {\"argv\":[\"/usr/bin/true\"]} ;; !first {} ;; !second {}");
+    int checked=0,first=0;uint64_t pending=0,child=0;
+    for(;;){
+        sope_event_t e=poll_event(a);
+        if(e.type==SOPE_EVENT_ERROR){REQUIRE(strcmp(mode,"child-pending"));kill(getpid(),SIGKILL);}
+        if(e.type==SOPE_EVENT_TOOL_END && e.agent_id && !strcmp(e.name,"check")){REQUIRE(!e.code);checked=1;}
+        if(e.type==SOPE_EVENT_TOOL_CALL && e.agent_id){
+            child=e.agent_id;
+            if(!strcmp(e.name,"first")){REQUIRE(sope_tool_result(a,e.call_id,0,"known result",12)==SOPE_OK);first=1;}
+            if(!strcmp(e.name,"second"))pending=e.call_id;
+        }
+        if(!pending||!checked||!first)continue;
+        snprintf(path,sizeof path,"%s/effect",dir);int fd=open(path,O_CREAT|O_APPEND|O_WRONLY,0600);
+        REQUIRE(fd>=0 && write(fd,"once\n",5)==5 && fsync(fd)==0);close(fd);
+        if(!strcmp(mode,"child-pending"))kill(getpid(),SIGKILL);
+        if(!strncmp(mode,"child-cancel",12)){
+            if(!strcmp(mode,"child-cancel"))REQUIRE(sqlite3_exec(db,"CREATE TRIGGER fault BEFORE INSERT ON stream WHEN NEW.type=4 AND NEW.agent>0 BEGIN SELECT RAISE(ABORT,'cancel window'); END",NULL,NULL,NULL)==SQLITE_OK);
+            REQUIRE(sope_subagent_cancel(a,child,"durable cancellation note",25)==SOPE_OK);
+        }else REQUIRE(sope_tool_result(a,pending,0,"effect completed once",21)==SOPE_OK);
+        pending=0;
+    }
+}
+
+static void test_delegation_recovery(void)
+{
+    const char *modes[]={"child-pending","child-cancel","child-completed","child-cancel-ended"};
+    for(unsigned i=0;i<4;i++){
+        char dir[8192],path[8192];snprintf(dir,sizeof dir,"%s/%s",root,modes[i]);
+        run_crash(modes[i],dir);
+        snprintf(path,sizeof path,"%s/execution.sqlite",dir);sqlite3 *db;sqlite3_stmt *s;
+        REQUIRE(sqlite3_open(path,&db)==SQLITE_OK);
+        REQUIRE(sqlite3_exec(db,"DROP TRIGGER IF EXISTS fault",NULL,NULL,NULL)==SQLITE_OK);
+        sope_agent_t *a=open_agent(dir);const char *r=recovery(a);
+        REQUIRE(strstr(r,"reconstruct_from_journal"));
+        REQUIRE(sope_agent_resolve(a,1,0,"fabricated success",18)==SOPE_ENOTFOUND);
+        if(i!=2){REQUIRE(strstr(r,"second") && strstr(r,"\"agent_id\":\"1\""));REQUIRE(sope_agent_resume(a)==SOPE_EBUSY);}
+        else REQUIRE(strstr(r,"\"calls\":[]"));
+        sope_agent_free(a);
+        if(i!=2)run_crash("child-resolve",dir);
+        if(i==0){
+            run_crash("child-resume-fail",dir);
+            REQUIRE(sqlite3_exec(db,"DROP TRIGGER fault",NULL,NULL,NULL)==SQLITE_OK);
+            REQUIRE(sqlite3_prepare_v2(db,"SELECT COUNT(*) FROM stream WHERE type IN (4,10)",-1,&s,NULL)==SQLITE_OK);
+            REQUIRE(sqlite3_step(s)==SQLITE_ROW && sqlite3_column_int(s,0)==0);sqlite3_finalize(s);
+        }
+        a=open_agent(dir);REQUIRE(strstr(recovery(a),"\"calls\":[]"));
+        REQUIRE(sope_agent_resume(a)==SOPE_OK);
+        int ended=0,subend=0,rootend=0;
+        while(!rootend){sope_event_t e=poll_event(a);
+            REQUIRE(e.type!=SOPE_EVENT_TOOL_CALL && e.type!=SOPE_EVENT_TOOL_START && e.type!=SOPE_EVENT_ERROR);
+            if(e.type==SOPE_EVENT_SUBAGENT_END){subend++;REQUIRE(strstr(e.data,i==0?"\"state\":\"interrupted\"":i==2?"\"state\":\"completed\"":"\"state\":\"cancelled\""));REQUIRE(strstr(e.data,"\"exit_code\":0"));if(i==1||i==3)REQUIRE(strstr(e.data,"durable cancellation note"));}
+            if(e.type==SOPE_EVENT_TURN_END){if(e.agent_id)ended++;else{REQUIRE(e.code==SOPE_STOP_END_TURN);rootend++;}}
+        }
+        REQUIRE(subend==1 && ended==(i<2?1:0));
+        REQUIRE(sqlite3_prepare_v2(db,"SELECT (SELECT COUNT(*) FROM stream WHERE type=4 AND agent=1),(SELECT COUNT(*) FROM stream WHERE type=10 AND call=1),(SELECT COUNT(*) FROM observations),(SELECT COUNT(*) FROM stream WHERE type=13 AND agent=1 AND call=4)",-1,&s,NULL)==SQLITE_OK);
+        REQUIRE(sqlite3_step(s)==SQLITE_ROW && sqlite3_column_int(s,0)==1 && sqlite3_column_int(s,1)==1 && sqlite3_column_int(s,2)==1 && sqlite3_column_int(s,3)==1);sqlite3_finalize(s);
+        snprintf(path,sizeof path,"%s/effect",dir);int fd=open(path,O_RDONLY);char bytes[16]={0};
+        REQUIRE(fd>=0 && read(fd,bytes,sizeof bytes)==5 && !strcmp(bytes,"once\n"));close(fd);
+        sope_agent_free(a);a=open_agent(dir);REQUIRE(strstr(recovery(a),"\"pending\":false"));sope_agent_free(a);sqlite3_close(db);
+    }
+}
+
+static void test_unstarted_delegation(void)
+{
+    char dir[8192],path[8192];snprintf(dir,sizeof dir,"%s/unstarted-child",root);
+    sope_agent_t *a=open_agent(dir);snprintf(path,sizeof path,"%s/execution.sqlite",dir);
+    sqlite3 *db;REQUIRE(sqlite3_open(path,&db)==SQLITE_OK);
+    REQUIRE(sqlite3_exec(db,"CREATE TRIGGER fault BEFORE INSERT ON stream WHEN NEW.type=9 BEGIN SELECT RAISE(ABORT,'start not committed'); END",NULL,NULL,NULL)==SQLITE_OK);
+    send_text(a,"!agent harmless task");while(poll_event(a).type!=SOPE_EVENT_ERROR){}
+    sope_agent_free(a);
+    REQUIRE(sqlite3_exec(db,"DROP TRIGGER fault",NULL,NULL,NULL)==SQLITE_OK);
+    a=open_agent(dir);REQUIRE(strstr(recovery(a),"\"calls\":[]") && strstr(recovery(a),"reconstruct_from_journal"));
+    REQUIRE(sope_agent_resolve(a,1,0,"fabricated success",18)==SOPE_ENOTFOUND);
+    REQUIRE(sope_agent_resume(a)==SOPE_OK);
+    int result=0;
+    for(;;){sope_event_t e=poll_event(a);
+        REQUIRE(e.agent_id==0 && e.type!=SOPE_EVENT_SUBAGENT_START && e.type!=SOPE_EVENT_SUBAGENT_END && e.type!=SOPE_EVENT_TOOL_CALL && e.type!=SOPE_EVENT_ERROR);
+        if(e.type==SOPE_EVENT_TOOL_END){result++;REQUIRE(e.code && strstr(e.data,"\"state\":\"not_started\"") && strstr(e.data,"\"completed\":false"));}
+        if(e.type==SOPE_EVENT_TURN_END)break;
+    }
+    REQUIRE(result==1);sope_agent_free(a);sqlite3_close(db);
+}
+
+static void test_reconciled_check_is_not_native_evidence(void)
+{
+    char dir[8192],path[8192];snprintf(dir,sizeof dir,"%s/unknown-check",root);
+    run_crash("child-check",dir);
+    snprintf(path,sizeof path,"%s/execution.sqlite",dir);sqlite3 *db;sqlite3_stmt *s;
+    REQUIRE(sqlite3_open(path,&db)==SQLITE_OK);
+    REQUIRE(sqlite3_exec(db,"DROP TRIGGER fault",NULL,NULL,NULL)==SQLITE_OK);
+    sope_agent_t *a=open_agent(dir);
+    REQUIRE(strstr(recovery(a),"check") && strstr(recovery(a),"\"agent_id\":\"1\""));
+    REQUIRE(sope_agent_resolve(a,2,0,"host says PASS",14)==SOPE_OK);
+    REQUIRE(sope_agent_resume(a)==SOPE_OK);
+    int seen=0;
+    for(;;){sope_event_t e=poll_event(a);
+        REQUIRE(e.type!=SOPE_EVENT_TOOL_CALL && e.type!=SOPE_EVENT_TOOL_START && e.type!=SOPE_EVENT_ERROR);
+        if(e.type==SOPE_EVENT_SUBAGENT_END){seen++;REQUIRE(strstr(e.data,"\"state\":\"interrupted\"") && strstr(e.data,"\"receipts\":[]") && strstr(e.data,"host says PASS") && strstr(e.data,"host assertion; not a native check"));}
+        if(e.type==SOPE_EVENT_TURN_END && !e.agent_id)break;
+    }
+    REQUIRE(seen==1);
+    REQUIRE(sqlite3_prepare_v2(db,"SELECT COUNT(*) FROM observations",-1,&s,NULL)==SQLITE_OK);
+    REQUIRE(sqlite3_step(s)==SQLITE_ROW && sqlite3_column_int(s,0)==0);sqlite3_finalize(s);
+    sope_agent_free(a);sqlite3_close(db);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3) { crash_child(argv[1], argv[2]); return 2; }
@@ -487,6 +620,9 @@ int main(int argc, char **argv)
     snprintf(root, sizeof root, "/tmp/sope-durable-XXXXXX");
     REQUIRE(mkdtemp(root) != NULL);
     test_crash_recovery();
+    test_delegation_recovery();
+    test_unstarted_delegation();
+    test_reconciled_check_is_not_native_evidence();
     test_admission();
     test_compaction_commit();
     test_execution_receipts();

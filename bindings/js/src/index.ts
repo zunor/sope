@@ -46,12 +46,25 @@ export interface AcceptanceCriterion {
   exit_code: number;
   output?: { empty: true } | { contains: string };
 }
+export interface DelegationState {
+  agent_id: number;
+  state: "running" | "cancel_requested" | "completed" | "failed" | "cancelled" | "interrupted" | "not_started";
+  recent_evidence_call_ids: number[];
+  host_reconciled_call_ids: number[];
+}
+export interface DelegationLedger {
+  total: number;
+  states: Record<DelegationState["state"], number>;
+  recent: DelegationState[];
+}
 export interface AcceptanceReport {
   session_id: string;
   agent_id: number;
   turn_id: number;
   scope: string;
   status: "accepted" | "rejected" | "incomplete";
+  /** All native lifecycle counts and latest 32 direct delegations of this task. */
+  delegations: DelegationLedger;
   criteria: Array<{
     expected: AcceptanceCriterion;
     verdict: "satisfied" | "failed" | "unverified";
@@ -120,7 +133,8 @@ export interface ToolSpec {
 
 export interface RecoveryState {
   pending: boolean;
-  calls: Array<{ call_id: string; name: string; input: string; artifacts: string[] }>;
+  calls: Array<{ call_id: string; agent_id: string; name: string; input: string; artifacts: string[] }>;
+  delegations: Array<{ agent_id: string; unknown_calls: number; action: "reconstruct_from_journal" }>;
 }
 
 /** How full the model's context is (sope_agent_context); tokens, 0 when unknown. */

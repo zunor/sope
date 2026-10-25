@@ -546,10 +546,13 @@ func TestSuspendedSubagentRequiresReconciliation(t *testing.T) {
 		t.Fatal(e)
 	}
 	recovery, e := a.Recovery()
-	if e != nil || len(recovery.Calls) != 1 || recovery.Calls[0].Name != "agent" {
+	if e != nil || len(recovery.Calls) != 1 || recovery.Calls[0].Name != "echo" || recovery.Calls[0].AgentID != call.AgentID || len(recovery.Delegations) != 1 {
 		t.Fatal(recovery, e)
 	}
 	if e := a.Resume(); !errors.Is(e, ErrBusy) {
+		t.Fatal(e)
+	}
+	if e := a.Resolve(call.AgentID, false, "fabricated child completion"); !errors.Is(e, ErrNotFound) {
 		t.Fatal(e)
 	}
 	if e := a.Resolve(recovery.Calls[0].CallID, false, "subagent effects checked"); e != nil {

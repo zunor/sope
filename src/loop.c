@@ -366,18 +366,22 @@ static sope_next start_call(sope_agent_t *a)
     sope_call *c;
 
     if (turn_cancelled(a)) return next(SOPE__NEXT_CONTINUE);
-    if (t->round >= (uint64_t)t->max_rounds) {
-        char msg[64];
-        snprintf(msg, sizeof msg, "stopped after %d model rounds (max_rounds)", (int)t->max_rounds);
-        turn_error(a, SOPE_ERROR, msg);
-        finish_turn(a, SOPE_STOP_ERROR);
-        return next(SOPE__NEXT_CONTINUE);
-    }
     pthread_mutex_lock(a->mu);
     int context_ok = sope__harness_context(a);
     pthread_mutex_unlock(a->mu);
     if (!context_ok) {
         turn_error(a, SOPE_ENOMEM, "Cannot render runtime working state.");
+        finish_turn(a, SOPE_STOP_ERROR);
+        return next(SOPE__NEXT_CONTINUE);
+    }
+    pthread_mutex_lock(a->mu);
+    int ready = t->report_mode && sope__harness_ready(a);
+    pthread_mutex_unlock(a->mu);
+    if (ready && !turn_cancelled(a)) return finish_report(a, NULL);
+    if (t->round >= (uint64_t)t->max_rounds) {
+        char msg[64];
+        snprintf(msg, sizeof msg, "stopped after %d model rounds (max_rounds)", (int)t->max_rounds);
+        turn_error(a, SOPE_ERROR, msg);
         finish_turn(a, SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);
     }

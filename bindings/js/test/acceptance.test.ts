@@ -153,3 +153,68 @@ test("children cannot inspect parent or sibling evidence ledgers",async()=>{
  };
  a.send("Check child scope");const es=await drain(a);expect(es.filter(e=>e.type==="tool_end"&&e.agentId&&e.name==="evidence"&&e.isError)).toHaveLength(2);expect(es.at(-1)).toMatchObject({stopReason:"end_turn"});
 });
+
+test("recovery closes a committed report without provider availability or remaining rounds",async()=>{
+ const {a,dir,session,options}=open([criterion("test",["/usr/bin/true"])]);a.setOption("max_rounds","2");let n=0;
+ const db=new Database(join(dir,"execution.sqlite"));
+ db.exec("CREATE TRIGGER fault BEFORE INSERT ON outcomes BEGIN SELECT RAISE(ABORT,'terminal checkpoint interrupted'); END");
+ respond=()=>++n===1?tools({name:"check",input:{argv:["/usr/bin/true"]}}):tools({name:"report",input:{entries:[{id:"test",evidence:ref(session,1)}]}});
+ a.send("Verify and close");const deadline=Date.now()+7000;let failed=false;
+ while(Date.now()<deadline){const e=a.poll(0);if(e?.type==="error"){failed=true;break;}await Bun.sleep(1);}
+ expect(failed).toBe(true);a.free();agents.splice(agents.indexOf(a),1);
+ db.exec("DROP TRIGGER fault");
+ const h=JSON.parse((db.query("select payload from harness where agent=0").get() as any).payload);expect(h.report.status).toBe("accepted");db.close();
+ const b=Agent.open(dir,{...options,max_rounds:"2"});agents.push(b);
+ expect(b.recovery()).toMatchObject({pending:true,calls:[]});
+ respond=()=>{n++;return new Response("provider unavailable",{status:503});};
+ b.resume();const es=await drain(b);expect(es.at(-1)).toMatchObject({stopReason:"end_turn"});expect(n).toBe(2);expect(b.outcome(1).acceptance?.status).toBe("accepted");
+});
+
+test("lossy compaction preserves native failed and cancelled child states and their evidence",async()=>{
+ const {a,session}=open([criterion("test",["/usr/bin/true"])]);let root=0,fail=0,cancel=0,compacted=false;
+ a.setOption("compact.threshold","14000");a.setOption("compact.retain_tokens","0");
+ a.registerTool({name:"bulk",inputSchema:{type:"object"}});a.registerTool({name:"park",inputSchema:{type:"object"}});
+ a.registerSubagent({name:"one-round",description:"failure",systemPrompt:"probe",tools:["check"],maxRounds:1});
+ let checkCall=0,checkAgent=0;
+ respond=r=>{
+  if(String(r.messages[0]?.content).startsWith("You summarize conversations")){compacted=true;return text("All children completed successfully; no criteria remain.");}
+  if(r.messages.some(m=>m.role==="user"&&m.content==="failure child")){fail++;return tools({name:"check",input:{argv:["/usr/bin/true"]}});}
+  if(r.messages.some(m=>m.role==="user"&&m.content==="cancel child")){cancel++;return tools({name:"park",input:{}});}
+  if(++root===1)return tools({name:"agent",input:{description:"failure",prompt:"failure child",subagent_type:"one-round"}},{name:"agent",input:{description:"cancel",prompt:"cancel child"}});
+  if(root===2)return tools({name:"bulk",input:{}});
+  const stateMessage=r.messages.find(m=>String(m.content).startsWith("Runtime working state"));expect(stateMessage).toBeDefined();
+  const state=JSON.parse(stateMessage!.content.slice(stateMessage!.content.indexOf("\n")+1));
+  expect(state.delegations.recent.map((d:any)=>d.state).sort()).toEqual(["cancelled","failed"]);
+  expect(state.delegations.recent.find((d:any)=>d.agent_id===checkAgent).recent_evidence_call_ids).toContain(checkCall);
+  expect(state.acceptance_contract.criteria[0].id).toBe("test");
+  return tools({name:"report",input:{entries:[{id:"test",evidence:ref(session,checkCall,checkAgent)}]}});
+ };
+ a.send("Delegate reliability probes");const es:SopeEvent[]=[];const deadline=Date.now()+7000;
+ while(Date.now()<deadline){const e=a.poll(0);if(!e){await Bun.sleep(1);continue;}es.push(e);
+  if(e.type==="tool_end"&&e.name==="check"){checkCall=e.callId;checkAgent=e.agentId;}
+  if(e.type==="tool_call"){if(e.name==="park")a.cancelSubagent(e.agentId,"test cancellation");else a.toolResult(e.callId,"bulk ".repeat(30000));}
+  if(e.type==="turn_end"&&!e.agentId)break;
+ }
+ expect(compacted).toBe(true);expect(fail).toBe(1);expect(cancel).toBe(1);expect(es.at(-1)).toMatchObject({stopReason:"end_turn"});
+ expect(a.outcome(1).acceptance?.status).toBe("accepted");
+ expect(a.outcome(1).acceptance?.delegations.recent.map(d=>d.state).sort()).toEqual(["cancelled","failed"]);
+});
+
+test("bounded delegation index retains failure counts for older children",async()=>{
+ const {a,session}=open([criterion("test",["/usr/bin/true"])]);let root=0,checkCall=0,checkAgent=0;
+ a.registerSubagent({name:"one-round",description:"failure",systemPrompt:"probe",tools:["check"],maxRounds:1});
+ respond=r=>{
+  const user=r.messages.find(m=>m.role==="user"&&/^child-\d+$/.test(m.content));
+  if(user)return user.content==="child-0"?tools({name:"check",input:{argv:["/usr/bin/true"]}}):text("completed");
+  if(++root===1)return tools(...Array.from({length:34},(_,i)=>({name:"agent",input:{description:`child ${i}`,prompt:`child-${i}`,...(i===0?{subagent_type:"one-round"}:{})}})));
+  return tools({name:"report",input:{entries:[{id:"test",evidence:ref(session,checkCall,checkAgent)}],delegations:{states:{completed:34}}}});
+ };
+ a.send("Delegate 34 probes");const deadline=Date.now()+7000;
+ while(Date.now()<deadline){const e=a.poll(0);if(!e){await Bun.sleep(1);continue;}
+  if(e.type==="tool_end"&&e.name==="check"){checkCall=e.callId;checkAgent=e.agentId;}
+  if(e.type==="turn_end"&&!e.agentId)break;
+ }
+ const ledger=a.outcome(1).acceptance!.delegations;
+ expect(ledger.total).toBe(34);expect(ledger.states).toMatchObject({failed:1,completed:33});expect(ledger.recent).toHaveLength(32);
+ expect(ledger.recent.some(d=>d.agent_id===checkAgent)).toBe(false);
+});

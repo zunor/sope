@@ -319,22 +319,38 @@ type Status struct {
 	LastSequence uint64 `json:"last_sequence,string"`
 	Sealed       bool   `json:"sealed"`
 }
+
+type DelegationState struct {
+	HostReconciledCallIDs []uint64 `json:"host_reconciled_call_ids"`
+	AgentID               uint64   `json:"agent_id"`
+	State                 string   `json:"state"`
+	RecentEvidenceCallIDs []uint64 `json:"recent_evidence_call_ids"`
+}
+
+type DelegationLedger struct {
+	Total  uint64            `json:"total"`
+	States map[string]uint64 `json:"states"`
+	Recent []DelegationState `json:"recent"`
+}
+
 // AcceptanceReport contains native predicates, not a model's success claim.
 type AcceptanceReport struct {
-	SessionID string          `json:"session_id"`
-	AgentID   uint64          `json:"agent_id"`
-	TurnID    uint64          `json:"turn_id"`
-	Scope     string          `json:"scope"`
-	Status    string          `json:"status"`
-	Criteria  json.RawMessage `json:"criteria"`
+	Delegations DelegationLedger `json:"delegations"`
+	SessionID   string           `json:"session_id"`
+	AgentID     uint64           `json:"agent_id"`
+	TurnID      uint64           `json:"turn_id"`
+	Scope       string           `json:"scope"`
+	Status      string           `json:"status"`
+	Criteria    json.RawMessage  `json:"criteria"`
 }
 
 type Outcome struct {
-	TurnID uint64 `json:"turn_id,string"`
-	Stop   int    `json:"stop"`
-	Final  string `json:"final"`
+	TurnID     uint64            `json:"turn_id,string"`
+	Stop       int               `json:"stop"`
+	Final      string            `json:"final"`
 	Acceptance *AcceptanceReport `json:"acceptance"`
 }
+
 // ContextUsage is sope_agent_context's report; tokens, 0 when unknown.
 type ContextUsage struct {
 	State     string `json:"state"`
@@ -365,14 +381,21 @@ type ContextUsage struct {
 }
 
 type RecoveryCall struct {
+	AgentID   uint64   `json:"agent_id,string"`
 	CallID    uint64   `json:"call_id,string"`
 	Name      string   `json:"name"`
 	Input     string   `json:"input"`
 	Artifacts []string `json:"artifacts"`
 }
+type RecoveryDelegation struct {
+	AgentID      uint64 `json:"agent_id,string"`
+	UnknownCalls uint64 `json:"unknown_calls"`
+	Action       string `json:"action"`
+}
 type Recovery struct {
-	Pending bool           `json:"pending"`
-	Calls   []RecoveryCall `json:"calls"`
+	Delegations []RecoveryDelegation `json:"delegations"`
+	Pending     bool                 `json:"pending"`
+	Calls       []RecoveryCall       `json:"calls"`
 }
 type Event struct {
 	Sequence uint64 `json:"sequence,string"`
