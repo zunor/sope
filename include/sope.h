@@ -50,9 +50,9 @@ extern "C" {
 /* ------------------------------------------------------------------------ */
 
 #define SOPE_VERSION_MAJOR 0
-#define SOPE_VERSION_MINOR 5
+#define SOPE_VERSION_MINOR 6
 #define SOPE_VERSION_PATCH 0
-#define SOPE_VERSION_STRING "0.5.0"
+#define SOPE_VERSION_STRING "0.6.0"
 #define SOPE_VERSION_NUMBER \
     ((SOPE_VERSION_MAJOR << 16) | (SOPE_VERSION_MINOR << 8) | SOPE_VERSION_PATCH)
 

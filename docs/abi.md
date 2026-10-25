@@ -2,7 +2,7 @@
 
 `include/sope.h` is the source of truth for the ABI. This document covers details that do not fit in header comments: the threading model, lifetimes, turn and subagent semantics, ownership, and guidance for language binding authors.
 
-> Current version: 0.5.0 (ABI 0.5). Compatibility rules (`sope_version_number()` returns the version actually loaded at runtime):
+> Current version: 0.6.0 (ABI 0.6). Compatibility rules (`sope_version_number()` returns the version actually loaded at runtime):
 > - From 1.0 onward, semantic versioning applies: a host compiled against X.Y can use any X.Z library where Z ≥ Y. Breaking changes require a new major version.
 > - Before 1.0, a minor version change may break the ABI: the host requires matching major and minor versions; patch versions may differ.
 >

@@ -77,11 +77,11 @@ SQLite is embedded in every build; its upstream public-domain notice is included
 ## Release steps
 
 ```sh
-scripts/bump-version.sh 0.5.0           # Update sope.h, three package.json files, the bindings' ABI, and doc versions
-# Add a “## 0.5.0 — YYYY-MM-DD” section to CHANGELOG.md
+scripts/bump-version.sh 0.6.0           # Update sope.h, three package.json files, the bindings' ABI, and doc versions
+# Add a “## 0.6.0 — YYYY-MM-DD” section to CHANGELOG.md
 bash scripts/release.sh                 # Build, test, and package into dist/
-git tag -a v0.5.0 -m "sope 0.5.0"
-dist/sope-0.5.0-darwin-arm64/install.sh # Install locally
+git tag -a v0.6.0 -m "sope 0.6.0"
+dist/sope-0.6.0-darwin-arm64/install.sh # Install locally
 ```
 
 The complete checklist (ASan/TSan/leak checks, bundled builds, live model checks, checking for secrets before committing, and installation from the archive) is in [`.agents/skills/release/SKILL.md`](../.agents/skills/release/SKILL.md). Follow that skill when preparing a release.

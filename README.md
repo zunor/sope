@@ -51,20 +51,20 @@ bun run tui
 bun run tui -- "Explain how requests flow through this project."
 ```
 
-Prefer a ready-to-run executable? [Release 0.5.0](https://github.com/zunor/sope/releases/tag/v0.5.0) includes a **macOS Apple Silicon (arm64)** package with libsope embedded. Bun is not required to run it.
+Prefer a ready-to-run executable? [Release 0.6.0](https://github.com/zunor/sope/releases/tag/v0.6.0) includes **macOS Apple Silicon (arm64)** and **Linux x64** packages with libsope embedded. Bun is not required to run it.
 
 ```sh
-curl -fLO https://github.com/zunor/sope/releases/download/v0.5.0/sope-0.5.0-darwin-arm64.tar.gz
-curl -fLO https://github.com/zunor/sope/releases/download/v0.5.0/sope-0.5.0-darwin-arm64.tar.gz.sha256
-shasum -a 256 -c sope-0.5.0-darwin-arm64.tar.gz.sha256
-tar xzf sope-0.5.0-darwin-arm64.tar.gz
-./sope-0.5.0-darwin-arm64/install.sh
+curl -fLO https://github.com/zunor/sope/releases/download/v0.6.0/sope-0.6.0-darwin-arm64.tar.gz
+curl -fLO https://github.com/zunor/sope/releases/download/v0.6.0/sope-0.6.0-darwin-arm64.tar.gz.sha256
+shasum -a 256 -c sope-0.6.0-darwin-arm64.tar.gz.sha256
+tar xzf sope-0.6.0-darwin-arm64.tar.gz
+./sope-0.6.0-darwin-arm64/install.sh
 ~/.local/bin/sope --version
 ```
 
-The installer places `sope` in `~/.local/bin`; add that directory to your `PATH`, then [configure your model](docs/guide/quickstart.md#install). This release ships a macOS arm64 binary; Linux and Intel Mac users can build from source. The macOS binary is ad-hoc signed and is not notarized.
+The installer places `sope` in `~/.local/bin`; add that directory to your `PATH`, then [configure your model](docs/guide/quickstart.md#install). This release ships macOS arm64 and Linux x64 binaries; Intel Mac and Linux arm64 users can build from source. The macOS binary is ad-hoc signed and is not notarized.
 
-Version 0.5.0 adds `/context` usage details and `/effort` controls, fixes agent shutdown and tool cancellation, and improves long-output rendering and GLM 5.3 demos. See the [release notes](https://github.com/zunor/sope/releases/tag/v0.5.0) for the full changes. Embedded hosts must rebuild against the 0.5 C ABI and matching bindings.
+Version 0.6.0 adds bounded model and summary recovery, native evidence-backed acceptance, durable subagent recovery, conversation search, and background task controls. See the [release notes](https://github.com/zunor/sope/releases/tag/v0.6.0) for the full changes. Embedded hosts must rebuild against the 0.6 C ABI and matching bindings.
 
 [Installation and first steps →](docs/guide/quickstart.md)
 

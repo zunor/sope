@@ -4,6 +4,14 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
+## 0.6.0 — 2026-10-26
+
+This release adds bounded model recovery, evidence-backed task acceptance,
+durable subagent recovery, and terminal controls for long-running work. The C ABI
+advances to 0.6 for new subagent/shell controls, retry events and runtime options.
+Embedded hosts must rebuild with the matching header, library and bindings.
+Durable sessions sealed with ABI 0.5 remain on a matching 0.5 runtime.
+
 - Recover truncated summaries with an independent output ceiling and bounded input accounting; preserve original history on failure/cancellation, identify provider error phases, and include attempts and elapsed time in timeout diagnostics.
 
 - Recover output-truncated model responses with bounded output-budget growth, preserving committed tools and reported usage; expose output-limit exhaustion and budget changes in events and traces.
@@ -25,7 +33,7 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 - Extend diagnostic traces with retry classification, delay and remaining request budget.
 
 - TUI: see and stop background work. Each subagent takes one row in the transcript, with its elapsed time, tool calls and tokens; a finished one unfolds into its tool calls and report on a click. While subagents or background shells run, the footer counts them after the permission mode; `↓` on an empty input, `/tasks` or a click on that summary opens a task tree (sope → subagents and shells → their latest tool calls or output), where `x` stops the selected subagent (with an optional note for the model) or shell while the rest of the turn goes on.
-- Add `sope_subagent_cancel` to stop one subagent and let its parent turn continue, and `sope_agent_shells` / `sope_shell_stop` to list and stop background shells from the host (new ABI functions: the minor version advances on release).
+- Add `sope_subagent_cancel` to stop one subagent and let its parent turn continue, and `sope_agent_shells` / `sope_shell_stop` to list and stop background shells from the host (new ABI functions in 0.6).
 
 - TUI: search the conversation with `ctrl+f` or `/find`. Matches are highlighted as you type; `enter`, `n`/`N` and the search bar's `↑` `↓` buttons cycle through them, matches in collapsed tool output are expanded, and `esc` returns to the previous position. `ctrl+f` no longer moves the input cursor; use `→`.
 
