@@ -170,6 +170,12 @@ export class ExecutionTrace {
               fields.reportStatus = report.status;
               for (const verdict of ["satisfied", "failed", "unverified"])
                 fields[verdict] = report.criteria.filter((c: { verdict?: string }) => c.verdict === verdict).length;
+              const delegated = report.delegation_requirement;
+              if (Number.isSafeInteger(delegated?.minimum_completed) && delegated.minimum_completed > 0
+                && Number.isSafeInteger(delegated?.observed_completed) && delegated.observed_completed >= 0) {
+                fields.requiredCompletedDelegations = delegated.minimum_completed;
+                fields.completedDelegations = delegated.observed_completed;
+              }
             }
           } catch { /* No payload or arbitrary model prose is included in the trace. */ }
         }

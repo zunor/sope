@@ -292,7 +292,7 @@ int sope_agent_set_option(sope_agent_t *a, const char *key, const char *value)
     if (!a || !key || !*key) return sope__set_error(SOPE_EINVAL, "sope_agent_set_option: invalid argument");
     if(value && !strcmp(key,"acceptance.contract")) {
         sope_json *c=sope__json_parse(value,strlen(value));int valid=sope__report_contract_valid(c);sope__json_free(c);
-        if(!valid)return sope__set_error(SOPE_EINVAL,"acceptance.contract requires 1..32 unique bounded criteria with exact argv, exit_code and optional output.empty or output.contains");
+        if(!valid)return sope__set_error(SOPE_EINVAL,"acceptance.contract requires 1..32 unique bounded criteria with exact argv, exit_code and optional output.empty or output.contains; optional delegations.minimum_completed must be an integer in 1..32");
     }
     if (value && !strcmp(key, "openai.wire_api") && strcmp(value, "chat") && strcmp(value, "responses"))
         return sope__set_error(SOPE_EINVAL, "openai.wire_api must be chat or responses");

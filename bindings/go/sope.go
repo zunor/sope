@@ -333,15 +333,23 @@ type DelegationLedger struct {
 	Recent []DelegationState `json:"recent"`
 }
 
+// DelegationRequirement is a lifecycle predicate, not proof of review quality.
+type DelegationRequirement struct {
+	MinimumCompleted  uint64 `json:"minimum_completed"`
+	ObservedCompleted uint64 `json:"observed_completed"`
+	Verdict           string `json:"verdict"`
+}
+
 // AcceptanceReport contains native predicates, not a model's success claim.
 type AcceptanceReport struct {
-	Delegations DelegationLedger `json:"delegations"`
-	SessionID   string           `json:"session_id"`
-	AgentID     uint64           `json:"agent_id"`
-	TurnID      uint64           `json:"turn_id"`
-	Scope       string           `json:"scope"`
-	Status      string           `json:"status"`
-	Criteria    json.RawMessage  `json:"criteria"`
+	DelegationRequirement *DelegationRequirement `json:"delegation_requirement,omitempty"`
+	Delegations           DelegationLedger       `json:"delegations"`
+	SessionID             string                 `json:"session_id"`
+	AgentID               uint64                 `json:"agent_id"`
+	TurnID                uint64                 `json:"turn_id"`
+	Scope                 string                 `json:"scope"`
+	Status                string                 `json:"status"`
+	Criteria              json.RawMessage        `json:"criteria"`
 }
 
 type Outcome struct {

@@ -30,6 +30,18 @@ the physical directory (`pwd -P`) rather than a symlink alias.
 These are exact predicates, not a universal test-framework parser. In particular,
 `gofmt -l` exiting zero with a filename fails the example criterion.
 
+Hosts can also require completed delegated work with the optional top-level
+`"delegations": {"minimum_completed": 2}` (an integer from 1 to 32). The runtime
+counts completed direct children of this turn from the journal, including children
+outside the recent index. Missing, failed, cancelled, interrupted and never-started
+children do not satisfy this minimum. The report includes `delegation_requirement`
+with the required minimum, observed count and `satisfied`/`unverified` verdict.
+An unmet minimum prevents `accepted`, even if every command check passes or the
+model claims reviews finished. It still allows an honest `incomplete` report and
+bounded termination. This predicate proves completion count only; hosts must
+assess the assigned roles, distinct scopes and review quality separately. Omit
+it for tasks whose successful checks may come from intentionally failing children.
+
 The CLI supports explicit acceptance in print mode:
 
 ```sh

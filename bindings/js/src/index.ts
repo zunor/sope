@@ -65,6 +65,12 @@ export interface AcceptanceReport {
   status: "accepted" | "rejected" | "incomplete";
   /** All native lifecycle counts and latest 32 direct delegations of this task. */
   delegations: DelegationLedger;
+  /** Host-required completed direct delegations in this turn; not review quality. */
+  delegation_requirement?: {
+    minimum_completed: number;
+    observed_completed: number;
+    verdict: "satisfied" | "unverified";
+  };
   criteria: Array<{
     expected: AcceptanceCriterion;
     verdict: "satisfied" | "failed" | "unverified";

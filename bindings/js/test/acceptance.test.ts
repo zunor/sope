@@ -14,9 +14,9 @@ const tools=(...items:{name:string;input:unknown}[])=>stream({tool_calls:items.m
 beforeAll(()=>{server=Bun.serve({port:0,async fetch(req){return respond(await req.json() as Req);}});});
 afterAll(()=>server.stop(true));afterEach(()=>{for(const a of agents.splice(0))a.free();for(const d of dirs.splice(0))rmSync(d,{recursive:true,force:true});});
 const criterion=(id:string,argv:string[],output?:unknown)=>({id,description:`verify ${id}`,argv,exit_code:0,...(output?{output}:{})});
-function open(criteria:unknown[]){
+function open(criteria:unknown[],delegations?:unknown){
  const dir=mkdtempSync(join(tmpdir(),"sope-acceptance-"));dirs.push(dir);
- const options={provider:"openai",model:"test",permissions:"allow","openai.base_url":`http://127.0.0.1:${server.port}/v1`,cwd:dir,"acceptance.contract":JSON.stringify({criteria:criteria.map((c:any)=>({...c,cwd:dir}))})};
+ const options={provider:"openai",model:"test",permissions:"allow","openai.base_url":`http://127.0.0.1:${server.port}/v1`,cwd:dir,"acceptance.contract":JSON.stringify({criteria:criteria.map((c:any)=>({...c,cwd:dir})),...(delegations?{delegations}:{})})};
  const a=Agent.open(dir,options);agents.push(a);
  const db=new Database(join(dir,"execution.sqlite"),{readonly:true});const session=(db.query("select session_id from runtime").get() as {session_id:string}).session_id;db.close();
  return {a,dir,session,options};
@@ -53,7 +53,7 @@ for(const bad of ["foreign-session","wrong-command","host-result"])test(`rejects
 });
 
 test("two parallel children keep provenance; parent recalls exited children after reopen",async()=>{
- const cmds=[["/usr/bin/printf","alpha"],["/usr/bin/printf","beta"]];const {a,session,dir,options}=open(cmds.map((argv,i)=>criterion(String(i),argv,{contains:i?"beta":"alpha"})));
+ const cmds=[["/usr/bin/printf","alpha"],["/usr/bin/printf","beta"]];const {a,session,dir,options}=open(cmds.map((argv,i)=>criterion(String(i),argv,{contains:i?"beta":"alpha"})),{minimum_completed:2});
  let root=0;const child=[0,0];let reports:any[]=[];
  respond=r=>{
   const which=r.messages.some(m=>m.role==="user"&&m.content==="child alpha")?0:r.messages.some(m=>m.role==="user"&&m.content==="child beta")?1:-1;
@@ -64,9 +64,11 @@ test("two parallel children keep provenance; parent recalls exited children afte
   return text("everything correct");
  };
  a.send("Delegate two checks");const es=await drain(a);expect(es.at(-1)).toMatchObject({stopReason:"end_turn"});expect(JSON.parse(final(es)).status).toBe("accepted");
+ expect(a.outcome(1).acceptance?.delegation_requirement).toEqual({minimum_completed:2,observed_completed:2,verdict:"satisfied"});
  expect(es.filter(e=>e.type==="subagent_start")).toHaveLength(2);expect(es.filter(e=>e.type==="tool_end"&&e.name==="evidence"&&e.isError)).toHaveLength(0);
  const call=reports[0].evidence.receipts[0].call_id,agent=reports[0].agent_id;
  a.free();agents.splice(agents.indexOf(a),1);const b=Agent.open(dir,{...options,"acceptance.contract":JSON.stringify({criteria:[{...criterion("later",reports[0].evidence.receipts[0].input.argv),cwd:dir}]})});agents.push(b);
+ expect(b.outcome(1).acceptance?.delegation_requirement).toEqual({minimum_completed:2,observed_completed:2,verdict:"satisfied"});
  let round=0;respond=()=>++round===1?tools({name:"evidence",input:ref(session,call,agent)}):round===2?tools({name:"report",input:{entries:[{id:"later",evidence:ref(session,call,agent)}]}}):round===3?tools({name:"report",input:{entries:[{id:"later",unverified:"not part of this retrieval-only turn"}]}}):text("done");
  b.send("Recall completed child");const later=await drain(b);expect(later.some(e=>e.type==="tool_end"&&e.name==="evidence"&&!e.isError&&e.result.includes("alpha"))).toBe(true);
  expect(later.some(e=>e.type==="tool_end"&&e.name==="report"&&e.isError)).toBe(true);
@@ -171,7 +173,7 @@ test("recovery closes a committed report without provider availability or remain
 });
 
 test("lossy compaction preserves native failed and cancelled child states and their evidence",async()=>{
- const {a,session}=open([criterion("test",["/usr/bin/true"])]);let root=0,fail=0,cancel=0,compacted=false;
+ const {a,session}=open([criterion("test",["/usr/bin/true"])],{minimum_completed:1});let root=0,fail=0,cancel=0,compacted=false;
  a.setOption("compact.threshold","14000");a.setOption("compact.retain_tokens","0");
  a.registerTool({name:"bulk",inputSchema:{type:"object"}});a.registerTool({name:"park",inputSchema:{type:"object"}});
  a.registerSubagent({name:"one-round",description:"failure",systemPrompt:"probe",tools:["check"],maxRounds:1});
@@ -196,12 +198,13 @@ test("lossy compaction preserves native failed and cancelled child states and th
   if(e.type==="turn_end"&&!e.agentId)break;
  }
  expect(compacted).toBe(true);expect(fail).toBe(1);expect(cancel).toBe(1);expect(es.at(-1)).toMatchObject({stopReason:"end_turn"});
- expect(a.outcome(1).acceptance?.status).toBe("accepted");
+ expect(a.outcome(1).acceptance?.status).toBe("incomplete");
+ expect(a.outcome(1).acceptance?.delegation_requirement).toEqual({minimum_completed:1,observed_completed:0,verdict:"unverified"});
  expect(a.outcome(1).acceptance?.delegations.recent.map(d=>d.state).sort()).toEqual(["cancelled","failed"]);
 });
 
 test("bounded delegation index retains failure counts for older children",async()=>{
- const {a,session}=open([criterion("test",["/usr/bin/true"])]);let root=0,checkCall=0,checkAgent=0;
+ const {a,session}=open([criterion("test",["/usr/bin/true"])],{minimum_completed:32});let root=0,checkCall=0,checkAgent=0;
  a.registerSubagent({name:"one-round",description:"failure",systemPrompt:"probe",tools:["check"],maxRounds:1});
  respond=r=>{
   const user=r.messages.find(m=>m.role==="user"&&/^child-\d+$/.test(m.content));
@@ -215,6 +218,24 @@ test("bounded delegation index retains failure counts for older children",async(
   if(e.type==="turn_end"&&!e.agentId)break;
  }
  const ledger=a.outcome(1).acceptance!.delegations;
+ expect(a.outcome(1).acceptance!.delegation_requirement).toEqual({minimum_completed:32,observed_completed:33,verdict:"satisfied"});
  expect(ledger.total).toBe(34);expect(ledger.states).toMatchObject({failed:1,completed:33});expect(ledger.recent).toHaveLength(32);
  expect(ledger.recent.some(d=>d.agent_id===checkAgent)).toBe(false);
+});
+
+test("skipped delegations cannot be supplied by model report fields or a completed todo",async()=>{
+ const {a,session}=open([criterion("test",["/usr/bin/true"])],{minimum_completed:2});let n=0;
+ respond=()=>++n===1?tools({name:"todo_write",input:{todos:[{content:"Both reviews done",activeForm:"Reviewing",status:"completed"}]}}):n===2?tools({name:"check",input:{argv:["/usr/bin/true"]}}):tools({name:"report",input:{entries:[{id:"test",evidence:ref(session,2)}],delegations:{states:{completed:2}},delegation_requirement:{verdict:"satisfied",observed_completed:2}}});
+ a.send("Complete two delegated reviews and check");const es=await drain(a);
+ expect(es.at(-1)).toMatchObject({stopReason:"end_turn"});
+ const report=a.outcome(1).acceptance!;
+ expect(report.status).toBe("incomplete");expect(report.criteria[0]!.verdict).toBe("satisfied");
+ expect(report.delegations.total).toBe(0);
+ expect(report.delegation_requirement).toEqual({minimum_completed:2,observed_completed:0,verdict:"unverified"});
+});
+
+test("delegation requirements reject invalid or ambiguous bounds",()=>{
+ const {a,dir}=open([criterion("test",["/usr/bin/true"])]);
+ for(const delegations of [null,{},[],{minimum_completed:0},{minimum_completed:-1},{minimum_completed:1.5},{minimum_completed:33},{minimum_completed:"2"},{minimum_completed:2,completed:2}])
+  expect(()=>a.setOption("acceptance.contract",JSON.stringify({criteria:[{...criterion("test",["/usr/bin/true"]),cwd:dir}],delegations}))).toThrow();
 });

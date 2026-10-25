@@ -30,6 +30,13 @@ int sope__report_contract_valid(const sope_json* contract)
     sope__buf_free(&b);
     if (!ok)
         return 0;
+    const sope_json* delegated = sope__json_get(contract, "delegations");
+    if (delegated) {
+        const sope_json* minimum = sope__json_get(delegated, "minimum_completed");
+        if (delegated->type != SOPE_JSON_OBJECT || delegated->count != 1
+            || !integer(minimum) || minimum->num < 1 || minimum->num > 32)
+            return 0;
+    }
     for (const sope_json* c = cs->child; c; c = c->next) {
         const sope_json *id = sope__json_get(c, "id"), *argv = sope__json_get(c, "argv"),
                         *exit = sope__json_get(c, "exit_code"), *out = sope__json_get(c, "output");
@@ -181,8 +188,26 @@ static sope_next report(tool_run* r)
         sope__buf_appends(&result, "}");
     }
     sope__buf_appends(&result, "],\"delegations\":");
-    if (!sope__journal_delegations(a, &result))
+    sope_buf delegated = {0};
+    if (!sope__journal_delegations(a, &delegated))
         error = "Cannot read native delegation states";
+    sope__buf_append(&result, delegated.ptr, delegated.len);
+    const sope_json* requirement = sope__json_get(contract, "delegations");
+    if (requirement && !error) {
+        sope_json* ledger = sope__json_parse(delegated.ptr, delegated.len);
+        const sope_json* completed = sope__json_get(sope__json_get(ledger, "states"), "completed");
+        const sope_json* minimum = sope__json_get(requirement, "minimum_completed");
+        if (!integer(completed)) error = "Cannot read native completed delegation count";
+        else {
+            int satisfied = completed->num >= minimum->num;
+            unknown += !satisfied;
+            sope__buf_appendf(&result, ",\"delegation_requirement\":{\"minimum_completed\":%.0f,"
+                "\"observed_completed\":%.0f,\"verdict\":\"%s\"}", minimum->num, completed->num,
+                satisfied ? "satisfied" : "unverified");
+        }
+        sope__json_free(ledger);
+    }
+    sope__buf_free(&delegated);
     sope__buf_appendf(&result, ",\"status\":\"%s\"}", failed ? "rejected" : unknown ? "incomplete" : "accepted");
     pthread_mutex_unlock(a->mu);
     sope__json_free(contract);
