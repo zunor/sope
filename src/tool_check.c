@@ -89,8 +89,10 @@ void sope__execution_receipt(tool_run *r, int status)
     snapshot(r);
     sope__buf_appends(&r->out, "\n[sope execution receipt; test assertions and coverage unverified]\n");
     sope__buf_appendf(&r->out,
-        "{\"session_id\":\"%s\",\"agent_id\":%" PRIu64 ",\"call_id\":%" PRIu64 ",\"outcome\":\"%s\",\"exit_code\":%d,\"test_verdict\":\"unverified\"}",
+        "{\"session_id\":\"%s\",\"agent_id\":%" PRIu64 ",\"call_id\":%" PRIu64 ",\"outcome\":\"%s\",\"exit_code\":%d,\"test_verdict\":\"unverified\",\"cwd\":",
         r->agent->root->session_id, r->agent->agent_id, r->call_id, r->timed_out ? "timed_out" : status ? "process_failed" : "process_exited_zero", status);
+    sope__buf_append_json_string(&r->out, r->cwd, strlen(r->cwd));
+    sope__buf_appends(&r->out, "}");
 }
 
 static sope_next check(tool_run *r)

@@ -453,6 +453,9 @@ int sope__harness_context(sope_agent_t *a)
             "reconcile the plan before answering; mark a genuinely blocked item with its reason, never as completed.\n");
         sope__buf_appendf(&b, "{\"session_id\":\"%s\",\"agent_id\":%" PRIu64 ",\"turn_id\":%" PRIu64 ",\"round\":%" PRIu64 ",\"remaining_rounds\":%" PRIu64,
             a->root->session_id,a->agent_id,request ? request->turn_id : 0,t->round, t->max_rounds > (int64_t)t->round ? (uint64_t)t->max_rounds - t->round : 0);
+        sope__buf_appends(&b, ",\"cwd\":");
+        if (t->cwd) sope__buf_append_json_string(&b, t->cwd, strlen(t->cwd));
+        else sope__buf_appends(&b, "null");
         if (task) {
             sope__buf_appends(&b, ",\"original_current_request\":");
             sope__buf_append_json_string(&b, request->text, request->len);
@@ -482,6 +485,10 @@ int sope__harness_context(sope_agent_t *a)
                 const char *outcome=sope__json_string(sope__json_get(r,"outcome"),NULL);
                 sope__buf_append_json_string(&b,outcome ? outcome : "unknown",outcome ? strlen(outcome) : 7);
                 const char *tool=sope__json_string(sope__json_get(r,"tool"),NULL);
+                const char *cwd=sope__json_string(sope__json_get(r,"cwd"),NULL);
+                sope__buf_appends(&b,",\"cwd\":");
+                if(cwd)sope__buf_append_json_string(&b,cwd,strlen(cwd));
+                else sope__buf_appends(&b,"null");
                 sope__buf_appends(&b,",\"tool\":");
                 sope__buf_append_json_string(&b,tool?tool:"unknown",tool?strlen(tool):7);
                 const sope_json *input=sope__json_get(r,"input");

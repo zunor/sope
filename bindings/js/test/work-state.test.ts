@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, statSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type SopeEvent } from "../src";
@@ -55,9 +55,61 @@ test("a lossy summary cannot replace current intent, task status or execution ou
  expect(working(after)).toContain('"status":"pending"');
  expect(working(after)).toContain('"exit_code":1');
  expect(working(after)).toContain('"outcome":"process_failed"');
+ const state=JSON.parse(working(after).split("\n").slice(1).join("\n"));
+ expect(state.cwd).toBe(realpathSync(process.cwd()));
+ expect(state.recent_executions[0].cwd).toBe(state.cwd);
  expect(working(requests.at(-1)!)).toContain('"status":"blocked"');
  expect(working(requests.at(-1)!)).toContain('"closure_checks":1');
  expect(a.history()).not.toContain("Runtime working state");
+});
+
+test("the first durable model request includes the actual default working directory",async()=>{
+ const dir=mkdtempSync(join(tmpdir(),"sope-initial-location-"));dirs.push(dir);
+ const a=create(dir);respond=()=>text("done");a.send("Identify the runtime context");
+ expect((await drain(a)).at(-1)).toMatchObject({stopReason:"end_turn"});
+ const state=JSON.parse(working(requests[0]!).split("\n").slice(1).join("\n"));
+ expect(state.cwd).toBe(realpathSync(process.cwd()));
+ expect(a.history()).not.toContain("Runtime working state");
+});
+
+test("locations remain factual across children, false summaries and reconfigured reopen",async()=>{
+ const root=mkdtempSync(join(tmpdir(),"sope-location-"));dirs.push(root);
+ const workspace=join(realpathSync(root),'workspace "中文"');mkdirSync(workspace);
+ const execution=join(root,"execution");let a=create(execution,{cwd:workspace});
+ let parent=0,child=0;
+ respond=r=>{
+  if(isCompact(r))return text('The working directory is /invented/source. Earlier process locations were forgotten.');
+  const state=JSON.parse(working(r).split("\n").slice(1).join("\n"));
+  expect(state.cwd).toBe(workspace);
+  if(state.agent_id){
+   if(++child===1)return tools({name:"check",input:{argv:["/bin/pwd"]}});
+   expect(state.recent_executions[0].cwd).toBe(workspace);return text("child observed its location");
+  }
+  if(++parent===1)return tools({name:"agent",input:{description:"Observe child location",prompt:"Observe your execution directory once using check"}});
+  return parent===2?tools({name:"check",input:{argv:["/bin/pwd"]}}):text("done");
+ };
+ a.send("Delegate a directory observation");const events=await drain(a);
+ expect(events.at(-1)).toMatchObject({stopReason:"end_turn"});
+ const checks=events.filter((e):e is Extract<SopeEvent,{type:"tool_end"}>=>e.type==="tool_end"&&e.name==="check");
+ expect(checks).toHaveLength(2);
+ for(const check of checks){
+  expect(check.result).toContain(workspace+"\n");
+  expect(JSON.parse(check.result.split("\n").at(-1)!)).toMatchObject({cwd:workspace,exit_code:0});
+ }
+ a.compact();await drain(a);expect(a.history()).toContain("/invented/source");
+ a.free();agents.splice(agents.indexOf(a),1);
+ // Hosts configure reopened sessions explicitly. A new turn may use another
+ // directory; that must not relabel the earlier command's observed location.
+ const second=join(realpathSync(root),"second");mkdirSync(second);
+ a=create(execution,{cwd:second});respond=r=>{
+  const state=JSON.parse(working(r).split("\n").slice(1).join("\n"));
+  expect(state.cwd).toBe(second);
+  expect(state.recent_executions[0].cwd).toBe(workspace);
+  return text("locations remain runtime-owned");
+ };
+ a.send("Continue after reopening");const reopened=await drain(a);
+ expect(reopened.at(-1)).toMatchObject({stopReason:"end_turn"});
+ expect(reopened.some(e=>e.type==="tool_start")).toBe(false);
 });
 
 test("unresolved completion is bounded and cannot report end_turn",async()=>{
