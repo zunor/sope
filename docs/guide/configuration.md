@@ -46,6 +46,13 @@ Set `SOPE_TRACE_DIR=/absolute/path/to/traces` when launching either the TUI or
 contain tool/turn IDs, timings, provider attempts/status, token counts and a
 periodic heartbeat; streamed text is counted rather than logged per token.
 Prompts, reasoning, tool payloads, credentials and raw server errors are omitted.
+Repeated `read` ranges and exact `bash`/`check` command requests carry per-trace
+keyed fingerprints, counts, and the previous call ID, scoped to an agent and
+turn. These bounded indexes survive compaction within the trace. Command
+descriptions and timeouts are ignored; different shell spellings remain distinct.
+Counts describe requested work, not whether repeating it was unnecessary, whether
+files changed, or whether a command succeeded. Shell reads are not included in
+the `read` count. Raw paths, commands and arguments are never written to the trace.
 
 The trace queue is capped at 256 KiB and each file at 64 MiB. `trace.gap` identifies
 records dropped under backpressure; `trace.limit` marks the file limit. A normal

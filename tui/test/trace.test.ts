@@ -81,3 +81,38 @@ test("trace records acceptance counts without evidence or interpretations",async
  const dir=mkdtempSync(join(tmpdir(),"sope-report-trace-"));
  try {const trace=new ExecutionTrace(dir);trace.event({...origin,type:"tool_end",name:"report",callId:4,isError:false,result:JSON.stringify({status:"rejected",criteria:[{verdict:"failed",observation:"secret"},{verdict:"satisfied",unverified_interpretation:"secret"},{verdict:"unverified"}]})});await trace.close();const raw=readFileSync(trace.path,"utf8");expect(raw).not.toContain("secret");expect(raw).toContain('"reportStatus":"rejected"');expect(raw).toContain('"failed":1');}finally{rmSync(dir,{recursive:true,force:true});}
 });
+
+test("trace counts exact command requests across compaction without exposing command arguments", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sope-command-trace-"));
+  try {
+    const trace = new ExecutionTrace(dir);
+    const emit = (callId: number, name: string, input: object, agentId = 0, turnId = 1) =>
+      trace.event({ ...origin, agentId, turnId, type: "tool_start", callId, name, input: JSON.stringify(input) });
+    emit(1, "bash", { command: "cat secret-file", description: "first" });
+    trace.event({ ...origin, type: "compact", trigger: "auto", summary: "forgot the command" });
+    emit(2, "bash", { description: "different", timeout: 1000, command: "cat secret-file" });
+    emit(3, "bash", { command: "cat ./secret-file" });
+    emit(4, "check", { argv: ["cat", "secret-file"] });
+    emit(5, "check", { argv: ["cat", "secret-file"], timeout: 2000 });
+    emit(6, "check", { argv: ["cat", "secret-file"] }, 9);
+    emit(7, "check", { argv: ["cat", "secret-file"] }, 0, 2);
+    emit(8, "check", { argv: [1] });
+    emit(9, "bash", { command: "x".repeat(65537) });
+    trace.event({ ...origin, type: "permission", callId: 10, name: "bash", input: '{"command":"cat secret-file"}' });
+    await trace.close();
+    const raw = readFileSync(trace.path, "utf8");
+    expect(raw).not.toContain("secret-file");
+    expect(raw).not.toContain("cat ");
+    const rows = raw.trim().split("\n").map(x => JSON.parse(x));
+    const commands = rows.filter(x => x.type === "tool_start");
+    expect(commands.map(x => x.commandCount)).toEqual([1, 2, 1, 1, 2, 1, 1, undefined, undefined]);
+    expect(commands[1].previousCommandCallId).toBe(1);
+    expect(commands[4].previousCommandCallId).toBe(4);
+    expect(rows.find(x => x.type === "permission").commandCount).toBeUndefined();
+    const other = new ExecutionTrace(dir);
+    other.event({ ...origin, type: "tool_start", callId: 1, name: "bash", input: '{"command":"cat secret-file"}' });
+    await other.close();
+    const otherRows = readFileSync(other.path, "utf8").trim().split("\n").map(x => JSON.parse(x));
+    expect(otherRows[1].commandFingerprint).not.toBe(commands[0].commandFingerprint);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

@@ -29,6 +29,7 @@ export class ExecutionTrace {
   readonly #salt = randomBytes(32);
   readonly #cwd = process.cwd();
   readonly #reads = new Map<string, { callId: number; count: number }>();
+  readonly #commands = new Map<string, { callId: number; count: number }>();
 
   constructor(directory: string, private readonly limit = 64 * 1024 * 1024,
     private readonly warn: () => void = () => console.error("sope: diagnostic trace incomplete (storage error or size limit)")) {
@@ -136,6 +137,27 @@ export class ExecutionTrace {
               this.#reads.set(key, { callId: ev.callId, count: Number(fields.readCount) });
             }
           } catch { /* Invalid arguments remain observable through tool errors. */ }
+        }
+        if (ev.type !== "permission" && (ev.name === "bash" || ev.name === "check") && fields.inputBytes <= 65536) {
+          try {
+            const args = JSON.parse(ev.input);
+            const command = ev.name === "bash" ? args.command : args.argv;
+            const valid = ev.name === "bash" ? typeof command === "string"
+              : Array.isArray(command) && command.length > 0 && command.every(x => typeof x === "string");
+            if (valid) {
+              // Count exact command requests, not equivalent shell programs or
+              // stale observations. Descriptions/timeouts do not identify work.
+              const key = createHmac("sha256", this.#salt).update(JSON.stringify([
+                ev.agentId, ev.turnId, ev.name, command,
+              ])).digest("hex");
+              const prior = this.#commands.get(key);
+              fields.commandFingerprint = key;
+              fields.commandCount = (prior?.count ?? 0) + 1;
+              if (prior) fields.previousCommandCallId = prior.callId;
+              if (!prior && this.#commands.size >= 1024) this.#commands.delete(this.#commands.keys().next().value!);
+              this.#commands.set(key, { callId: ev.callId, count: Number(fields.commandCount) });
+            }
+          } catch { /* Malformed input is not a command identity. */ }
         }
         break;
       case "tool_end":
