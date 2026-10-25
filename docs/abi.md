@@ -290,7 +290,8 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 | `compact.threshold` | Full request token threshold for automatic compaction (see 5.1); `0` disables it | `0` |
 | `context.window` | Full model context capacity, including reserved output; `0` means unknown | `0` |
 | `context.reserve` | Minimum output reservation and default normal response output limit | `4096` |
-| `compact.max_tokens` | Summary output limit/reservation, independent of normal output | `2048` |
+| `compact.max_tokens` | Initial summary output limit/reservation, independent of normal output | `2048` |
+| `compact.max_tokens_ceiling` | Maximum summary output budget after truncation recovery; must be at least the initial summary limit | `max(8192, compact.max_tokens)` |
 | `compact.input_tokens` | Maximum estimated summary input, including system prompt/instructions | `64000` |
 | `compact.retain_tokens` | Maximum recent original-message tokens; `0` summarizes all older messages | `8000` |
 | `openai.base_url` | Service URL | `https://api.openai.com/v1` |
@@ -304,7 +305,7 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 
 ### openai provider
 
-By default, calls `POST {base_url}/chat/completions` with `stream: true`. Compatible with OpenAI, GLM, DeepSeek, Qwen, vLLM, and others. Supports streaming text, `reasoning_content` (→ `THINKING_DELTA`), parallel tool calls assembled by `index`, and the final usage chunk. With `openai.wire_api=responses`, calls `POST {base_url}/responses` with `store:false`, retaining complete output items and encrypted reasoning for replay. The endpoint and model must support the selected protocol. Connection failures, 429 responses, and 5xx responses are retried automatically **only if no output has been delivered to the host yet** (up to 3 attempts, with 1s and 2s backoff), logged as `LOG(warn)`.
+By default, calls `POST {base_url}/chat/completions` with `stream: true`. Compatible with OpenAI, GLM, DeepSeek, Qwen, vLLM, and others. Supports streaming text, `reasoning_content` (→ `THINKING_DELTA`), parallel tool calls assembled by `index`, and the final usage chunk. With `openai.wire_api=responses`, calls `POST {base_url}/responses` with `store:false`, retaining complete output items and encrypted reasoning for replay. The endpoint and model must support the selected protocol. Transient failures use bounded retries, including explicit discard boundaries for provisional output; see “Provider retries and provisional output” below.
 
 Budget options are unsigned integers up to 4294967295. Only `compact.threshold`, `context.window` and `compact.retain_tokens` allow zero. Invalid budgets fail the next turn before a provider request. The model window, when known, must exceed both output reservations.
 
@@ -572,13 +573,24 @@ and absolute request deadline. The same turn retains the increased limit for
 subsequent model rounds and reserves it before context admission. Set the
 ceiling equal to the initial limit to disable growth. Hosts should configure
 the ceiling and window for their model; an unknown window cannot be enforced.
-Summary calls retain their fixed `compact.max_tokens` budget.
+Summary calls grow from `compact.max_tokens` up to their independent
+`compact.max_tokens_ceiling`, using the bounded summary transcript and reported
+input usage to enforce the context window. They share the same attempt/deadline
+policy without increasing the normal output reservation. Retries preserve the
+exact summary input; cancellation or exhaustion leaves the original history intact.
 
 Only a strictly larger budget permits an output-limit retry. Otherwise the
 error event has code `SOPE_EOUTPUT_LIMIT` (-10), and no partial output is
 accepted. Reported usage from rejected attempts is still emitted; absent
 usage remains unknown. Chat usage after the finish marker is consumed before
 recovery. A completed summary alone may replace history; truncation never does.
+
+Provider error events identify the request phase in `name` (`model` or
+`compaction`); errors outside a provider call may leave it empty. Hosts should
+classify native result codes before interpreting diagnostic text. A provider
+`SOPE_ETIMEOUT` ends that logical request, not the host's entire task deadline.
+Its diagnostic includes the attempt count and elapsed request time. Neither a
+failed summary nor a failed model request erases previously committed tool work.
 
 Retry backoff is exponential with 20% jitter, capped at 10 seconds. A valid
 `Retry-After` delta-seconds or HTTP date imposes a minimum wait, capped at 15
@@ -588,7 +600,7 @@ input cannot bypass that wait. Cancellation interrupts backoff and I/O.
 `SOPE_EVENT_MODEL_RETRY` (15) marks an abandoned attempt. `call_id` identifies
 the model round (not a tool), `code` is the next attempt number, and `name` is
 `rate_limit`, `server`, `transport`, `timeout`, `incomplete_stream` or `output_limit`.
-The JSON data contains `delay_ms`, `compaction`, `discarded_text_bytes` and
+The JSON data contains `delay_ms`, boolean `compaction`, `discarded_text_bytes` and
 `discarded_thinking_bytes`, `max_tokens` and `next_max_tokens`. JS exposes `model_retry`; Go exposes `EventModelRetry`.
 Text and reasoning deltas before this boundary are provisional: hosts must mark
 or separate the abandoned output before rendering the next attempt. The TUI

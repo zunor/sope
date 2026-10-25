@@ -388,7 +388,7 @@ SOPE_API int sope_agent_fd(sope_agent_t *agent);
 #define SOPE_EVENT_TEXT_DELTA     2  /* data: a chunk of assistant text */
 #define SOPE_EVENT_TOOL_CALL      3  /* call_id, name: tool, data: JSON input. Answer with sope_tool_result */
 #define SOPE_EVENT_TURN_END       4  /* code: SOPE_STOP_* */
-#define SOPE_EVENT_ERROR          5  /* code: SOPE_E*, data: message */
+#define SOPE_EVENT_ERROR          5  /* code: SOPE_E*, data: message; provider name: model|compaction */
 #define SOPE_EVENT_LOG            6  /* code: SOPE_LOG_*, data: message */
 #define SOPE_EVENT_THINKING_DELTA 7  /* data: a chunk of the model's reasoning */
 #define SOPE_EVENT_USAGE          8  /* data: {"input_tokens":N,"output_tokens":N} for one model call */

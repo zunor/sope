@@ -320,7 +320,7 @@ static void trace_request(oa_state *s, const char *phase)
         (long long)(trace_now() - s->request_started_ms), s->call->text.len,
         s->thinking_bytes, tool_calls, tool_bytes,
         (unsigned long long)sope__call_max_tokens(s->call), (unsigned long long)s->next_output_tokens,
-        (unsigned long long)s->call->agent->turn.output_ceiling);
+        (unsigned long long)(s->call->compaction ? s->call->agent->turn.summary_ceiling : s->call->agent->turn.output_ceiling));
 }
 
 /* Deadlines bound one logical model request, including retry backoff. A new
@@ -345,7 +345,9 @@ static int retry_allowed(const oa_state *s)
 static sope_step timed_out(sope_call *c, oa_state *s, const char *kind)
 {
     s->failure = RETRY_TIMEOUT;
-    sope__call_error(c, SOPE_ETIMEOUT, "openai: %s deadline exceeded; incomplete response was not replayed", kind);
+    sope__call_error(c, SOPE_ETIMEOUT,
+        "openai: %s deadline exceeded after %d attempt(s) and %lld ms; incomplete output discarded, committed tools retained",
+        kind, s->attempts, (long long)(trace_now() - s->request_started_ms));
     trace_request(s, "timeout");
     return (sope_step){ SOPE__STEP_DONE, SOPE_ETIMEOUT };
 }
@@ -760,8 +762,8 @@ static sope_step retry(sope_call *c, oa_state *s)
     trace_request(s, "retry");
     char data[384];
     int n = snprintf(data, sizeof data,
-        "{\"delay_ms\":%d,\"compaction\":%d,\"discarded_text_bytes\":%zu,\"discarded_thinking_bytes\":%zu,\"max_tokens\":%llu,\"next_max_tokens\":%llu}",
-        s->delay_ms, c->compaction, c->text.len, s->thinking_bytes,
+        "{\"delay_ms\":%d,\"compaction\":%s,\"discarded_text_bytes\":%zu,\"discarded_thinking_bytes\":%zu,\"max_tokens\":%llu,\"next_max_tokens\":%llu}",
+        s->delay_ms, c->compaction ? "true" : "false", c->text.len, s->thinking_bytes,
         (unsigned long long)sope__call_max_tokens(c),
         (unsigned long long)(s->next_output_tokens ? s->next_output_tokens : sope__call_max_tokens(c)));
     const char *reason = failure_name(s->failure);
@@ -770,9 +772,12 @@ static sope_step retry(sope_call *c, oa_state *s)
     if (s->next_output_tokens) {
         /* Retain the learned budget for subsequent rounds of this turn. Future
          * context admission reserves it before another tool/model round. */
-        c->agent->turn.output_limit = s->next_output_tokens;
-        if (c->agent->turn.output_reserve < s->next_output_tokens)
-            c->agent->turn.output_reserve = s->next_output_tokens;
+        if (c->compaction) c->agent->turn.summary_tokens = s->next_output_tokens;
+        else {
+            c->agent->turn.output_limit = s->next_output_tokens;
+            if (c->agent->turn.output_reserve < s->next_output_tokens)
+                c->agent->turn.output_reserve = s->next_output_tokens;
+        }
         s->next_output_tokens = 0;
         sope__buf_free(&s->body);
         (s->responses ? build_responses : build_body)(c, &s->body, s->model);
@@ -806,12 +811,13 @@ static sope_step failed_attempt(sope_call *c, oa_state *s)
 
 /* Length is a complete protocol result, not a disconnected stream. Retry only
  * with a strictly larger budget; never dispatch its partial tool batch or
- * append an artificial "continue" input. Summary budgets stay fixed. */
+ * append an artificial "continue" input. Summaries own an independent ceiling. */
 static sope_step output_limited(sope_call *c, oa_state *s)
 {
     turn_state *t = &c->agent->turn;
-    uint64_t current = sope__call_max_tokens(c), ceiling = c->compaction ? current : t->output_ceiling;
-    uint64_t input = sope__context_tokens(c->agent);
+    uint64_t current = sope__call_max_tokens(c), ceiling = c->compaction ? t->summary_ceiling : t->output_ceiling;
+    /* A summary sees its bounded transcript, not the original full history. */
+    uint64_t input = c->compaction ? t->compact_request_budget : sope__context_tokens(c->agent);
     if (c->has_usage && c->usage_input_tokens > input) input = c->usage_input_tokens;
     if (t->context_window) {
         uint64_t available = input < t->context_window ? t->context_window - input : 0;
@@ -823,8 +829,8 @@ static sope_step output_limited(sope_call *c, oa_state *s)
         return retry(c, s);
     }
     sope__call_error(c, SOPE_EOUTPUT_LIMIT,
-        "openai: output_limit exhausted (max_tokens=%llu, available_ceiling=%llu, attempts=%d); incomplete output discarded",
-        (unsigned long long)current, (unsigned long long)ceiling, s->attempts);
+        "openai: %s output_limit exhausted (max_tokens=%llu, available_ceiling=%llu, attempts=%d); incomplete output discarded, committed history retained",
+        c->compaction ? "summary" : "model", (unsigned long long)current, (unsigned long long)ceiling, s->attempts);
     return (sope_step){ SOPE__STEP_DONE, SOPE_EOUTPUT_LIMIT };
 }
 

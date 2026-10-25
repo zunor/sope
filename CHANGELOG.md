@@ -4,6 +4,8 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
+- Recover truncated summaries with an independent output ceiling and bounded input accounting; preserve original history on failure/cancellation, identify provider error phases, and include attempts and elapsed time in timeout diagnostics.
+
 - Recover output-truncated model responses with bounded output-budget growth, preserving committed tools and reported usage; expose output-limit exhaustion and budget changes in events and traces.
 
 - Close a quiescent accepted/rejected/incomplete report directly in the runtime once todos are resolved, eliminating a final provider request and unnecessary compaction.

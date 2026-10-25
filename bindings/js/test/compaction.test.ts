@@ -611,3 +611,77 @@ test("suppressed compaction never bypasses the hard context limit", async () => 
   expect(agent.history()).toContain("ORIGINAL_TASK");
   expect(agent.history()).toContain("large result");
 });
+
+test("truncated summaries grow their own budget using the summary input, not full history", async () => {
+  const agent = create({ "context.window": "12000", "compact.input_tokens": "4000", "compact.retain_tokens": "0",
+    "openai.max_tokens": "300", "openai.max_retries": "3", "openai.retry_delay_ms": "1" });
+  agent.loadHistory(JSON.stringify(oldHistory()));
+  let summaries = 0;
+  respond = r => compact(r) && ++summaries === 1 ? stream([chunk("uncommitted summary", "length")]) : defaultResponse(r);
+  agent.compact();
+  const events = await drain(agent);
+  expect(events.at(-1)).toMatchObject({ stopReason: "end_turn" });
+  expect(events.find(e => e.type === "model_retry")).toMatchObject({ reason: "output_limit", compaction: true, maxTokens: 2048, nextMaxTokens: 4096 });
+  expect(requests.map(r => r.max_tokens)).toEqual([2048, 4096]);
+  expect(requests[1]!.messages).toEqual(requests[0]!.messages);
+  expect(events.some(e => e.type === "text_delta" || e.type === "thinking_delta" || e.type === "error")).toBe(false);
+  expect(agent.history()).not.toContain("uncommitted summary");
+  expect(agent.history()).toContain("Checkpoint");
+  agent.send("continue");
+  await drain(agent);
+  expect(requests.at(-1)!.max_tokens).toBe(300);
+});
+
+test("summary recovery exhausts its own ceiling without replacing history", async () => {
+  const agent = create({ "compact.max_tokens_ceiling": "4096", "openai.max_retries": "5", "openai.retry_delay_ms": "1" });
+  agent.loadHistory(JSON.stringify(oldHistory()));
+  const before = agent.history();
+  respond = () => stream([chunk("uncommitted", "length"), { choices: [], usage: { prompt_tokens: 100, completion_tokens: 2048 } }]);
+  agent.compact();
+  const events = await drain(agent);
+  expect(requests.map(r => r.max_tokens)).toEqual([2048, 4096]);
+  expect(events.filter(e => e.type === "usage")).toHaveLength(2);
+  expect(events.find(e => e.type === "error")).toMatchObject({ code: -10, message: expect.stringContaining("summary output_limit exhausted") });
+  expect(events.at(-1)).toMatchObject({ stopReason: "error" });
+  expect(agent.history()).toBe(before);
+});
+
+test("reported summary input bounds output recovery", async () => {
+  const agent = create({ "context.window": "12000", "compact.input_tokens": "4000", "openai.max_retries": "3", "openai.retry_delay_ms": "1" });
+  agent.loadHistory(JSON.stringify(oldHistory()));
+  const before = agent.history();
+  respond = () => stream([chunk("uncommitted", "length"), { choices: [], usage: { prompt_tokens: 11500, completion_tokens: 2048 } }]);
+  agent.compact();
+  const events = await drain(agent);
+  expect(requests).toHaveLength(1);
+  expect(events.at(-1)).toMatchObject({ stopReason: "error" });
+  expect(agent.history()).toBe(before);
+});
+
+test("invalid summary recovery configuration never reaches the provider", async () => {
+  const agent = create({ "compact.max_tokens_ceiling": "1000" });
+  agent.loadHistory(JSON.stringify(oldHistory()));
+  agent.compact();
+  const events = await drain(agent);
+  expect(requests).toHaveLength(0);
+  expect(events.find(e => e.type === "error")).toMatchObject({ code: -2 });
+});
+
+test("cancelling summary budget recovery preserves the original history", async () => {
+  const agent = create({ "openai.max_retries": "3", "openai.retry_delay_ms": "1000" });
+  agent.loadHistory(JSON.stringify(oldHistory()));
+  const before = agent.history();
+  respond = () => stream([chunk("uncommitted", "length")]);
+  agent.compact();
+  let stopped = false;
+  const deadline = performance.now() + 3000;
+  while (performance.now() < deadline) {
+    const event = agent.poll(0);
+    if (!event) { await Bun.sleep(1); continue; }
+    if (event.type === "model_retry") agent.cancel();
+    if (event.type === "turn_end") { expect(event.stopReason).toBe("cancelled"); stopped = true; break; }
+  }
+  expect(stopped).toBe(true);
+  expect(requests).toHaveLength(1);
+  expect(agent.history()).toBe(before);
+});

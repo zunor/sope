@@ -173,7 +173,8 @@ static void push_formatted(sope_call *c, uint32_t type, int32_t code, const char
     int n = vsnprintf(buf, sizeof buf, fmt, ap);
     if (n < 0) n = 0;
     if ((size_t)n >= sizeof buf) n = (int)sizeof buf - 1;
-    sope__push_event(c->agent, type, sope__turn_id(c->agent), 0, code, NULL, 0, buf, (size_t)n);
+    const char *phase = type == SOPE_EVENT_ERROR ? (c->compaction ? "compaction" : "model") : NULL;
+    sope__push_event(c->agent, type, sope__turn_id(c->agent), 0, code, phase, phase ? strlen(phase) : 0, buf, (size_t)n);
 }
 
 void sope__call_log(sope_call *c, int level, const char *fmt, ...)
