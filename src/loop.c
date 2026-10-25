@@ -304,8 +304,8 @@ static void finish_turn(sope_agent_t *a, int32_t stop)
     sope__push_event_locked(a, SOPE_EVENT_TURN_END, id, 0, stop, NULL, 0, NULL, 0);
     a->active_turn = 0;
     a->cancel_requested = 0;
-    pthread_mutex_unlock(a->mu);
-
+    /* Hosts may inspect context or reset the journal as soon as TURN_END is
+     * visible. Retire all turn-owned state before releasing that boundary. */
     free_specs(t);
     free(t->system);
     free(t->cwd);
@@ -314,6 +314,7 @@ static void finish_turn(sope_agent_t *a, int32_t stop)
     memset(t, 0, sizeof *t);
     a->last_stop = stop;
     a->turns_finished++;
+    pthread_mutex_unlock(a->mu);
 }
 
 /* ------------------------------------------------------------------------ */

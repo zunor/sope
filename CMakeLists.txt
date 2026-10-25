@@ -87,7 +87,7 @@ foreach(target sope sope_static)
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_sources(${target} PRIVATE $<TARGET_OBJECTS:sope_sqlite>)
-  target_link_libraries(${target} PUBLIC Threads::Threads PRIVATE sope_sqlite_headers)
+  target_link_libraries(${target} PUBLIC Threads::Threads m PRIVATE sope_sqlite_headers)
   if(NOT SOPE_CURL STREQUAL "off")
     target_compile_definitions(${target} PRIVATE SOPE_WITH_CURL)
     if(SOPE_CURL STREQUAL "bundled")

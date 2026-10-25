@@ -12,6 +12,8 @@ advances to 0.6 for new subagent/shell controls, retry events and runtime option
 Embedded hosts must rebuild with the matching header, library and bindings.
 Durable sessions sealed with ABI 0.5 remain on a matching 0.5 runtime.
 
+- Complete turn-state cleanup before hosts can observe the terminal event; fix Linux POSIX clock declarations and static math-library linkage.
+
 - Recover truncated summaries with an independent output ceiling and bounded input accounting; preserve original history on failure/cancellation, identify provider error phases, and include attempts and elapsed time in timeout diagnostics.
 
 - Recover output-truncated model responses with bounded output-budget growth, preserving committed tools and reported usage; expose output-limit exhaustion and budget changes in events and traces.
