@@ -15,7 +15,7 @@ async function run(reply: (attempt: number) => Response, options: Record<string,
   const times: number[] = [];
   const bodies: Record<string, unknown>[] = [];
   const server = Bun.serve({ port: 0, async fetch(req) { bodies.push(await req.json() as Record<string, unknown>); times.push(performance.now()); return reply(++attempts); } });
-  const agent = Agent.create({ provider: "openai", model: "fixture",
+  const agent = Agent.create({ provider: "openai", model: "fixture", "openai.max_tokens": "4096",
     "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": "10",
     "openai.request_timeout_ms": "3000", ...options });
   const events: SopeEvent[] = [];
@@ -135,7 +135,7 @@ for (const cancel of [false, true]) test(cancel ? "cancellation interrupts backo
     requests.push({ at: performance.now(), body: await req.json() });
     return requests.length === 1 ? new Response("busy", { status: 429, headers: { "Retry-After": "1" } }) : success();
   } });
-  const agent = Agent.create({ provider: "openai", model: "fixture", "openai.base_url": `http://127.0.0.1:${server.port}`,
+  const agent = Agent.create({ provider: "openai", model: "fixture", "openai.max_tokens": "4096", "openai.base_url": `http://127.0.0.1:${server.port}`,
     "openai.retry_delay_ms": "10", "openai.request_timeout_ms": "3000" });
   try {
     agent.send("first input");
@@ -144,7 +144,9 @@ for (const cancel of [false, true]) test(cancel ? "cancellation interrupts backo
     while (turns < (cancel ? 1 : 2) && performance.now() < end) {
       const e = agent.poll(0);
       if (!e) { await Bun.sleep(2); continue; }
-      if (e.type === "model_retry" && !injected) {
+      // Exercise the fixture's Retry-After, not an earlier transport retry
+      // that may happen before the mock server receives its first request.
+      if (e.type === "model_retry" && e.reason === "rate_limit" && !injected) {
         injected = true;
         if (cancel) agent.cancel(); else agent.send("queued input");
       }
@@ -170,7 +172,7 @@ for (const length of [false, true]) test(`retry after a committed tool preserves
     if (bodies.length === 2) return new Response(chunk({ content: "abandoned" }, length ? "length" : null) + (length ? "data: [DONE]\n\n" : ""));
     return success();
   } });
-  let agent = Agent.open(dir, { provider: "openai", model: "fixture", "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": "10" });
+  let agent = Agent.open(dir, { provider: "openai", model: "fixture", "openai.max_tokens": "4096", "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": "10" });
   try {
     agent.registerTool({ name: "effect", inputSchema: { type: "object" } });
     agent.send("execute once");
@@ -203,7 +205,7 @@ for (const length of [false, true]) test(`retry after a committed tool preserves
 test("compaction discards an incomplete summary and installs only the successful retry", async () => {
   const server = Bun.serve({ port: 0, fetch() { return ++attempts === 1 ? new Response(chunk({ content: "abandoned summary" })) : success(); } });
   let attempts = 0;
-  const agent = Agent.create({ provider: "openai", model: "fixture", "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": "10" });
+  const agent = Agent.create({ provider: "openai", model: "fixture", "openai.max_tokens": "4096", "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": "10" });
   try {
     agent.loadHistory(JSON.stringify([{ role: "user", content: "original task" }, { role: "assistant", content: "old detail ".repeat(5000) }]));
     agent.compact();
@@ -322,7 +324,7 @@ test("output-budget backoff cannot extend the logical request deadline", async (
 test("cancel during output-budget recovery prevents another request", async () => {
   let attempts = 0;
   const server = Bun.serve({ port: 0, fetch() { attempts++; return limited(); } });
-  const agent = Agent.create({ provider: "openai", model: "fixture", "openai.base_url": `http://127.0.0.1:${server.port}` });
+  const agent = Agent.create({ provider: "openai", model: "fixture", "openai.max_tokens": "4096", "openai.base_url": `http://127.0.0.1:${server.port}` });
   try {
     agent.send("test cancellation");
     let ended = false;
@@ -349,7 +351,7 @@ test("learned output budget survives later tool rounds and transient retries", a
     if (bodies.length === 3) return new Response("busy", { status: 503 });
     return success();
   } });
-  const agent = Agent.create({ provider: "openai", model: "fixture", "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": "1" });
+  const agent = Agent.create({ provider: "openai", model: "fixture", "openai.max_tokens": "4096", "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": "1" });
   try {
     agent.registerTool({ name: "effect", inputSchema: { type: "object" } });
     agent.send("test learned budget");
@@ -423,7 +425,7 @@ for (const priorToolFailed of [false, true]) for (const outcome of ["recovered",
     ]);
     return success();
   }});
-  let agent = Agent.open(join(dir, "session"), {provider: "openai", model: "fixture", cwd: dir, permissions: "allow",
+  let agent = Agent.open(join(dir, "session"), {provider: "openai", model: "fixture", "openai.max_tokens": "4096", cwd: dir, permissions: "allow",
     "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": outcome === "cancelled" ? "500" : "10"});
   try {
     agent.send("run once");

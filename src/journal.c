@@ -60,6 +60,49 @@ static int audit(sope_agent_t *a, const char *kind, uint64_t turn, uint64_t call
         kind, (long long)a->agent_id, (long long)turn, (long long)call, body ? body : "");
 }
 
+/* Learned limits survive worker restarts, independently of whether the retry
+ * completed. They are hints, always clamped to current host limits by callers. */
+int sope__output_budget(sope_agent_t *a, const char *identity, int summary, uint64_t *tokens, int save)
+{
+    sope_agent_t *root = a->root;
+    pthread_mutex_lock(root->mu);
+    int ok = !root->journal_failed;
+    output_budget *b = root->output_budgets;
+    while (b && (b->summary != summary || strcmp(b->identity, identity))) b = b->next;
+    if (ok && !b) {
+        b = calloc(1, sizeof *b);
+        if (!b || !(b->identity = sope__strdup(identity))) { free(b); b = NULL; ok = 0; }
+        if (b) {
+            b->summary = summary;
+            b->next = root->output_budgets;
+            root->output_budgets = b;
+            if (root->journal) {
+                sqlite3_stmt *s = NULL;
+                ok = sqlite3_prepare_v2(root->journal->db,
+                    "SELECT tokens FROM output_budgets WHERE identity=? AND summary=?", -1, &s, NULL) == SQLITE_OK;
+                if (ok) {
+                    sqlite3_bind_text(s, 1, identity, -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int(s, 2, summary);
+                    int rc = sqlite3_step(s);
+                    ok = rc == SQLITE_DONE || rc == SQLITE_ROW;
+                    if (rc == SQLITE_ROW) b->tokens = (uint64_t)sqlite3_column_int64(s, 0);
+                }
+                sqlite3_finalize(s);
+            }
+        }
+    }
+    if (ok && save && *tokens > b->tokens) {
+        if (root->journal) ok = sql(root->journal->db,
+            "INSERT INTO output_budgets VALUES(%Q,%d,%lld) ON CONFLICT(identity,summary) DO UPDATE SET tokens=excluded.tokens",
+            identity, summary, (long long)*tokens);
+        if (ok) b->tokens = *tokens;
+    }
+    if (ok) *tokens = b->tokens;
+    else sope__storage_fail_locked(a, "Cannot preserve learned output budget; execution stopped.");
+    pthread_mutex_unlock(root->mu);
+    return ok;
+}
+
 static char *one_message(const sope_message *m)
 {
     if (!m) return sope__strdup("[]");
@@ -385,6 +428,7 @@ int sope_agent_open(sope_agent_t **out, const char *directory)
         "CREATE TABLE IF NOT EXISTS outcomes(turn INTEGER PRIMARY KEY,payload TEXT NOT NULL);"
         "CREATE TABLE IF NOT EXISTS harness(agent INTEGER PRIMARY KEY,payload TEXT NOT NULL);"
         "CREATE TABLE IF NOT EXISTS observations(call INTEGER PRIMARY KEY,agent INTEGER NOT NULL,turn INTEGER NOT NULL,payload TEXT NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS output_budgets(identity TEXT NOT NULL,summary INTEGER NOT NULL,tokens INTEGER NOT NULL,PRIMARY KEY(identity,summary));"
         "CREATE INDEX IF NOT EXISTS stream_origin ON stream(agent,turn,type,seq);"
         "CREATE INDEX IF NOT EXISTS stream_call ON stream(call,type);"
         "CREATE INDEX IF NOT EXISTS child_lifecycle ON events(call,kind) WHERE kind='child_cancel' OR kind='child_interrupted';"

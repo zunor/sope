@@ -745,7 +745,7 @@ static void test_context(void)
     CHECK(sope_agent_set_option(a, "openai.max_tokens", "8192") == SOPE_OK);
     CHECK(sope_agent_context(a, &json, &len) == SOPE_OK);
     CHECK(context_field(json, "window") == 200000 && context_field(json, "threshold") == 160000);
-    CHECK(context_field(json, "reserve") == 8192);
+    CHECK(context_field(json, "reserve") == 4096);
 
     /* A host tool result is listed with the call that produced it. */
     send_and_drain(a, "!echo a fairly long tool input", &log);

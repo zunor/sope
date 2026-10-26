@@ -34,6 +34,8 @@ void sope__message_free(sope_message *m)
     if (!m) return;
     sope__images_free(m->images, m->n_images);
     free(m->response_items);
+    free(m->reasoning);
+    free(m->reasoning_identity);
     free(m->content);
     sope__tool_uses_free(m->tool_uses, m->n_tool_uses);
     free(m->tool_use_id);
@@ -141,6 +143,12 @@ static void append_message_json(sope_buf *b, const sope_message *m)
     size_t i;
     sope__buf_appendf(b, "{\"role\":\"%s\",\"content\":", ROLE_NAMES[m->role]);
     sope__buf_append_json_string(b, m->content, m->content_len);
+    if (m->reasoning && m->reasoning_identity) {
+        sope__buf_appends(b, ",\"reasoning_content\":");
+        sope__buf_append_json_string(b, m->reasoning, m->reasoning_len);
+        sope__buf_appends(b, ",\"reasoning_identity\":");
+        sope__buf_append_json_string(b, m->reasoning_identity, strlen(m->reasoning_identity));
+    }
     if (m->response_items) {
         sope__buf_appends(b, ",\"response_items\":");
         sope__buf_appends(b, m->response_items);
@@ -237,6 +245,19 @@ static int message_from_json(const sope_json *v, size_t index, sope_message **ou
     }
     if (!m) return SOPE_ENOMEM;
 
+    const sope_json *reasoning = sope__json_get(v, "reasoning_content");
+    const sope_json *identity = sope__json_get(v, "reasoning_identity");
+    if (reasoning || identity) {
+        if (m->role != SOPE__MSG_ASSISTANT || !reasoning || reasoning->type != SOPE_JSON_STRING ||
+            !identity || identity->type != SOPE_JSON_STRING) {
+            sope__message_free(m);
+            snprintf(err, cap, "assistant reasoning requires string content and identity");
+            return SOPE_EINVAL;
+        }
+        m->reasoning = dup_member(v, "reasoning_content", &m->reasoning_len);
+        m->reasoning_identity = dup_member(v, "reasoning_identity", NULL);
+        if (!m->reasoning || !m->reasoning_identity) { sope__message_free(m); return SOPE_ENOMEM; }
+    }
     const sope_json *items = sope__json_get(v, "response_items");
     if (items) {
         sope_buf raw = {0};

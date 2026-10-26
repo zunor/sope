@@ -4,6 +4,11 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
+- Accommodate slow reasoning providers with five-minute first-byte and fifteen-minute chunk-idle limits, within a thirty-minute logical request budget; remove the conflicting curl low-speed cutoff for model streams.
+
+- Start normal model requests with a 32000-token output target and summaries with an independent 8192-token budget; fit requests to remaining context and retain learned truncation budgets across turns and durable worker restarts.
+- Preserve completed Chat reasoning across tool rounds and durable history, replaying it only to its producing endpoint/model/effort; discard failed-attempt reasoning and count retained reasoning in context estimates.
+
 ## 0.6.0 — 2026-10-26
 
 This release adds bounded model recovery, evidence-backed task acceptance,

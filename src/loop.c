@@ -599,6 +599,10 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
         return next(SOPE__NEXT_CONTINUE);
     }
     asst->response_items = c->response_items; c->response_items = NULL;
+    asst->reasoning = c->reasoning.ptr;
+    asst->reasoning_len = c->reasoning.len;
+    memset(&c->reasoning, 0, sizeof c->reasoning);
+    asst->reasoning_identity = c->reasoning_identity; c->reasoning_identity = NULL;
     asst->tool_uses = c->uses;
     asst->n_tool_uses = c->n_uses;
     c->uses = NULL;

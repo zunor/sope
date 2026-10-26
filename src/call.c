@@ -31,6 +31,8 @@ void sope__call_free(sope_call *c)
     if (!c) return;
     sope__history_clear(&c->request);
     sope__buf_free(&c->text);
+    sope__buf_free(&c->reasoning);
+    free(c->reasoning_identity);
     sope__tool_uses_free(c->uses, c->n_uses);
     free(c->response_items);
     free(c);
@@ -95,7 +97,14 @@ int sope__call_is_compaction(sope_call *c)
 
 uint64_t sope__call_max_tokens(sope_call *c)
 {
-    return c->compaction ? c->agent->turn.summary_tokens : c->agent->turn.output_limit;
+    const turn_state *t = &c->agent->turn;
+    uint64_t target = c->compaction ? t->summary_tokens : t->output_limit;
+    uint64_t input = c->compaction ? t->compact_request_budget : sope__context_tokens(c->agent);
+    if (t->context_window) {
+        uint64_t room = input < t->context_window ? t->context_window - input : 0;
+        if (target > room) target = room;
+    }
+    return target;
 }
 
 void sope__call_complete(sope_call *c)

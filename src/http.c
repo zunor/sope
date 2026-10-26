@@ -395,9 +395,9 @@ static sope_http *start(const char *url, const char *const *headers, size_t nhea
     curl_easy_setopt(h->easy, CURLOPT_PRIVATE, (char *)h);
     curl_easy_setopt(h->easy, CURLOPT_ERRORBUFFER, h->curl_err);
     curl_easy_setopt(h->easy, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(h->easy, CURLOPT_CONNECTTIMEOUT, 30L);
-    curl_easy_setopt(h->easy, CURLOPT_LOW_SPEED_LIMIT, 1L); /* abort a stream silent for 5 minutes */
-    curl_easy_setopt(h->easy, CURLOPT_LOW_SPEED_TIME, 300L);
+    /* Model POSTs have native first-byte, chunk-idle and whole-request
+     * deadlines. A second low-speed cutoff here would silently override them. */
+    curl_easy_setopt(h->easy, CURLOPT_CONNECTTIMEOUT, body ? 300L : 30L);
     curl_easy_setopt(h->easy, CURLOPT_USERAGENT, "sope/" SOPE_VERSION_STRING);
 #ifdef SOPE_CURL_BUNDLED
     if (!ca_file) ca_file = default_ca_file;

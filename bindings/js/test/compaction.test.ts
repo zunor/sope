@@ -39,6 +39,7 @@ afterEach(() => {
 function create(options: Record<string, string> = {}) {
   respond = defaultResponse;
   const agent = Agent.create({ provider: "openai", model: "test", system: "Preserve user permissions.",
+    "compact.max_tokens": "2048",
     "openai.max_retries": "0", // these cases test compaction policy after a terminal provider failure
     "openai.base_url": `http://127.0.0.1:${server.port}/v1`, ...options });
   agents.push(agent);

@@ -196,23 +196,24 @@ SOPE_API int sope_agent_wait(sope_agent_t *agent, int32_t timeout_ms);
  *   compact.threshold estimated full-request trigger; 0 disables automatic
  *                     compaction, including overflow recovery (default 0)
  *   context.window    full model token capacity; 0 means unknown (default 0)
- *   context.reserve   minimum output reserve/default output limit (4096)
- *   compact.max_tokens summary output limit/reserve (2048)
+ *   context.reserve   minimum output headroom for input admission (4096)
+ *   compact.max_tokens initial summary output target (8192; fits small windows)
  *   compact.input_tokens estimated summary request input budget (64000)
  *   compact.retain_tokens recent original-message budget (8000; 0: none)
  *   openai.base_url   default https://api.openai.com/v1
  *   openai.wire_api   "chat" (default) or "responses" (stateless replay)
  *   reasoning.effort  none, minimal, low, medium, high or xhigh (model-dependent)
  *   openai.api_key    explicit Bearer token; rotatable after seal
- *   openai.max_tokens normal output limit (default context.reserve); also
- *                     raises the output reservation if larger
+ *   openai.max_tokens initial normal output target (32000); fitted to context
+ *   openai.max_tokens_ceiling growth ceiling (max(64000, initial target))
+ *   compact.max_tokens_ceiling summary growth ceiling (max(32000, initial))
  *   tls.ca_file       PEM file of trusted CAs, for builds with bundled curl
  *                     (default: $SSL_CERT_FILE, else the system bundle)
  *   openai.max_retries  additional attempts per request, 0..20 (default 5)
  *   Malformed chat tool batches retry at most twice before tool dispatch.
  *   openai.retry_delay_ms initial backoff, capped at 10000 ms (default 1000)
- *   openai.idle_timeout_ms attempt silence limit (default 120000)
- *   openai.request_timeout_ms total request budget (default 600000)
+ *   openai.idle_timeout_ms chunk silence limit (900000); first byte <=300000
+ *   openai.request_timeout_ms total request budget (default 1800000)
  *   mock.delay_ms     delay between streamed chunks of the mock provider */
 SOPE_API int sope_agent_set_option(sope_agent_t *agent, const char *key, const char *value);
 

@@ -58,6 +58,13 @@ typedef struct option_kv {
     char *value;
 } option_kv;
 
+typedef struct output_budget {
+    struct output_budget *next;
+    char *identity;
+    int summary;
+    uint64_t tokens;
+} output_budget;
+
 typedef struct subagent_def {
     struct subagent_def *next;
     char *name;
@@ -162,6 +169,8 @@ struct sope_call { /* a model call, as the loop holds it (call.c) */
     int compaction;       /* summarizes `request` instead of the agent's history */
     sope_history request; /* compaction only */
     sope_buf text;
+    sope_buf reasoning;
+    char *reasoning_identity;
     char *response_items;
     sope_tool_use *uses;
     size_t n_uses, cap_uses;
@@ -194,6 +203,7 @@ struct sope_agent {
     bg_shell *shells;
     uint32_t next_shell_id;
     struct sope_journal *journal;
+    output_budget *output_budgets; /* root-owned; protected by mu, durable when journaled */
     int journal_failed;
     int recovering; /* scheduler stopped until explicit resume/reconciliation */
     char *artifact_dir;
@@ -325,6 +335,8 @@ void sope__call_free(sope_call *c);
 
 /* context.c: request accounting and per-turn budget configuration. */
 int sope__context_configure(sope_agent_t *a);
+/* Load/grow a route-scoped output budget; acquires root->mu internally. */
+int sope__output_budget(sope_agent_t *a, const char *identity, int summary, uint64_t *tokens, int save);
 uint64_t sope__request_tokens(const sope_agent_t *a);
 uint64_t sope__context_tokens(const sope_agent_t *a);
 uint64_t sope__context_limit(const sope_agent_t *a);

@@ -40,6 +40,7 @@ typedef struct {
     int first_byte;
     sope_buf url, body, auth; /* kept for retries */
     char *model;
+    char *identity;
     uint64_t next_output_tokens;
     char *ca_file;            /* option tls.ca_file, or NULL */
     sope_http *http;          /* NULL while waiting to retry */
@@ -168,6 +169,11 @@ static void build_body(sope_call *c, sope_buf *b, const char *model)
                 put_string(b, "content", m->content, m->content_len);
             else
                 sope__buf_appends(b, "\"content\":null");
+            if (m->reasoning && m->reasoning_identity && c->reasoning_identity &&
+                !strcmp(m->reasoning_identity, c->reasoning_identity)) {
+                sope__buf_appends(b, ",");
+                put_string(b, "reasoning_content", m->reasoning, m->reasoning_len);
+            }
             if (m->n_tool_uses) {
                 sope__buf_appends(b, ",\"tool_calls\":[");
                 for (i = 0; i < m->n_tool_uses; i++) {
@@ -367,7 +373,11 @@ static sope_step timed_out(sope_call *c, oa_state *s, const char *kind)
 static sope_step wait_http(sope_call *c, oa_state *s)
 {
     int64_t now = trace_now();
-    int64_t total = s->deadline_ms - now, idle = s->last_data_ms + s->idle_ms - now;
+    /* Match slow reasoning streams: allow up to five minutes for the first
+     * byte, then the configured chunk idle allowance. Explicit shorter limits
+     * still apply, and the logical request deadline bounds all retries. */
+    int64_t allowance = !s->first_byte && s->idle_ms > 300000 ? 300000 : s->idle_ms;
+    int64_t total = s->deadline_ms - now, idle = s->last_data_ms + allowance - now;
     if (total <= 0) return timed_out(c, s, "request");
     if (idle <= 0) {
         s->failure = RETRY_TIMEOUT;
@@ -407,6 +417,7 @@ static void oa_free(oa_state *s)
     sope__buf_free(&s->auth);
     free(s->ca_file);
     free(s->model);
+    free(s->identity);
     sope__buf_free(&s->in);
     for (i = 0; i < MAX_TOOL_CALLS; i++) {
         sope__buf_free(&s->calls[i].id);
@@ -454,6 +465,32 @@ static void *oa_start(sope_call *c)
     /* A model that reads images takes over once the conversation has any. */
     s->model = sope__strdup(image_model && *image_model && history_has_images(sope__call_history(c)) ? image_model : model);
     if (!s->model) { sope__call_error(c, SOPE_ENOMEM, "openai: out of memory"); oa_free(s); s = NULL; goto done; }
+    sope_buf identity = {0};
+    char *effort = sope__call_option(c, "reasoning.effort");
+    sope__buf_appends(&identity, "[");
+    sope__buf_append_json_string(&identity, s->url.ptr, s->url.len);
+    sope__buf_appends(&identity, ",");
+    sope__buf_append_json_string(&identity, s->model, strlen(s->model));
+    sope__buf_appends(&identity, ",");
+    sope__buf_append_json_string(&identity, effort ? effort : "", effort ? strlen(effort) : 0);
+    sope__buf_appends(&identity, "]");
+    free(effort);
+    s->identity = identity.ptr;
+    c->reasoning_identity = identity.oom ? NULL : sope__strdup(s->identity);
+    uint64_t learned = 0;
+    if (!c->reasoning_identity || !sope__output_budget(c->agent, s->identity, c->compaction, &learned, 0)) {
+        sope__call_error(c, SOPE_ERROR, "openai: cannot load output budget"); oa_free(s); s = NULL; goto done;
+    }
+    turn_state *t = &c->agent->turn;
+    uint64_t ceiling = c->compaction ? t->summary_ceiling : t->output_ceiling;
+    if (learned > ceiling) learned = ceiling;
+    if (t->context_window) {
+        uint64_t input = c->compaction ? t->compact_request_budget : sope__context_tokens(c->agent);
+        uint64_t room = input < t->context_window ? t->context_window - input : 0;
+        if (learned > room) learned = room;
+    }
+    uint64_t *target = c->compaction ? &t->summary_tokens : &t->output_limit;
+    if (learned > *target) *target = learned;
     (s->responses ? build_responses : build_body)(c, &s->body, s->model);
     if (key && *key) sope__buf_appendf(&s->auth, "Authorization: Bearer %s", key);
     s->ca_file = sope__call_option(c, "tls.ca_file");
@@ -467,9 +504,9 @@ static void *oa_start(sope_call *c)
     sope__call_log(c, SOPE_LOG_DEBUG, "openai: round %llu, POST %s (model %s, %zu tools, %zu bytes)",
                    (unsigned long long)sope__call_round(c), s->url.ptr, model, sope__call_tool_count(c),
                    s->body.len);
-    s->idle_ms = timeout_option(c, "openai.idle_timeout_ms", 120000);
+    s->idle_ms = timeout_option(c, "openai.idle_timeout_ms", 900000);
     s->request_started_ms = trace_now();
-    s->deadline_ms = s->request_started_ms + timeout_option(c, "openai.request_timeout_ms", 600000);
+    s->deadline_ms = s->request_started_ms + timeout_option(c, "openai.request_timeout_ms", 1800000);
     s->retry_delay_ms = (int)timeout_option(c, "openai.retry_delay_ms", 1000);
     if (s->retry_delay_ms > 10000) s->retry_delay_ms = 10000;
     char *retries = sope__call_option(c, "openai.max_retries"), *end;
@@ -696,6 +733,10 @@ static int handle_chunk(sope_call *c, oa_state *s, const char *data, size_t n)
     }
     if ((str = sope__json_string(sope__json_get(delta, "reasoning_content"), &len)) ||
         (str = sope__json_string(sope__json_get(delta, "reasoning"), &len))) {
+        if (!c->compaction) {
+            sope__buf_append(&c->reasoning, str, len);
+            if (c->reasoning.oom) sope__call_error(c, SOPE_ENOMEM, "openai: out of memory retaining reasoning");
+        }
         sope__call_thinking(c, str, len);
         s->thinking_bytes += len;
     }
@@ -803,13 +844,15 @@ static sope_step retry(sope_call *c, oa_state *s)
     sope__push_event(c->agent, SOPE_EVENT_MODEL_RETRY, sope__turn_id(c->agent), c->round,
                      s->attempts + 1, reason, strlen(reason), data, (size_t)n);
     if (s->next_output_tokens) {
-        /* Retain the learned budget for subsequent rounds of this turn. Future
-         * context admission reserves it before another tool/model round. */
+        uint64_t learned = s->next_output_tokens;
+        if (!sope__output_budget(c->agent, s->identity, c->compaction, &learned, 1)) {
+            sope__call_error(c, SOPE_ERROR, "openai: cannot preserve output budget");
+            return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
+        }
+        /* Reuse the learned target; each request still fits it to context. */
         if (c->compaction) c->agent->turn.summary_tokens = s->next_output_tokens;
         else {
             c->agent->turn.output_limit = s->next_output_tokens;
-            if (c->agent->turn.output_reserve < s->next_output_tokens)
-                c->agent->turn.output_reserve = s->next_output_tokens;
         }
         s->next_output_tokens = 0;
         sope__buf_free(&s->body);
@@ -827,6 +870,7 @@ static sope_step retry(sope_call *c, oa_state *s)
         s->calls[i].used = 0;
     }
     sope__buf_free(&c->text);
+    sope__buf_free(&c->reasoning);
     sope__tool_uses_free(c->uses, c->n_uses); c->uses = NULL; c->n_uses = c->cap_uses = 0;
     free(c->response_items); c->response_items = NULL;
     c->has_usage = c->complete = 0; c->usage_tokens = c->usage_input_tokens = 0;

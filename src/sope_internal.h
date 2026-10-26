@@ -247,6 +247,8 @@ typedef struct sope_message {
     struct sope_message *next;
     sope_msg_role role;
     char *response_items; /* Responses API output array, including encrypted reasoning */
+    char *reasoning, *reasoning_identity; /* completed Chat reasoning, scoped to its producing route/model */
+    size_t reasoning_len;
     char *content; /* text; may be empty, never NULL */
     size_t content_len;
     sope_tool_use *tool_uses; /* assistant only */

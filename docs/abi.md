@@ -98,7 +98,7 @@ sope_agent_close ─▶ Drain events until SOPE_ECLOSED ─▶ sope_agent_free
    {"role":"assistant","content":"Fixed."}]
   ```
 
-  `input` is the tool's JSON input encoded as a string. User and tool messages with images also include `"images":[{"media_type":"image/png","data":"<base64>"}]`. Compacted history begins with a summary (one user message); reasoning is not saved. On restore, trailing tool calls without responses receive “cancelled” results. The agent also forgets which files it has read, so files must be read again before editing. Invalid history returns `SOPE_EINVAL`, and `sope_last_error()` identifies the offending message.
+  `input` is the tool's JSON input encoded as a string. User and tool messages with images also include `"images":[{"media_type":"image/png","data":"<base64>"}]`. Completed assistant reasoning can include `reasoning_content` and `reasoning_identity` for replay to the same endpoint/model/effort. Compacted history begins with a summary (one user message); the summarized prefix's reasoning is omitted. On restore, trailing tool calls without responses receive “cancelled” results. The agent also forgets which files it has read, so files must be read again before editing. Invalid history returns `SOPE_EINVAL`, and `sope_last_error()` identifies the offending message.
 
 - **Images**: `sope_attach_image(agent, media_type, data, len)` attaches an image to the next `sope_send` message (raw PNG, JPEG, GIF, or WebP bytes, up to 10 MiB; the library copies them). That message consumes all previously attached images; `sope_compact` does not consume them. Pass NULL for `media_type` to detect it from the file header. Built-in tools can also produce images: `read` attaches image files to its result, and `web_fetch` does the same for image URLs. The `openai` provider sends images as `image_url` content blocks with data URLs. Tool messages support only text, so images from a round of tool results are sent immediately afterward in a separate user message. The model must support images: for text-only models such as glm-5.3 (whose server returns 400 for images), set `image_model` to switch subsequent requests to that model as soon as the conversation contains an image.
 
@@ -137,11 +137,11 @@ Library invariants:
 Long conversations are compacted into a checkpoint plus a budgeted suffix of recent original messages. The current system prompt and tool schemas remain part of subsequent requests.
 
 - **Automatic**: set `compact.threshold` to a positive token count. Before every model call, Sope estimates the full request (history, system prompt, tool schemas, images and newly added input/tool results), and takes the larger of that estimate and the last reported usage plus estimated growth. Restored histories use the estimate immediately. Missing or invalid usage reports preserve any prior calibration and add locally estimated growth; they do not reset the token watermark. The library default is disabled; the CLI defaults to 100000.
-- **Model window**: set `context.window` to the model's full token capacity. Sope reserves `max(context.reserve, openai.max_tokens)` for output and uses the smaller of the remaining input capacity and `compact.threshold` as the automatic trigger. `context.window=0` means unknown: the soft threshold still works, but no model-specific hard limit can be enforced. `compact.threshold=0` disables all automatic summarization, including overflow recovery; a configured hard window is still checked.
+- **Model window**: set `context.window` to the model's full token capacity. Sope reserves `context.reserve` as minimum output headroom and uses the smaller of the remaining input capacity and `compact.threshold` as the automatic trigger. `context.window=0` means unknown: the soft threshold still works, but no model-specific hard limit can be enforced. `compact.threshold=0` disables all automatic summarization, including overflow recovery; a configured hard window is still checked.
 - **Manual**: `sope_compact(agent, instructions, len, &turn_id)` queues a compaction turn. Optional instructions guide the summary. Empty history ends immediately with `end_turn`.
 - **Retention**: a contiguous recent suffix remains verbatim, including images. An assistant's tool calls and all their results form an indivisible group. Retention is capped by `compact.retain_tokens` (default 8000), one quarter of the existing history, and one quarter of each configured input limit/automatic threshold. The retained suffix must also leave space for system/tool definitions, the incoming user input and the summary output budget plus its wrapper. Oversized groups are summarized, never split into orphan tool results. At turn start, the incoming user message is additionally kept verbatim outside summarization. Mid-turn compaction includes a continuation reminder. Checkpoints carry `"summary":true` in exported history so later compactions distinguish them from user intent.
 - **Bounded summary input**: the model sees a plain-text transcript of the older prefix. Text, tool results and arguments remain complete when the entire summary request fits `compact.input_tokens` and the model window minus `compact.max_tokens`. Only when that request exceeds its budget are per-field limits reduced until it fits, retaining both ends with explicit omission markers. UTF-8 characters remain whole. Instructions and previous checkpoints are never clipped: a checkpoint is the only remaining record of earlier work. If these protected parts and framing cannot fit, compaction fails without changing history. Images outside the retained suffix are represented by an explicit unavailable-pixels notice. Over-budget clipping and model summarization remain lossy; a completed summary is not a guarantee of semantic completeness.
-- **Summary integrity**: the provider must confirm normal completion. The OpenAI provider requires `finish_reason="stop"` and `[DONE]` for summaries; malformed or out-of-order streams, length/content-filter endings, refusals, tool calls (including incomplete calls), empty/whitespace summaries and allocation failures cannot replace history. Summary calls have their own `compact.max_tokens` output limit (default 2048), no tools, and emit neither `TEXT_DELTA` nor `THINKING_DELTA`.
+- **Summary integrity**: the provider must confirm normal completion. The OpenAI provider requires `finish_reason="stop"` and `[DONE]` for summaries; malformed or out-of-order streams, length/content-filter endings, refusals, tool calls (including incomplete calls), empty/whitespace summaries and allocation failures cannot replace history. Summary calls have their own `compact.max_tokens` output limit (default 8192, reduced to the known window minus `context.reserve` when necessary), no tools, and emit neither `TEXT_DELTA` nor `THINKING_DELTA`.
 - **Commit and failure**: a completed candidate is checked against the full input budget, including retained and incoming messages, before replacing the older prefix. Automatic compaction must also reduce the local request estimate. Failure/cancellation preserves original history and any held user input. Checkpoint installation and cancellation are serialized: cancellation accepted before installation prevents that checkpoint from being committed. Manual failure ends with `TURN_END(error)`. Automatic failure can continue only if the original request fits the configured hard budget and has not already been rejected by the server as oversized; otherwise the turn fails without sending that request. After a failed proactive compaction, further proactive attempts are suppressed for the rest of that turn; new input or manual compaction can try again. The bounded server-overflow recovery described below remains available.
 - **Server overflow recovery**: structured `context_length_exceeded` / `context_window_exceeded` errors cause summary requests to retry at most twice with smaller transcript budgets. When automatic compaction is enabled, a normal request that fails with one of these codes before producing output can compact and retry once per model round. Each new compaction owns its retry budget, even if two compactions occur within one model round. A failed overflow recovery does not resend the known-oversized request. Retry attempts still emit diagnostic errors and consume any reported usage; there is no unbounded retry loop. The model-round limit is checked before automatic compaction, preserving final tool evidence when no next model call is allowed.
 - **Events**: summary calls emit `USAGE` when supplied by the provider. Successful compaction emits `SOPE_EVENT_COMPACT`: `name` is `"auto"` or `"manual"`, and `data` contains the summary text. The retained suffix is available through the normal history export.
@@ -276,10 +276,10 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 | `image_model` | Model to switch to when the conversation contains images (for when `model` cannot process them) | Uses `model` |
 | `system` | System prompt | A short built-in prompt |
 | `max_rounds` | Maximum model calls per turn | `32` |
-| `openai.idle_timeout_ms` | Maximum silence during one HTTP attempt; retries are bounded by the request budget | `120000` |
+| `openai.idle_timeout_ms` | Maximum silence between response chunks; first-byte wait is at most min(this value, 300000); retries share the request budget | `900000` |
 | `openai.max_retries` | Additional attempts per logical request (0 disables, maximum 20); timeouts allow at most three retries | `5` |
 | `openai.retry_delay_ms` | Initial exponential retry delay; jittered and capped at 10 seconds | `1000` |
-| `openai.request_timeout_ms` | Absolute time budget per model request, including all attempts and retry backoff | `600000` |
+| `openai.request_timeout_ms` | Absolute time budget per model request, including all attempts and retry backoff | `1800000` |
 | `harness.max_calls` | All tool admissions per agent/user turn | `128` |
 | `harness.max_searches` | Native grep/glob admissions per agent/user turn | `16` |
 | `harness.max_repeats` | Identical read/program admissions or failed operation results before rejection | `2` |
@@ -289,17 +289,17 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 | `acceptance.contract` | Immutable host criteria JSON for evidence-backed closure; requires durable execution. See [acceptance design](design/acceptance.md). | unset |
 | `compact.threshold` | Full request token threshold for automatic compaction (see 5.1); `0` disables it | `0` |
 | `context.window` | Full model context capacity, including reserved output; `0` means unknown | `0` |
-| `context.reserve` | Minimum output reservation and default normal response output limit | `4096` |
-| `compact.max_tokens` | Initial summary output limit/reservation, independent of normal output | `2048` |
-| `compact.max_tokens_ceiling` | Maximum summary output budget after truncation recovery; must be at least the initial summary limit | `max(8192, compact.max_tokens)` |
+| `context.reserve` | Minimum output headroom used for input admission and compaction | `4096` |
+| `compact.max_tokens` | Initial summary output target/reservation, independent of normal output | `8192` (fitted to known window minus reserve) |
+| `compact.max_tokens_ceiling` | Maximum summary output budget after truncation recovery; must be at least the initial summary limit | `max(32000, compact.max_tokens)` |
 | `compact.input_tokens` | Maximum estimated summary input, including system prompt/instructions | `64000` |
 | `compact.retain_tokens` | Maximum recent original-message tokens; `0` summarizes all older messages | `8000` |
 | `openai.base_url` | Service URL | `https://api.openai.com/v1` |
 | `openai.api_key` | Sent as a Bearer token | — |
 | `openai.wire_api` | `chat` (Chat Completions) or `responses` (stateless Responses with encrypted reasoning replay) | `chat` |
 | `reasoning.effort` | `none`, `minimal`, `low`, `medium`, `high` or `xhigh`; support depends on the model | Provider default |
-| `openai.max_tokens` | Initial normal response output token limit; increases the output reservation when larger | `context.reserve` |
-| `openai.max_tokens_ceiling` | Maximum output budget after truncation recovery; must be at least the initial limit | `max(32768, openai.max_tokens)` |
+| `openai.max_tokens` | Initial normal response output target, fitted to remaining context on every request | `32000` |
+| `openai.max_tokens_ceiling` | Maximum output budget after truncation recovery; must be at least the initial limit | `max(64000, openai.max_tokens)` |
 | `tls.ca_file` | PEM file of trusted CAs, needed only for bundled builds (see section 12); used by both model calls and `web_fetch` | `$SSL_CERT_FILE`, otherwise a system certificate file |
 | `mock.delay_ms` | Delay between mock output chunks | `25` |
 
@@ -542,8 +542,9 @@ receipt retention does not delete those archives. Runtime trace remains compact
 metadata, without duplicating commands or output.
 
 
-OpenAI-compatible requests have both an idle deadline (2 minutes by default)
-and an absolute deadline (10 minutes). Values are milliseconds, integers
+OpenAI-compatible requests allow at most 5 minutes for the first response byte,
+then use an idle deadline (15 minutes by default) and an absolute deadline
+(30 minutes). An explicit shorter idle limit also shortens first-byte waiting. Values are milliseconds, integers
 1–3600000; invalid values use the defaults. The pool schedules a deadline wake
 without occupying a worker, so a silent stream does not need an outside cancel
 to terminate. Incoming bytes reset idle time; keepalive traffic cannot extend
@@ -569,8 +570,11 @@ Chat `finish_reason="length"` and Responses `response.incomplete` with
 recovery path. Each retry doubles the normal output limit, capped by
 `openai.max_tokens_ceiling` and the known model window minus the larger of
 estimated and reported input tokens. It shares the general attempt allowance
-and absolute request deadline. The same turn retains the increased limit for
-subsequent model rounds and reserves it before context admission. Set the
+and absolute request deadline. The increased target is retained across turns and durable worker restarts, keyed
+by endpoint (including wire API), actual model and reasoning effort. It is
+always clamped to the current host ceiling and available context; a lower host
+ceiling takes precedence over a previously learned target. Normal and summary
+budgets are learned independently. Set the
 ceiling equal to the initial limit to disable growth. Hosts should configure
 the ceiling and window for their model; an unknown window cannot be enforced.
 Summary calls grow from `compact.max_tokens` up to their independent
@@ -623,3 +627,14 @@ they reveal whether an otherwise silent call is building a tool invocation. Erro
 and credentials are excluded from the diagnostic trace.
 
 Evidence-backed acceptance and structured subagent result semantics are specified in [acceptance design](design/acceptance.md). A terminal outcome includes `acceptance` (null without a delivered native report); `end_turn` alone is not acceptance success.
+
+### Chat reasoning continuity
+
+Completed Chat Completions reasoning is retained in assistant history as
+`reasoning_content` with an internal `reasoning_identity`. The identity scopes
+replay to the same endpoint, wire API, model and reasoning effort. It is preserved
+by history export/import, durable reopen and retained compaction suffixes. It is
+counted in context estimates, but omitted from the plain-text summary transcript.
+Failed, cancelled or truncated attempts never install their reasoning in history.
+Responses API encrypted reasoning continues to use its existing output-item path.
+These fields are optional; older histories remain readable.

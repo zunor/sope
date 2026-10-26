@@ -1,11 +1,64 @@
 /* SPDX-License-Identifier: MIT */
+#define _POSIX_C_SOURCE 200809L
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE
+#endif
 #include "../src/agent.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int failures;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); failures++; } } while (0)
+
+static void test_reasoning_history(void)
+{
+    const char *json = "[{\"role\":\"assistant\",\"content\":\"observation\","
+        "\"reasoning_content\":\"private hypothesis\",\"reasoning_identity\":\"route/model\"}]";
+    sope_history h = {0}, restored = {0};
+    char err[160], *saved, *text;
+    size_t len;
+    CHECK(sope__history_parse_raw(&h, json, strlen(json), err, sizeof err) == SOPE_OK);
+    CHECK(h.head && !strcmp(h.head->reasoning, "private hypothesis"));
+    if (!h.head) return;
+    CHECK(sope__history_tokens(&h) == 12 + sope__text_tokens("observation", 11) + sope__text_tokens("private hypothesis", 18));
+    saved = sope__history_json(&h, &len);
+    CHECK(saved && sope__history_parse_raw(&restored, saved, len, err, sizeof err) == SOPE_OK);
+    CHECK(restored.head && !strcmp(restored.head->reasoning_identity, "route/model"));
+    CHECK(sope__compact_request(&h, NULL, NULL, 0, 4000, &text, &len) == SOPE_OK);
+    CHECK(text && strstr(text, "observation") && !strstr(text, "private hypothesis"));
+    free(text); free(saved);
+    sope__history_clear(&h); sope__history_clear(&restored);
+    const char *bad[] = {
+        "[{\"role\":\"user\",\"content\":\"x\",\"reasoning_content\":\"bad\",\"reasoning_identity\":\"x\"}]",
+        "[{\"role\":\"assistant\",\"content\":\"x\",\"reasoning_content\":23,\"reasoning_identity\":\"x\"}]",
+        "[{\"role\":\"assistant\",\"content\":\"x\",\"reasoning_content\":\"missing provenance\"}]"
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+        CHECK(sope__history_parse_raw(&h, bad[i], strlen(bad[i]), err, sizeof err) == SOPE_EINVAL);
+}
+
+static void test_durable_output_budgets(void)
+{
+    char dir[] = "/tmp/sope-output-budget-XXXXXX";
+    sope_agent_t *a = NULL;
+    uint64_t tokens = 8192;
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(sope_agent_open(&a, dir) == SOPE_OK);
+    if (!a) return;
+    CHECK(sope__output_budget(a, "route/model/high", 0, &tokens, 1));
+    tokens = 16384;
+    CHECK(sope__output_budget(a, "route/model/high", 1, &tokens, 1));
+    sope_agent_free(a); a = NULL;
+    CHECK(sope_agent_open(&a, dir) == SOPE_OK);
+    if (!a) return;
+    tokens = 0;
+    CHECK(sope__output_budget(a, "route/model/high", 0, &tokens, 0) && tokens == 8192);
+    CHECK(sope__output_budget(a, "route/model/high", 1, &tokens, 0) && tokens == 16384);
+    CHECK(sope__output_budget(a, "route/model/low", 0, &tokens, 0) && tokens == 0);
+    sope_agent_free(a);
+}
 
 static void test_transcript_budget_and_utf8(void)
 {
@@ -181,6 +234,8 @@ static void test_work_state_survives_history_replacement(void)
 
 int main(void)
 {
+    test_reasoning_history();
+    test_durable_output_budgets();
     test_transcript_budget_and_utf8();
     test_suffix_groups();
     test_request_accounting();

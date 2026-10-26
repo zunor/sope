@@ -41,6 +41,7 @@ static uint64_t text_part_tokens(const sope_message *m)
 {
     size_t i;
     uint64_t tokens = add(12, sope__text_tokens(m->content, m->content_len));
+    tokens = add(tokens, sope__text_tokens(m->reasoning, m->reasoning_len));
     if (m->response_items) tokens = add(tokens, sope__text_tokens(m->response_items, strlen(m->response_items)));
     for (i = 0; i < m->n_tool_uses; i++) {
         const sope_tool_use *u = &m->tool_uses[i];
@@ -138,14 +139,18 @@ int sope__context_configure(sope_agent_t *a)
     if (!option(a, "compact.threshold", 0, 1, &t->compact_threshold) ||
         !option(a, "context.window", 0, 1, &t->context_window) ||
         !option(a, "context.reserve", 4096, 0, &t->output_reserve) ||
-        !option(a, "openai.max_tokens", t->output_reserve, 0, &max_output) ||
-        !option(a, "compact.max_tokens", 2048, 0, &t->summary_tokens) ||
+        !option(a, "openai.max_tokens", 32000, 0, &max_output)) return 0;
+    uint64_t summary_default = 8192;
+    if (t->context_window > t->output_reserve && summary_default > t->context_window - t->output_reserve)
+        summary_default = t->context_window - t->output_reserve;
+    if (!option(a, "compact.max_tokens", summary_default, 0, &t->summary_tokens) ||
         !option(a, "compact.retain_tokens", 8000, 1, &t->retain_tokens) ||
         !option(a, "compact.input_tokens", 64000, 0, &t->compact_input_tokens)) return 0;
-    if (max_output > t->output_reserve) t->output_reserve = max_output;
+    /* Reserve enough input headroom to finish a step. The output target is
+     * fitted to actual remaining context at each request, like OpenCode. */
     t->output_limit = max_output;
-    if (!option(a, "openai.max_tokens_ceiling", max_output > 32768 ? max_output : 32768, 0, &t->output_ceiling)) return 0;
-    if (!option(a, "compact.max_tokens_ceiling", t->summary_tokens > 8192 ? t->summary_tokens : 8192, 0, &t->summary_ceiling)) return 0;
+    if (!option(a, "openai.max_tokens_ceiling", max_output > 64000 ? max_output : 64000, 0, &t->output_ceiling)) return 0;
+    if (!option(a, "compact.max_tokens_ceiling", t->summary_tokens > 32000 ? t->summary_tokens : 32000, 0, &t->summary_ceiling)) return 0;
     if (t->summary_ceiling < t->summary_tokens) {
         const char *error = "compact.max_tokens_ceiling must be at least compact.max_tokens";
         sope__push_event(a, SOPE_EVENT_ERROR, sope__turn_id(a), 0, SOPE_EINVAL, NULL, 0, error, strlen(error));
@@ -278,8 +283,6 @@ int sope__context_measure_locked(sope_agent_t *a, const turn_state *offer, sope_
 {
     static const sope_history empty = { 0 };
     uint64_t reserve = option_locked(a, "context.reserve", 4096);
-    uint64_t max_output = option_locked(a, "openai.max_tokens", reserve);
-    if (max_output > reserve) reserve = max_output;
     /* A reset takes effect when the next turn starts: report what it will send. */
     context_json(a->reset_requested ? NULL : a, a->reset_requested ? &empty : &a->history, offer->system,
                  offer->specs, offer->n_specs, option_locked(a, "context.window", 0), reserve,

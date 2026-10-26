@@ -22,9 +22,9 @@ Precedence, from lowest to highest: `~/.config/sope/config` (`KEY=VALUE` format)
 | `SOPE_GRAPHICS` | | Automatically probes for the Kitty graphics protocol; `0` disables image tabs and the pixel meteor |
 | `SOPE_TRUECOLOR` | | Automatically detected; `0`/`1` forces 256 colors / true color |
 
-Context is checked before each model request, including restored sessions and newly added tool results. The TUI reads each model's window from the endpoint's `/models` list (`context_window` or `context_length`) at startup and when you switch models, passes it to libsope as `context.window`, and starts automatic compaction at 80% of it unless `SOPE_COMPACT_THRESHOLD` is set. `-p` mode does not query `/models`. Set `SOPE_CONTEXT_WINDOW` when the endpoint does not list a window, or for the model actually used (use the smaller capacity if switching between text and image models). The default output reservation is 4096 tokens. In the TUI, `/set context.window 128000` changes the window from the next turn; `/set context.reserve 8192` increases the normal output allowance. A window value of zero leaves the model capacity unknown.
+Context is checked before each model request, including restored sessions and newly added tool results. The TUI reads each model's window from the endpoint's `/models` list (`context_window` or `context_length`) at startup and when you switch models, passes it to libsope as `context.window`, and starts automatic compaction at 80% of it unless `SOPE_COMPACT_THRESHOLD` is set. `-p` mode does not query `/models`. Set `SOPE_CONTEXT_WINDOW` when the endpoint does not list a window, or for the model actually used (use the smaller capacity if switching between text and image models). The default input-admission reservation is 4096 tokens. Normal replies target 32000 tokens, fitted to the remaining model context; `/set openai.max_tokens 16000` overrides this target. In the TUI, `/set context.window 128000` changes the window from the next turn; `/set context.reserve 8192` increases the minimum output headroom. A window value of zero leaves the model capacity unknown.
 
-`/compact [focus]` summarizes older messages while retaining recent originals within budget. `/set compact.retain_tokens 8000`, `/set compact.max_tokens 2048` and `/set compact.input_tokens 64000` control retention, summary output and summary input respectively. See the [ABI compaction contract](../abi.md#51-history-compaction) for failure behavior and estimation limits. If automatic compaction fails, sope preserves history and suppresses further proactive compaction for that turn. It continues only while the request fits the hard context budget; a new user turn or manual compaction can retry.
+`/compact [focus]` summarizes older messages while retaining recent originals within budget. `/set compact.retain_tokens 8000`, `/set compact.max_tokens 8192` and `/set compact.input_tokens 64000` control retention, summary output and summary input respectively. See the [ABI compaction contract](../abi.md#51-history-compaction) for failure behavior and estimation limits. If automatic compaction fails, sope preserves history and suppresses further proactive compaction for that turn. It continues only while the request fits the hard context budget; a new user turn or manual compaction can retry.
 
 Native options are also available through `/set`. `/set openai.wire_api responses` selects stateless Responses requests on endpoints that support that protocol; the default is `chat`. `/effort` (or `/set reasoning.effort high`) sets the model's reasoning effort. Supported effort values depend on the model. These options take effect on the next turn; see the [ABI options table](../abi.md#9-options-and-providers) for the complete list.
 
@@ -69,11 +69,25 @@ up its shell processes before returning status 130, 143 or 129 respectively.
 Transient model failures retry automatically, including interrupted streams.
 The previous attempt is marked as discarded; only a complete response can
 execute tools. `/set openai.max_retries 5` controls the retry allowance (0–20;
-zero disables retries). `/set openai.idle_timeout_ms 120000` bounds silence per
-attempt and `/set openai.request_timeout_ms 600000` bounds the whole request,
+zero disables retries). `/set openai.idle_timeout_ms 900000` bounds silence per
+attempt and `/set openai.request_timeout_ms 1800000` bounds the whole request,
 including retries and waiting. Cancellation also interrupts retry waits.
 
 Backoff honors bounded `Retry-After` hints. Authentication, invalid requests and
 output limits require correction rather than repeated requests. Enable
 `SOPE_TRACE_DIR` to retain attempt, failure-class, delay and deadline metadata;
 the trace does not contain model text, tool output or credentials.
+
+Output truncation learns a larger budget (normally up to 64000 tokens; summaries
+up to 32000). Durable sessions keep that hint across worker restarts, separately
+for each endpoint/model/reasoning effort and for normal versus summary calls.
+Current `openai.max_tokens_ceiling`, `compact.max_tokens_ceiling` and known context
+capacity still bound every request. Set ceilings to the model endpoint’s limits.
+Completed Chat reasoning is retained for same-model continuation; failed attempt
+reasoning is discarded.
+
+By default, model requests allow five minutes for the first response byte and
+fifteen minutes between streamed chunks, accommodating slow reasoning providers.
+The thirty-minute logical request deadline includes every retry and backoff.
+Explicit shorter idle and request limits remain supported; cancellation interrupts
+waiting. Web fetches retain their separate sixty-second transport limit.
