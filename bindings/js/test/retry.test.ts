@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -368,4 +368,97 @@ test("learned output budget survives later tool rounds and transient retries", a
     expect(bodies[2]).toEqual(bodies[3]);
     expect(agent.history()).not.toContain("discard me");
   } finally { agent.free(); server.stop(true); }
+});
+
+const batch = (calls: object[]) => new Response(chunk({ tool_calls: calls }, "tool_calls") + "data: [DONE]\n\n");
+const bashCall = (index: number, id: string, args: string) =>
+  ({ index, id, type: "function", function: { name: "bash", arguments: args } });
+const invalidBatch = () => batch([bashCall(0, "invalid", '{"secret_value":')]);
+
+for (const allowance of [0, 1, 10]) test(`invalid batches respect both retry limits (${allowance})`, async () => {
+  const r = await run(invalidBatch, {"openai.max_retries": String(allowance)});
+  expect(r.attempts).toBe(1 + Math.min(allowance, 2));
+  expect(r.events.filter(e => e.type === "model_retry")).toHaveLength(Math.min(allowance, 2));
+  for (const e of r.events.filter(e => e.type === "model_retry")) {
+    expect(e).toMatchObject({reason: "invalid_tool_batch", validationReason: "tool_calls[0]: arguments are not valid JSON"});
+  }
+  expect(r.events.at(-1)).toMatchObject({stopReason: "error"});
+  const error = r.events.find(e => e.type === "error");
+  expect(error?.type === "error" && error.message).toContain("retry allowance exhausted");
+  expect(error?.type === "error" && error.message).not.toContain("secret_value");
+});
+
+test("invalid batch recovery uses the same request and clears provisional text", async () => {
+  const r = await run(n => n === 1 ? new Response(chunk({content: "abandoned"}) + chunk({tool_calls: [bashCall(0, "invalid", "[")]}, "tool_calls") + "data: [DONE]\n\n") : success());
+  expect(r.attempts).toBe(2);
+  expect(r.bodies[1]).toEqual(r.bodies[0]);
+  expect(r.events.find(e => e.type === "model_retry")).toMatchObject({discardedTextBytes: 9});
+  expect(r.history).not.toContain("abandoned");
+  expect(r.events.at(-1)).toMatchObject({stopReason: "end_turn"});
+});
+
+test("mixed failure types cannot reset the malformed batch retry cap", async () => {
+  const r = await run(n => n === 2 ? new Response("busy", {status: 503}) : invalidBatch(), {"openai.max_retries": "10"});
+  expect(r.attempts).toBe(4);
+  expect(r.events.filter(e => e.type === "model_retry").map(e => e.reason)).toEqual(["invalid_tool_batch", "server", "invalid_tool_batch"]);
+});
+
+test("invalid batch backoff is bounded by the logical request deadline", async () => {
+  const r = await run(invalidBatch, {"openai.retry_delay_ms": "1000", "openai.request_timeout_ms": "80"});
+  expect(r.attempts).toBe(1);
+  expect(r.events.find(e => e.type === "error")).toMatchObject({code: -1});
+  const error = r.events.find(e => e.type === "error");
+  expect(error?.type === "error" && error.message).toContain("arguments are not valid JSON; recovery request deadline exceeded");
+});
+
+for (const priorToolFailed of [false, true]) for (const outcome of ["recovered", "exhausted", "cancelled"]) test(`invalid batch ${outcome} never replays committed tools or executes a valid subset (prior failure: ${priorToolFailed})`, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sope-invalid-batch-"));
+  const bodies: unknown[] = [];
+  const server = Bun.serve({port: 0, async fetch(req) {
+    bodies.push(await req.json());
+    if (bodies.length === 1) return batch([bashCall(0, "once", JSON.stringify({command: "printf 'once\\n' >> counter; cat counter" + (priorToolFailed ? "; exit 7" : "")}))]);
+    if (bodies.length === 2 || outcome !== "recovered") return batch([
+      bashCall(0, "rejected", JSON.stringify({command: "printf 'BAD\\n' >> counter"})),
+      bashCall(1, "broken", "{"),
+    ]);
+    return success();
+  }});
+  let agent = Agent.open(join(dir, "session"), {provider: "openai", model: "fixture", cwd: dir, permissions: "allow",
+    "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": outcome === "cancelled" ? "500" : "10"});
+  try {
+    agent.send("run once");
+    const events: SopeEvent[] = [];
+    const deadline = performance.now() + 4000;
+    while (performance.now() < deadline) {
+      const e = agent.poll(0);
+      if (!e) {await Bun.sleep(2); continue;}
+      events.push(e);
+      if (outcome === "cancelled" && e.type === "model_retry") agent.cancel();
+      if (e.type === "turn_end") break;
+    }
+    expect(events.at(-1)).toMatchObject({type: "turn_end", stopReason: outcome === "recovered" ? "end_turn" : outcome === "cancelled" ? "cancelled" : "error"});
+    expect(events.filter(e => e.type === "tool_start")).toHaveLength(1);
+    expect(events.filter(e => e.type === "tool_end")).toHaveLength(1);
+    expect(events.find(e => e.type === "tool_end")).toMatchObject({isError: priorToolFailed});
+    expect(readFileSync(join(dir, "counter"), "utf8")).toBe("once\n");
+    expect(bodies).toHaveLength(outcome === "recovered" ? 3 : outcome === "exhausted" ? 4 : 2);
+    for (const body of bodies.slice(2)) expect(body).toEqual(bodies[1]);
+    expect(JSON.stringify(bodies[1])).toContain('once');
+    agent.free();
+    agent = Agent.open(join(dir, "session"));
+    expect(agent.history()).toContain("once");
+    expect(agent.history()).not.toContain("BAD");
+    expect(agent.recovery().pending).toBe(false);
+    expect(readFileSync(join(dir, "counter"), "utf8")).toBe("once\n");
+  } finally {agent.free(); server.stop(true); rmSync(dir, {recursive: true, force: true});}
+});
+
+
+test("a recovery attempt timing out keeps the last validation reason terminal", async () => {
+  const r = await run(n => n === 1 ? invalidBatch() : new Response(new ReadableStream({start(c) { c.enqueue(new TextEncoder().encode(": wait\n\n")); }})),
+    {"openai.retry_delay_ms": "1", "openai.request_timeout_ms": "150", "openai.idle_timeout_ms": "1000"});
+  expect(r.attempts).toBe(2);
+  const error = r.events.find(e => e.type === "error");
+  expect(error).toMatchObject({code: -1});
+  expect(error?.type === "error" && error.message).toContain("arguments are not valid JSON; recovery request deadline exceeded");
 });

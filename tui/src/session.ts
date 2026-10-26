@@ -516,7 +516,7 @@ export class Session {
     switch (ev.type) {
       case "model_retry":
         if (!ev.compaction) this.#endRound(ev.turnId);
-        this.chat.add({ role: "info", text: `Model request interrupted (${ev.reason}); retrying attempt ${ev.attempt} in ${(ev.delayMs / 1000).toFixed(1)}s.${ev.discardedTextBytes || ev.discardedThinkingBytes ? " Previous attempt output was discarded from model history." : ""}` });
+        this.chat.add({ role: "info", text: `Model request interrupted (${ev.reason}${ev.validationReason ? `: ${ev.validationReason}; rejected batch not executed` : ""}); retrying attempt ${ev.attempt} in ${(ev.delayMs / 1000).toFixed(1)}s.${ev.discardedTextBytes || ev.discardedThinkingBytes ? " Previous attempt output was discarded from model history." : ""}` });
         return;
       case "turn_start":
         this.#openTurns.add(ev.turnId);
@@ -646,7 +646,7 @@ export class Session {
     const sub = this.#subagents.get(ev.agentId);
     switch (ev.type) {
       case "model_retry":
-        this.chat.add({ role: "info", text: `Subagent ${sub?.title ?? ev.agentId}: model request interrupted (${ev.reason}); retrying attempt ${ev.attempt}.` });
+        this.chat.add({ role: "info", text: `Subagent ${sub?.title ?? ev.agentId}: model request interrupted (${ev.reason}${ev.validationReason ? `: ${ev.validationReason}; rejected batch not executed` : ""}); retrying attempt ${ev.attempt}.` });
         return;
       case "tool_call":
       case "tool_start": {

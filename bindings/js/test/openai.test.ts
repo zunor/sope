@@ -190,22 +190,32 @@ test("disabling retries exposes a truncated response once", async () => {
 const tool = (index: number, id = "call_a", name = "echo", args = "{}") =>
   ({ index, id, type: "function", function: { name, arguments: args } });
 
-for (const [name, calls, finish] of [
-  ["fractional index", [tool(0.5)], "tool_calls"],
-  ["out of range index", [tool(0), tool(64, "call_b")], "tool_calls"],
-  ["stop with a tool batch", [tool(0)], "stop"],
-  ["missing tool name", [tool(0), tool(1, "call_b", "")], "tool_calls"],
-  ["duplicate call IDs", [tool(0), tool(1)], "tool_calls"],
-  ["incomplete arguments after a valid call", [tool(0), tool(1, "call_b", "echo", '{"input":')], "tool_calls"],
-  ["empty tool batch", [], "tool_calls"],
+for (const [name, calls, finish, diagnostic] of [
+  ["fractional index", [tool(0.5)], "tool_calls", "tool_calls[0]: index must be an integer"],
+  ["out of range index", [tool(0), tool(64, "call_b")], "tool_calls", "tool_calls[1]: index must be an integer"],
+  ["stop with a tool batch", [tool(0)], "stop", "finish_reason must be tool_calls"],
+  ["missing tool name", [tool(0), tool(1, "call_b", "")], "tool_calls", "tool_calls[1]: missing tool name"],
+  ["invalid tool name", [tool(0, "call_a", "bad name")], "tool_calls", "invalid tool name"],
+  ["duplicate call IDs", [tool(0), tool(1)], "tool_calls", "tool_calls[1]: duplicate tool call id"],
+  ["NUL in ID", [tool(0, "bad\0id")], "tool_calls", "tool id contains NUL"],
+  ["incomplete arguments after a valid call", [tool(0), tool(1, "call_b", "echo", '{"secret_value":')], "tool_calls", "tool_calls[1]: arguments are not valid JSON"],
+  ["non-object arguments", [tool(0, "call_a", "echo", '[]')], "tool_calls", "arguments must be a JSON object"],
+  ["non-string arguments", [{...tool(0), function: {name: "echo", arguments: {secret_value: 1}}}], "tool_calls", "arguments must be a JSON-encoded string"],
+  ["string index", [{...tool(0), index: "0"}], "tool_calls", "index must be a number"],
+  ["empty tool batch", [], "tool_calls", "empty batch"],
 ] as const) {
   test(`rejects the entire malformed tool batch: ${name}`, async () => {
     overrideStream = sse([delta({ tool_calls: calls }), delta({}, finish)]);
     agent = openaiAgent();
+    agent.setOption("openai.max_retries", "0");
     agent.send("test malformed batch");
     const events = await drainTurn(agent, (call) => agent!.toolResult(call.callId, "must not run"));
+    expect(requests).toHaveLength(1);
     expect(events.filter((e) => e.type === "tool_call" || e.type === "tool_start" || e.type === "permission")).toHaveLength(0);
     expect(events.at(-1)).toMatchObject({ type: "turn_end", stopReason: "error" });
+    const error = events.find(e => e.type === "error");
+    expect(error?.type === "error" && error.message).toContain(diagnostic);
+    expect(error?.type === "error" && error.message).not.toContain("secret_value");
   });
 }
 

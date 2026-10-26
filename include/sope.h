@@ -209,6 +209,7 @@ SOPE_API int sope_agent_wait(sope_agent_t *agent, int32_t timeout_ms);
  *   tls.ca_file       PEM file of trusted CAs, for builds with bundled curl
  *                     (default: $SSL_CERT_FILE, else the system bundle)
  *   openai.max_retries  additional attempts per request, 0..20 (default 5)
+ *   Malformed chat tool batches retry at most twice before tool dispatch.
  *   openai.retry_delay_ms initial backoff, capped at 10000 ms (default 1000)
  *   openai.idle_timeout_ms attempt silence limit (default 120000)
  *   openai.request_timeout_ms total request budget (default 600000)

@@ -101,7 +101,7 @@ export type SopeEvent =
   /** The previous model attempt was discarded; tools have not been dispatched. */
   | ({ type: "model_retry"; round: number; attempt: number; reason: string; delayMs: number;
        compaction: boolean; discardedTextBytes: number; discardedThinkingBytes: number;
-       maxTokens: number; nextMaxTokens: number } & Origin)
+       maxTokens: number; nextMaxTokens: number; validationReason: string } & Origin)
   /** A host tool call: answer it with toolResult(). */
   | ({ type: "tool_call"; callId: number; name: string; input: string } & Origin)
   /** A built-in tool call the library runs itself. */
@@ -492,6 +492,7 @@ export class Agent {
         return { type: "model_retry", ...origin, round: callId, attempt: code, reason: name(),
           delayMs: retry.delay_ms, compaction: !!retry.compaction,
           maxTokens: retry.max_tokens, nextMaxTokens: retry.next_max_tokens,
+          validationReason: retry.validation_reason ?? "",
           discardedTextBytes: retry.discarded_text_bytes, discardedThinkingBytes: retry.discarded_thinking_bytes };
       }
       default:

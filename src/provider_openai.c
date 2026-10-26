@@ -20,7 +20,7 @@
 
 #define MAX_TOOL_CALLS 64
 #define MAX_ERROR_BODY 1500
-enum { RETRY_NONE, RETRY_RATE, RETRY_SERVER, RETRY_TRANSPORT, RETRY_TIMEOUT, RETRY_INCOMPLETE, RETRY_OUTPUT_LIMIT };
+enum { RETRY_NONE, RETRY_RATE, RETRY_SERVER, RETRY_TRANSPORT, RETRY_TIMEOUT, RETRY_INCOMPLETE, RETRY_OUTPUT_LIMIT, RETRY_TOOL_BATCH };
 
 typedef struct {
     sope_buf id, name, args;
@@ -31,7 +31,8 @@ typedef struct {
     sope_call *call;
     int64_t started_ms, progress_ms, request_started_ms, retry_ready_ms;
     int64_t retry_after_ms;
-    int max_retries, timeout_retries, failure, retry_delay_ms, delay_ms;
+    int max_retries, timeout_retries, tool_batch_retries, failure, retry_delay_ms, delay_ms;
+    char validation_reason[192]; /* fixed diagnostics only; never raw model arguments */
     uint32_t jitter;
     size_t thinking_bytes;
     int64_t deadline_ms, last_data_ms, idle_ms;
@@ -340,11 +341,21 @@ static sope_step retry(sope_call *c, oa_state *s);
 static int retry_allowed(const oa_state *s)
 {
     return s->failure && s->attempts <= s->max_retries &&
-           (s->failure != RETRY_TIMEOUT || s->timeout_retries < 3);
+           (s->failure != RETRY_TIMEOUT || s->timeout_retries < 3) &&
+           (s->failure != RETRY_TOOL_BATCH || s->tool_batch_retries < 2);
 }
 
 static sope_step timed_out(sope_call *c, oa_state *s, const char *kind)
 {
+    /* A recovery deadline must not hide the validation failure or invite the
+     * host to restart the entire task under its transient-timeout policy. */
+    if (s->validation_reason[0] && !c->compaction && !s->responses) {
+        sope__call_error(c, SOPE_ERROR,
+            "openai: invalid tool batch: %s; recovery %s deadline exceeded (%d attempts, %d validation retries); rejected batch not executed",
+            s->validation_reason, kind, s->attempts, s->tool_batch_retries);
+        trace_request(s, "timeout");
+        return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
+    }
     s->failure = RETRY_TIMEOUT;
     sope__call_error(c, SOPE_ETIMEOUT,
         "openai: %s deadline exceeded after %d attempt(s) and %lld ms; incomplete output discarded, committed tools retained",
@@ -481,6 +492,14 @@ done:
     return s;
 }
 
+/* Reject the whole uncommitted batch, never repair or dispatch a subset. */
+static int invalid_tool_batch(oa_state *s, size_t index, const char *reason)
+{
+    s->failure = RETRY_TOOL_BATCH;
+    snprintf(s->validation_reason, sizeof s->validation_reason, "tool_calls[%zu]: %s", index, reason);
+    return 0;
+}
+
 static int accumulate_tool_call(oa_state *s, const sope_json *tc, size_t position)
 {
     const sope_json *fn = sope__json_get(tc, "function");
@@ -489,7 +508,18 @@ static int accumulate_tool_call(oa_state *s, const sope_json *tc, size_t positio
     double idx = sope__json_number(sope__json_get(tc, "index"), (double)position);
     tool_call_acc *acc;
 
-    if (!(idx >= 0 && idx < MAX_TOOL_CALLS) || (double)(size_t)idx != idx) return 0;
+    const sope_json *index = sope__json_get(tc, "index");
+    if (index && index->type != SOPE_JSON_NUMBER)
+        return invalid_tool_batch(s, position, "index must be a number");
+    if (!(idx >= 0 && idx < MAX_TOOL_CALLS) || (double)(size_t)idx != idx)
+        return invalid_tool_batch(s, position, "index must be an integer from 0 to 63");
+    const char *fields[] = { "id", "name", "arguments" };
+    for (size_t i = 0; i < 3; i++) {
+        const sope_json *value = sope__json_get(i ? fn : tc, fields[i]);
+        if (value && value->type != SOPE_JSON_NULL && value->type != SOPE_JSON_STRING)
+            return invalid_tool_batch(s, (size_t)idx, i == 0 ? "id must be a string" :
+                                      i == 1 ? "name must be a string" : "arguments must be a JSON-encoded string");
+    }
     acc = &s->calls[(size_t)idx];
     acc->used = 1;
     if ((str = sope__json_string(sope__json_get(tc, "id"), &n)) && n && !acc->id.len) sope__buf_append(&acc->id, str, n);
@@ -676,7 +706,6 @@ static int handle_chunk(sope_call *c, oa_state *s, const char *data, size_t n)
         const sope_json *tc;
         for (tc = calls->child, i = 0; tc; tc = tc->next, i++) {
             if (!accumulate_tool_call(s, tc, i)) {
-                sope__call_error(c, SOPE_ERROR, "openai: invalid tool call index");
                 sope__json_free(root);
                 return 0;
             }
@@ -738,6 +767,7 @@ static const char *failure_name(int failure)
     case RETRY_TIMEOUT: return "timeout";
     case RETRY_INCOMPLETE: return "incomplete_stream";
     case RETRY_OUTPUT_LIMIT: return "output_limit";
+    case RETRY_TOOL_BATCH: return "invalid_tool_batch";
     default: return "permanent";
     }
 }
@@ -758,15 +788,17 @@ static sope_step retry(sope_call *c, oa_state *s)
     s->delay_ms = (int)delay;
     s->retry_ready_ms = trace_now() + delay;
     if (s->failure == RETRY_TIMEOUT) s->timeout_retries++;
+    if (s->failure == RETRY_TOOL_BATCH) s->tool_batch_retries++;
     sope__call_log(c, SOPE_LOG_DEBUG, "openai: %s (HTTP %ld); retrying in %d ms (attempt %d of %d)",
                    failure_name(s->failure), s->status, s->delay_ms, s->attempts + 1, s->max_retries + 1);
     trace_request(s, "retry");
-    char data[384];
+    char data[768];
     int n = snprintf(data, sizeof data,
-        "{\"delay_ms\":%d,\"compaction\":%s,\"discarded_text_bytes\":%zu,\"discarded_thinking_bytes\":%zu,\"max_tokens\":%llu,\"next_max_tokens\":%llu}",
+        "{\"delay_ms\":%d,\"compaction\":%s,\"discarded_text_bytes\":%zu,\"discarded_thinking_bytes\":%zu,\"max_tokens\":%llu,\"next_max_tokens\":%llu,\"validation_reason\":\"%s\"}",
         s->delay_ms, c->compaction ? "true" : "false", c->text.len, s->thinking_bytes,
         (unsigned long long)sope__call_max_tokens(c),
-        (unsigned long long)(s->next_output_tokens ? s->next_output_tokens : sope__call_max_tokens(c)));
+        (unsigned long long)(s->next_output_tokens ? s->next_output_tokens : sope__call_max_tokens(c)),
+        s->failure == RETRY_TOOL_BATCH ? s->validation_reason : "");
     const char *reason = failure_name(s->failure);
     sope__push_event(c->agent, SOPE_EVENT_MODEL_RETRY, sope__turn_id(c->agent), c->round,
                      s->attempts + 1, reason, strlen(reason), data, (size_t)n);
@@ -805,6 +837,16 @@ static sope_step retry(sope_call *c, oa_state *s)
 
 static sope_step failed_attempt(sope_call *c, oa_state *s)
 {
+    if (s->failure == RETRY_TOOL_BATCH && !c->failed) {
+        /* Tools execute only after provider success. Refuse retry if a different
+         * wire path already admitted uses, or if this is a summary request. */
+        int safe = !s->responses && !c->compaction && !c->n_uses && !c->complete;
+        if (safe && retry_allowed(s)) return retry(c, s);
+        sope__call_error(c, SOPE_ERROR,
+            "openai: invalid tool batch: %s; %s (%d attempts, %d validation retries); rejected batch not executed",
+            s->validation_reason, safe ? "retry allowance exhausted" : "retry not allowed",
+            s->attempts, s->tool_batch_retries);
+    }
     if (!c->failed && retry_allowed(s)) return retry(c, s);
     if (!c->failed) sope__call_error(c, SOPE_ERROR, "openai: %s; retry allowance exhausted (%d attempts)", failure_name(s->failure), s->attempts);
     return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
@@ -920,19 +962,25 @@ static sope_step oa_step(sope_call *c, void *state)
             return (sope_step){ SOPE__STEP_DONE, SOPE_ENOMEM };
         }
         sope_json *args = sope__json_parse(acc->args.len ? acc->args.ptr : "{}", acc->args.len ? acc->args.len : 2);
-        int valid = s->finish == 2 && sope__valid_name(acc->name.ptr, acc->name.len) &&
-                    (!acc->id.len || strlen(acc->id.ptr) == acc->id.len) && args && args->type == SOPE_JSON_OBJECT;
+        const char *reason = NULL;
+        if (s->finish != 2) reason = "finish_reason must be tool_calls";
+        else if (!acc->name.len) reason = "missing tool name";
+        else if (!sope__valid_name(acc->name.ptr, acc->name.len)) reason = "invalid tool name";
+        else if (acc->id.len && strlen(acc->id.ptr) != acc->id.len) reason = "tool id contains NUL";
+        else if (!args) reason = "arguments are not valid JSON";
+        else if (args->type != SOPE_JSON_OBJECT) reason = "arguments must be a JSON object";
         sope__json_free(args);
-        for (size_t j = 0; valid && j < i; j++)
-            if (acc->id.len && s->calls[j].id.len && !strcmp(acc->id.ptr, s->calls[j].id.ptr)) valid = 0;
-        if (!valid) {
-            sope__call_error(c, SOPE_ERROR, "openai: invalid or incomplete tool batch");
-            return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
+        for (size_t j = 0; !reason && j < i; j++)
+            if (acc->id.len && s->calls[j].id.len && !strcmp(acc->id.ptr, s->calls[j].id.ptr))
+                reason = "duplicate tool call id";
+        if (reason) {
+            invalid_tool_batch(s, i, reason);
+            return failed_attempt(c, s);
         }
     }
     if (!s->responses && s->finish == 2 && !used) {
-        sope__call_error(c, SOPE_ERROR, "openai: empty tool batch");
-        return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
+        invalid_tool_batch(s, 0, "empty batch with finish_reason tool_calls");
+        return failed_attempt(c, s);
     }
     /* Validate the entire batch before making any of it executable. */
     for (i = 0; i < MAX_TOOL_CALLS; i++) {
