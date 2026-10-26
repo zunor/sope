@@ -102,7 +102,7 @@ typedef struct pending_call {
     int read_observed, read_reused;
 } pending_call;
 
-typedef enum { PHASE_START, PHASE_CALL, PHASE_TOOLS, PHASE_COMPACT } turn_phase;
+typedef enum { PHASE_START, PHASE_CALL, PHASE_TOOLS, PHASE_COMPACT, PHASE_BACKGROUND } turn_phase;
 
 typedef enum { PERMIT_ASK, PERMIT_ALLOW, PERMIT_DENY } permit_mode;
 
@@ -121,6 +121,8 @@ typedef struct bg_shell { /* bash run_in_background */
     sope_proc *proc;
     uint64_t read_pos; /* output offset bash_output has returned up to */
     int stopped;       /* sope_shell_stop: the user stopped it */
+    uint64_t agent_id, turn_id; /* completion belongs only to its originating turn */
+    int notify, notified;
 } bg_shell;
 
 typedef struct turn_state {

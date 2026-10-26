@@ -473,7 +473,7 @@ static void test_background_shell(void)
     sope_agent_t *a = new_agent("allow");
     static run_log log;
 
-    run(a, "!bash {\"command\":\"echo first; sleep 0.3; echo second; sleep 30\",\"run_in_background\":true}", &log,
+    run(a, "!bash {\"command\":\"echo first; sleep 0.3; echo second; sleep 30\",\"run_in_background\":true,\"notify_on_exit\":false}", &log,
         NO_ANSWER, NULL);
     CHECK(log.n == 1 && !log.is_error[0] && strstr(log.result[0], "shell 1"));
     usleep(700000);
@@ -490,7 +490,7 @@ static void test_background_shell(void)
     const char *json = NULL;
     size_t len = 0;
     int i;
-    run(a, "!bash {\"command\":\"echo h\303\251llo; sleep 30\",\"run_in_background\":true}", &log, NO_ANSWER, NULL);
+    run(a, "!bash {\"command\":\"echo h\303\251llo; sleep 30\",\"run_in_background\":true,\"notify_on_exit\":false}", &log, NO_ANSWER, NULL);
     CHECK(strstr(log.result[0], "shell 2"));
     for (i = 0; i < 50; i++) { /* until its output arrived */
         CHECK(sope_agent_shells(a, &json, &len) == SOPE_OK);
@@ -513,10 +513,68 @@ static void test_background_shell(void)
     CHECK(sope_agent_shells(NULL, &json, &len) == SOPE_EINVAL);
 
     /* Freeing the agent kills what is still running. */
-    run(a, "!bash {\"command\":\"sleep 60\",\"run_in_background\":true}", &log, NO_ANSWER, NULL);
+    run(a, "!bash {\"command\":\"sleep 60\",\"run_in_background\":true,\"notify_on_exit\":false}", &log, NO_ANSWER, NULL);
     CHECK(strstr(log.result[0], "shell 3"));
     CHECK(sope_agent_shells(a, &json, &len) == SOPE_OK);
     CHECK(strstr(json, "\"id\":2") < strstr(json, "\"id\":3")); /* oldest first */
+    sope_agent_free(a);
+}
+
+/* Completion arrives in the model history without a bash_output/model polling loop. */
+static void test_background_notifications(void)
+{
+    sope_agent_t *a = new_agent("allow");
+    static run_log log;
+    run(a, "!bash {\"command\":\"sleep 0.1; echo background-proof; exit 7\",\"run_in_background\":true}", &log, NO_ANSWER, NULL);
+    CHECK(log.stop == SOPE_STOP_END_TURN && log.n == 1);
+    const char *history;
+    size_t len;
+    CHECK(sope_agent_history(a, &history, &len) == SOPE_OK);
+    CHECK(strstr(history, "Background shell 1 completed (exit code 7)"));
+    CHECK(strstr(log.text, "background-proof"));
+    CHECK(!strstr(history, "\"name\":\"bash_output\""));
+    /* Consumed results cannot wake or contaminate a later turn. */
+    run(a, "fresh-turn", &log, NO_ANSWER, NULL);
+    CHECK(log.stop == SOPE_STOP_END_TURN && !strstr(log.text, "Background shell"));
+    /* Two independent commands each deliver once, including an empty result. */
+    run(a, "!bash {\"command\":\"sleep 0.1\",\"run_in_background\":true} ;; !bash {\"command\":\"echo second-proof\",\"run_in_background\":true}", &log, NO_ANSWER, NULL);
+    CHECK(log.stop == SOPE_STOP_END_TURN && log.n == 2);
+    CHECK(sope_agent_history(a, &history, &len) == SOPE_OK);
+    CHECK(strstr(history, "Background shell 2 completed (exit code 0)"));
+    CHECK(strstr(history, "Background shell 3 completed (exit code 0)"));
+    sope_agent_free(a);
+
+    /* A child's notification belongs to that child; retiring its task must
+     * detach the process wake pointer before the child is freed. */
+    a = new_agent("allow");
+    const char *def = "{\"name\":\"builder\",\"description\":\"Builds\",\"system_prompt\":\"Build\",\"tools\":[\"bash\"]}";
+    CHECK(sope_subagent_register(a, def, strlen(def)) == SOPE_OK);
+    run(a, "!agent:builder !bash {\"command\":\"sleep 0.1; echo child-proof\",\"run_in_background\":true}", &log, NO_ANSWER, NULL);
+    CHECK(log.stop == SOPE_STOP_END_TURN && strstr(log.text, "child-proof"));
+    run(a, "after-child", &log, NO_ANSWER, NULL);
+    CHECK(log.stop == SOPE_STOP_END_TURN && !strstr(log.text, "Background shell"));
+    sope_agent_free(a);
+
+    /* A waiting turn is cancellable; a late process exit never starts a new turn. */
+    a = new_agent("allow");
+    const char *cmd = "!bash {\"command\":\"sleep 30\",\"run_in_background\":true}";
+    CHECK(sope_send(a, cmd, strlen(cmd), NULL) == SOPE_OK);
+    int started = 0, ended = 0;
+    for (int i = 0; i < 100 && !started; i++) {
+        sope_event_t ev = { .size = sizeof ev };
+        CHECK(sope_poll(a, &ev, 1000) == 1);
+        started = ev.type == SOPE_EVENT_TOOL_END;
+    }
+    CHECK(started);
+    CHECK(sope_cancel(a) == SOPE_OK);
+    for (int i = 0; i < 100 && !ended; i++) {
+        sope_event_t ev = { .size = sizeof ev };
+        CHECK(sope_poll(a, &ev, 1000) == 1);
+        if (ev.type == SOPE_EVENT_TURN_END) { CHECK(ev.code == SOPE_STOP_CANCELLED); ended = 1; }
+    }
+    CHECK(ended);
+    run(a, "after-cancel", &log, NO_ANSWER, NULL);
+    CHECK(log.stop == SOPE_STOP_END_TURN && !strstr(log.text, "Background shell"));
     sope_agent_free(a);
 }
 
@@ -689,6 +747,7 @@ int main(int argc, char **argv)
     test_glob_grep();
     test_bash();
     test_background_shell();
+    test_background_notifications();
     test_todo_and_subagents();
     test_acceptance_closure();
 

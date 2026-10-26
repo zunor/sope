@@ -129,7 +129,7 @@ test("stops one subagent while its sibling and the parent go on", () => {
 test("lists and stops background shells", async () => {
   agent = Agent.create({ "mock.delay_ms": "0" });
   agent.setOption("permissions", "allow");
-  agent.send('!bash {"command":"echo ready; sleep 30","run_in_background":true}');
+  agent.send('!bash {"command":"echo ready; sleep 30","run_in_background":true,"notify_on_exit":false}');
   drainTurn(agent);
   let [shell] = agent.shells();
   for (let i = 0; i < 50 && shell && !shell.output_bytes; i++, [shell] = agent.shells()) await Bun.sleep(20);

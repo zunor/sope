@@ -302,6 +302,7 @@ static void finish_turn(sope_agent_t *a, int32_t stop)
     if (!t->terminal_committed && !sope__journal_checkpoint(a, "end", 1)) stop = SOPE_STOP_ERROR;
     drop_pending_locked(a); /* late sope_tool_result calls now get ENOTFOUND */
     sope__push_event_locked(a, SOPE_EVENT_TURN_END, id, 0, stop, NULL, 0, NULL, 0);
+    sope__shells_detach_locked(a, stop != SOPE_STOP_END_TURN);
     a->active_turn = 0;
     a->cancel_requested = 0;
     /* Hosts may inspect context or reset the journal as soon as TURN_END is
@@ -367,6 +368,11 @@ static sope_next start_call(sope_agent_t *a)
     sope_call *c;
 
     if (turn_cancelled(a)) return next(SOPE__NEXT_CONTINUE);
+    int background_pending;
+    if (sope__shells_collect(a, &background_pending) < 0) {
+        finish_turn(a, SOPE_STOP_ERROR);
+        return next(SOPE__NEXT_CONTINUE);
+    }
     pthread_mutex_lock(a->mu);
     int context_ok = sope__harness_context(a);
     pthread_mutex_unlock(a->mu);
@@ -378,7 +384,10 @@ static sope_next start_call(sope_agent_t *a)
     pthread_mutex_lock(a->mu);
     int ready = t->report_mode && sope__harness_ready(a);
     pthread_mutex_unlock(a->mu);
-    if (ready && !turn_cancelled(a)) return finish_report(a, NULL);
+    if (ready && !turn_cancelled(a)) {
+        if (background_pending) { t->phase = PHASE_BACKGROUND; return next(SOPE__NEXT_CONTINUE); }
+        return finish_report(a, NULL);
+    }
     if (t->round >= (uint64_t)t->max_rounds) {
         char msg[64];
         snprintf(msg, sizeof msg, "stopped after %d model rounds (max_rounds)", (int)t->max_rounds);
@@ -604,6 +613,14 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
     t->call = NULL;
 
     if (!asst->n_tool_uses) {
+        int pending;
+        int delivered = sope__shells_collect(a, &pending);
+        if (delivered < 0) { finish_turn(a, SOPE_STOP_ERROR); return next(SOPE__NEXT_CONTINUE); }
+        if (delivered) return start_call(a);
+        if (pending) {
+            t->phase = PHASE_BACKGROUND;
+            return next(SOPE__NEXT_CONTINUE);
+        }
         pthread_mutex_lock(a->mu);
         int closure = sope__harness_finish(a);
         pthread_mutex_unlock(a->mu);
@@ -727,10 +744,6 @@ static sope_next collect_tools(sope_agent_t *a)
         finish_turn(a, SOPE_STOP_ERROR);
         return next(SOPE__NEXT_CONTINUE);
     }
-    pthread_mutex_lock(a->mu);
-    int ready = t->report_mode && sope__harness_ready(a);
-    pthread_mutex_unlock(a->mu);
-    if (ready && !turn_cancelled(a)) return finish_report(a, NULL);
     return start_call(a);
 }
 
@@ -929,6 +942,13 @@ static sope_next step_turn(sope_agent_t *a)
     sope_step s;
 
     switch (t->phase) {
+    case PHASE_BACKGROUND: {
+        int pending;
+        int delivered = sope__shells_collect(a, &pending);
+        if (delivered < 0) { finish_turn(a, SOPE_STOP_ERROR); return next(SOPE__NEXT_CONTINUE); }
+        if (delivered || !pending) return start_call(a);
+        return next(SOPE__NEXT_WAIT);
+    }
     case PHASE_START: return t->msg->compact ? start_compact(a) : start_call(a);
     case PHASE_TOOLS: return collect_tools(a);
     case PHASE_CALL:

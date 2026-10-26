@@ -161,7 +161,8 @@ test("retries transient failures before any output", async () => {
   agent = openaiAgent("test-key", "/flaky");
   agent.send("plain");
   const events = await drainTurn(agent, (call) => agent!.toolResult(call.callId, "ok"));
-  expect(events.some((e) => e.type === "log" && e.level === "warn" && e.message.includes("HTTP 503"))).toBe(true);
+  expect(events.filter((e) => e.type === "model_retry")).toHaveLength(1);
+  expect(events.some((e) => e.type === "log" && e.level === "warn" && e.message.includes("retrying"))).toBe(false);
   expect(events.some((e) => e.type === "error")).toBe(false);
   expect(events.at(-1)).toMatchObject({ type: "turn_end", stopReason: "end_turn" });
   const telemetry = events.flatMap((event) => event.type === "log" && event.message.startsWith('{"event":"provider.') ? [JSON.parse(event.message)] : []);

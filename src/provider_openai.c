@@ -758,7 +758,7 @@ static sope_step retry(sope_call *c, oa_state *s)
     s->delay_ms = (int)delay;
     s->retry_ready_ms = trace_now() + delay;
     if (s->failure == RETRY_TIMEOUT) s->timeout_retries++;
-    sope__call_log(c, SOPE_LOG_WARN, "openai: %s (HTTP %ld); retrying in %d ms (attempt %d of %d)",
+    sope__call_log(c, SOPE_LOG_DEBUG, "openai: %s (HTTP %ld); retrying in %d ms (attempt %d of %d)",
                    failure_name(s->failure), s->status, s->delay_ms, s->attempts + 1, s->max_retries + 1);
     trace_request(s, "retry");
     char data[384];

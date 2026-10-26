@@ -130,6 +130,10 @@ void sope__file_release(tool_run *r);
 void sope__execution_receipt(tool_run *r, int status);
 /* tool_bash.c: kills the root's background shells (agent teardown). */
 void sope__shells_free(sope_agent_t *root);
+/* At a model boundary: append completed background results, or count pending ones. */
+int sope__shells_collect(sope_agent_t *a, int *pending);
+/* Called with *mu held before retiring a turn/child task. */
+void sope__shells_detach_locked(sope_agent_t *a, int cancel);
 /* tool_web.c: HTML to readable text with Markdown-style headings, lists and links. */
 void sope__html_to_text(const char *html, size_t n, sope_buf *out);
 
