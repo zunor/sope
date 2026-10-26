@@ -4,6 +4,8 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
+- Bound streams that emit only heartbeats or stop making model progress with a separate five-minute progress deadline; continuous reasoning, text and tool arguments keep the request alive. Preserve excluded candidates and evidence references in compaction handoffs.
+
 - Accommodate slow reasoning providers with five-minute first-byte and fifteen-minute chunk-idle limits, within a thirty-minute logical request budget; remove the conflicting curl low-speed cutoff for model streams.
 
 - Start normal model requests with a 32000-token output target and summaries with an independent 8192-token budget; fit requests to remaining context and retain learned truncation budgets across turns and durable worker restarts.

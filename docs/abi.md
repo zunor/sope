@@ -276,6 +276,7 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 | `image_model` | Model to switch to when the conversation contains images (for when `model` cannot process them) | Uses `model` |
 | `system` | System prompt | A short built-in prompt |
 | `max_rounds` | Maximum model calls per turn | `32` |
+| `openai.progress_timeout_ms` | Maximum silence in reasoning, text or tool argument progress; SSE keepalives do not reset it; retries share the request budget | `300000` |
 | `openai.idle_timeout_ms` | Maximum silence between response chunks; first-byte wait is at most min(this value, 300000); retries share the request budget | `900000` |
 | `openai.max_retries` | Additional attempts per logical request (0 disables, maximum 20); timeouts allow at most three retries | `5` |
 | `openai.retry_delay_ms` | Initial exponential retry delay; jittered and capped at 10 seconds | `1000` |
@@ -543,8 +544,9 @@ metadata, without duplicating commands or output.
 
 
 OpenAI-compatible requests allow at most 5 minutes for the first response byte,
-then use an idle deadline (15 minutes by default) and an absolute deadline
-(30 minutes). An explicit shorter idle limit also shortens first-byte waiting. Values are milliseconds, integers
+then use a chunk idle deadline (15 minutes), a model progress deadline
+(5 minutes without new reasoning, text or tool arguments), and an absolute deadline
+(30 minutes). Heartbeats do not reset the progress deadline. An explicit shorter idle limit also shortens first-byte waiting. Values are milliseconds, integers
 1–3600000; invalid values use the defaults. The pool schedules a deadline wake
 without occupying a worker, so a silent stream does not need an outside cancel
 to terminate. Incoming bytes reset idle time; keepalive traffic cannot extend

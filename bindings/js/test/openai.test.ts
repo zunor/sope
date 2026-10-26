@@ -34,6 +34,30 @@ beforeAll(() => {
         return new Response("overloaded", { status: 503 });
       const body = (await req.json()) as Body;
       requests.push(body);
+      const path = new URL(req.url).pathname;
+      if (path.startsWith("/productive/") && body.messages.at(-1)?.role !== "tool") {
+        const kind = path.split("/")[2];
+        let timer: ReturnType<typeof setInterval> | undefined;
+        const stream = new ReadableStream({
+          start(controller) {
+            const emit = (d: object, finish: string | null = null) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(delta(d, finish))}\n\n`));
+            if (kind === "tool") emit({tool_calls: [{index: 0, id: "slow", function: {name: "echo", arguments: '{"input":"'}}]});
+            let count = 0;
+            timer = setInterval(() => {
+              emit(kind === "tool" ? {tool_calls: [{index: 0, function: {arguments: "x"}}]} : {[kind === "reasoning" ? "reasoning_content" : "content"]: "x"});
+              if (++count === 12) {
+                clearInterval(timer); heartbeatTimers.delete(timer!);
+                if (kind === "tool") emit({tool_calls: [{index: 0, function: {arguments: '"}'}}]}, "tool_calls");
+                else emit({content: "done"}, "stop");
+                controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n")); controller.close();
+              }
+            }, 40);
+            heartbeatTimers.add(timer);
+          },
+          cancel() { if (timer) { clearInterval(timer); heartbeatTimers.delete(timer); } },
+        });
+        return new Response(stream, {headers: {"content-type": "text/event-stream"}});
+      }
       if (new URL(req.url).pathname.startsWith("/stall/")) {
         const heartbeat = new URL(req.url).pathname.includes("heartbeat");
         let timer: ReturnType<typeof setInterval> | undefined;
@@ -250,4 +274,27 @@ test("request deadline includes retry backoff", async () => {
   expect(events.at(-1)).toMatchObject({ type: "turn_end", stopReason: "error" });
   expect(flakyFailures).toBe(1);
   expect(events.some((ev) => ev.type === "error" && ev.message.includes("request deadline exceeded"))).toBe(true);
+});
+
+for (const prefix of ["/stall/idle", "/stall/heartbeat"]) test(`semantic progress deadline bounds ${prefix}`, async () => {
+  agent = openaiAgent("test-key", prefix);
+  agent.setOption("openai.max_retries", "0");
+  agent.setOption("openai.idle_timeout_ms", "2000");
+  agent.setOption("openai.request_timeout_ms", "3000");
+  agent.setOption("openai.progress_timeout_ms", "200");
+  agent.send("bounded progress");
+  const events = await drainTurn(agent, () => { throw new Error("unexpected tool"); });
+  expect(events.at(-1)).toMatchObject({type: "turn_end", stopReason: "error"});
+  expect(events.some(e => e.type === "error" && e.message.includes("progress deadline exceeded"))).toBe(true);
+});
+
+for (const kind of ["text", "reasoning", "tool"]) test(`productive ${kind} resets progress deadline`, async () => {
+  agent = openaiAgent("test-key", `/productive/${kind}`);
+  agent.setOption("openai.max_retries", "0");
+  agent.setOption("openai.progress_timeout_ms", "200");
+  agent.send("slow but productive");
+  const events = await drainTurn(agent, call => agent!.toolResult(call.callId, "ok"));
+  expect(events.some(e => e.type === "error")).toBe(false);
+  expect(events.at(-1)).toMatchObject({type: "turn_end", stopReason: "end_turn"});
+  if (kind === "tool") expect(events.filter(e => e.type === "tool_call")).toHaveLength(1);
 });

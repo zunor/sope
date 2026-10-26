@@ -30,6 +30,10 @@ static const char INSTRUCTIONS[] =
     "4. Errors encountered and how they were resolved. Preserve failed, cancelled, pending and unverified states; "
     "never promote them to success. Separate observations, hypotheses and model-written claims.\n"
     "5. Work completed, work in progress, and the next step (if the latest request is unfinished).\n"
+    "6. Rejected or excluded candidates, duplicate issue IDs, reasons and evidence paths. "
+    "Carry these forward from previous checkpoints; do not silently drop negative results. "
+    "Preserve the durable candidate-ledger path and instruct the next agent to read it before exploring. "
+    "A written report is not accepted until validation/collection confirms it.\n"
     "Scale the summary to the conversation: a short exchange needs only a few lines. Reply with the summary only.\n";
 
 static void append_clipped(sope_buf *b, const char *s, size_t n, size_t max)

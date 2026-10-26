@@ -91,3 +91,7 @@ fifteen minutes between streamed chunks, accommodating slow reasoning providers.
 The thirty-minute logical request deadline includes every retry and backoff.
 Explicit shorter idle and request limits remain supported; cancellation interrupts
 waiting. Web fetches retain their separate sixty-second transport limit.
+
+`openai.progress_timeout_ms` defaults to `300000` (five minutes) without new reasoning,
+text or tool arguments. Heartbeats and empty deltas do not extend this limit.
+The chunk idle and overall request deadlines still apply; retries share the latter.

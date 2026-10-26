@@ -36,6 +36,8 @@ typedef struct {
     uint32_t jitter;
     size_t thinking_bytes;
     int64_t deadline_ms, last_data_ms, idle_ms;
+    int64_t last_progress_ms, progress_timeout_ms;
+    size_t semantic_bytes;
     size_t received;
     int first_byte;
     sope_buf url, body, auth; /* kept for retries */
@@ -379,14 +381,16 @@ static sope_step wait_http(sope_call *c, oa_state *s)
     int64_t allowance = !s->first_byte && s->idle_ms > 300000 ? 300000 : s->idle_ms;
     int64_t total = s->deadline_ms - now, idle = s->last_data_ms + allowance - now;
     if (total <= 0) return timed_out(c, s, "request");
-    if (idle <= 0) {
+    int64_t progress = s->last_progress_ms + s->progress_timeout_ms - now;
+    if (idle <= 0 || progress <= 0) {
         s->failure = RETRY_TIMEOUT;
         int permanent_http = (s->status >= 400 && s->status < 500 && s->status != 408 && s->status != 429) || s->status == 501 || s->status == 505;
         if (!permanent_http && retry_allowed(s)) {
             return retry(c, s);
         }
-        return timed_out(c, s, "idle");
+        return timed_out(c, s, idle <= 0 ? "idle" : "progress");
     }
+    if (progress < idle) idle = progress;
     return (sope_step){ SOPE__STEP_SLEEP, (int32_t)(total < idle ? total : idle) };
 }
 
@@ -398,7 +402,8 @@ static sope_http *post(sope_call *c, oa_state *s)
     headers[n++] = "Accept: text/event-stream";
     if (s->auth.len) headers[n++] = s->auth.ptr;
     s->attempts++;
-    s->last_data_ms = s->started_ms = s->progress_ms = trace_now();
+    s->last_progress_ms = s->last_data_ms = s->started_ms = s->progress_ms = trace_now();
+    s->semantic_bytes = 0;
     s->received = 0;
     s->failure = RETRY_NONE;
     s->delay_ms = 0;
@@ -505,6 +510,7 @@ static void *oa_start(sope_call *c)
                    (unsigned long long)sope__call_round(c), s->url.ptr, model, sope__call_tool_count(c),
                    s->body.len);
     s->idle_ms = timeout_option(c, "openai.idle_timeout_ms", 900000);
+    s->progress_timeout_ms = timeout_option(c, "openai.progress_timeout_ms", 300000);
     s->request_started_ms = trace_now();
     s->deadline_ms = s->request_started_ms + timeout_option(c, "openai.request_timeout_ms", 1800000);
     s->retry_delay_ms = (int)timeout_option(c, "openai.retry_delay_ms", 1000);
@@ -976,6 +982,13 @@ static sope_step oa_step(sope_call *c, void *state)
         return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
     }
     if (!parse_lines(c, s, finished)) return failed_attempt(c, s);
+    /* Wire keepalives and empty deltas are not model progress. Both reasoning
+     * and partial tool arguments count, so a slow but productive stream lives. */
+    size_t semantic = c->text.len + s->thinking_bytes;
+    for (i = 0; i < MAX_TOOL_CALLS; i++)
+        semantic += s->calls[i].id.len + s->calls[i].name.len + s->calls[i].args.len;
+    if (semantic > s->semantic_bytes) s->last_progress_ms = trace_now();
+    s->semantic_bytes = semantic;
     if (c->failed) return (sope_step){ SOPE__STEP_DONE, SOPE_ERROR };
     if (!finished && !s->saw_done) return wait_http(c, s);
     if (!s->saw_done && err[0]) {

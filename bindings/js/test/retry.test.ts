@@ -464,3 +464,14 @@ test("a recovery attempt timing out keeps the last validation reason terminal", 
   expect(error).toMatchObject({code: -1});
   expect(error?.type === "error" && error.message).toContain("arguments are not valid JSON; recovery request deadline exceeded");
 });
+
+ test("a stalled partial tool retries on progress timeout without dispatch or replay", async () => {
+  const partial = chunk({reasoning_content:"discard-this-thought"}) + chunk({tool_calls:[{index:0,id:"stalled",function:{name:"echo",arguments:'{"input":"unfinished'}}]});
+  const r = await run(n => n === 1 ? new Response(new ReadableStream({start(c) {c.enqueue(new TextEncoder().encode(partial));}})) : success(),
+    {"openai.progress_timeout_ms":"80", "openai.idle_timeout_ms":"1000"});
+  expect(r.attempts).toBe(2);
+  expect(r.events.at(-1)).toMatchObject({stopReason:"end_turn"});
+  expect(r.history).not.toContain("unfinished");
+  expect(r.history).not.toContain("discard-this-thought");
+  expect(r.history).toContain("recovered");
+ });

@@ -348,7 +348,7 @@ test("cancelling an in-flight automatic summary preserves both history and held 
 
 test("recompaction keeps the entire previous checkpoint while clipping new bulk", async () => {
   const agent = create({ "compact.input_tokens": "1800", "compact.retain_tokens": "0" });
-  const checkpoint = "first ".repeat(250) + "NEVER_PUBLISH_WITHOUT_APPROVAL" + " last".repeat(250);
+  const checkpoint = "first ".repeat(250) + "NEVER_PUBLISH_WITHOUT_APPROVAL; excluded PK duplicates: issue #25470; evidence .loom-test/run/pk.log; candidate ledger .loom-test/run/candidates.md" + " last".repeat(250);
   agent.loadHistory(JSON.stringify([
     { role: "user", content: checkpoint, summary: true },
     { role: "assistant", content: "new log ".repeat(10000) },
