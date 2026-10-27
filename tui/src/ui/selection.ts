@@ -13,10 +13,17 @@ export interface Point {
   y: number;
 }
 
+/** Visible text rows belonging to one message, excluding its frame and padding. */
+export interface SelectionBounds {
+  id: object;
+  rows: Array<{ x: number; y: number; w: number }>;
+}
+
 export class Selection {
   #anchor: Point | null = null;
   #head: Point | null = null;
   #dragging = false;
+  #bounds: SelectionBounds | undefined;
 
   get active(): boolean {
     return this.#anchor !== null;
@@ -26,19 +33,21 @@ export class Selection {
     return this.#dragging;
   }
 
-  press(p: Point): void {
-    this.#anchor = p;
+  press(p: Point, bounds?: SelectionBounds): void {
+    this.#bounds = bounds?.rows.length ? bounds : undefined;
+    this.#anchor = this.#clamp(p);
     this.#head = null;
     this.#dragging = true;
   }
 
   drag(p: Point): void {
-    if (this.#dragging) this.#head = p;
+    if (this.#dragging) this.#head = this.#clamp(p);
   }
 
   /** Ends a drag. Returns false for a plain click, which selects nothing. */
   release(p: Point): boolean {
     if (!this.#dragging) return false;
+    p = this.#clamp(p);
     this.#dragging = false;
     if (this.#head || (this.#anchor && (p.x !== this.#anchor.x || p.y !== this.#anchor.y))) this.#head = p;
     if (!this.#head) this.clear();
@@ -48,6 +57,26 @@ export class Selection {
   clear(): void {
     this.#anchor = this.#head = null;
     this.#dragging = false;
+    this.#bounds = undefined;
+  }
+
+  /** Screen coordinates expire when streaming, scrolling or overlays move a message. */
+  validateBounds(resolve: (p: Point) => SelectionBounds | undefined): void {
+    const old = this.#bounds;
+    if (!old) return;
+    const current = resolve(old.rows[0]!);
+    if (!current || old.id !== current.id || old.rows.length !== current.rows.length ||
+      old.rows.some((r, i) => r.x !== current.rows[i]!.x || r.y !== current.rows[i]!.y || r.w !== current.rows[i]!.w)) this.clear();
+  }
+
+  #clamp(p: Point): Point {
+    const rows = this.#bounds?.rows;
+    if (!rows) return p;
+    const first = rows[0]!, last = rows.at(-1)!;
+    if (p.y < first.y) return { x: first.x, y: first.y };
+    if (p.y > last.y) return { x: last.x + last.w - 1, y: last.y };
+    const row = rows.find(r => r.y === p.y) ?? first;
+    return { x: Math.max(row.x, Math.min(row.x + row.w - 1, p.x)), y: row.y };
   }
 
   /** The selected range in reading order, or null. Both ends are inclusive. */
@@ -82,11 +111,15 @@ export class Selection {
     const [a, b] = r;
     const last = buf.width - 1;
     for (let y = Math.max(0, a.y); y <= Math.min(buf.height - 1, b.y); y++) {
-      let x0 = y === a.y ? a.x : 0;
-      let x1 = Math.min(last, y === b.y ? b.x : last);
+      const row = this.#bounds?.rows.find(r => r.y === y);
+      if (this.#bounds && !row) continue;
+      const left = Math.max(0, row?.x ?? 0);
+      const right = Math.min(last, row ? row.x + row.w - 1 : last);
+      let x0 = Math.max(left, y === a.y ? a.x : left);
+      let x1 = Math.min(right, y === b.y ? b.x : right);
       // Take wide characters whole.
-      if (x0 > 0 && buf.chars[y * buf.width + x0] === "") x0--;
-      if (x1 < last && buf.chars[y * buf.width + x1 + 1] === "") x1++;
+      if (x0 > left && buf.chars[y * buf.width + x0] === "") x0--;
+      if (x1 < right && buf.chars[y * buf.width + x1 + 1] === "") x1++;
       if (x0 <= x1) fn(y, Math.max(0, x0), x1);
     }
   }

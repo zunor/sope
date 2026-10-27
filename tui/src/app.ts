@@ -186,6 +186,7 @@ export class App {
     this.#term.enter();
     this.#term.onResize(() => {
       this.#inputDrag = null;
+      this.#selection.clear();
       this.#renderer.invalidate();
       this.#scheduleRender();
     });
@@ -578,7 +579,7 @@ export class App {
           this.#selection.clear();
           return;
         }
-        this.#selection.press(p);
+        this.#selection.press(p, this.#session.chat.selectionBoundsAt(p.x, p.y));
         return;
       }
       case "drag":
@@ -891,6 +892,7 @@ export class App {
       this.#list.render(buf, { x: PAD, y: bodyY, w: inner, h: H - bodyY - 1 }, this.#colors);
       this.#renderer.cursor = { x: 0, y: 0, visible: false };
     }
+    this.#selection.validateBounds(p => s.chat.selectionBoundsAt(p.x, p.y));
     this.#selection.highlight(buf);
     if (this.#syncCommands()) {
       const h = this.#commands.height(ruleTopY - bodyY);

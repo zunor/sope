@@ -3,6 +3,105 @@ import { expect, test } from "bun:test";
 import { CellBuffer, INVERSE } from "../src/render/buffer";
 import { Selection } from "../src/ui/selection";
 import { parseEnvFile } from "../src/config";
+import { ChatView } from "../src/ui/chat";
+
+test("multiline bubble selection excludes borders, padding and other messages in both directions", () => {
+  for (const reverse of [false, true]) {
+    const chat = new ChatView();
+    chat.add({ role: "user", text: "alpha\n\nＨbeta" });
+    chat.add({ role: "assistant", text: "Outside the bubble" });
+    const buf = new CellBuffer(60, 16);
+    chat.render(buf, { x: 2, y: 1, w: 30, h: 12 }, "");
+    const bounds = chat.selectionBoundsAt(28, 2)!;
+    expect(bounds.rows).toEqual([{ x: 24, y: 2, w: 5 }, { x: 24, y: 3, w: 1 }, { x: 24, y: 4, w: 6 }]);
+    const a = { x: 25, y: 2 }, b = { x: 26, y: 4 };
+    const s = new Selection();
+    s.press(reverse ? b : a, bounds);
+    s.release(reverse ? a : b);
+    expect(s.text(buf)).toBe("lpha\n\nＨb");
+    s.highlight(buf);
+    for (let y = 0; y < buf.height; y++) for (let x = 0; x < buf.width; x++) {
+      if (buf.attr[y * buf.width + x]! & INVERSE) {
+        expect(bounds.rows.some(r => y === r.y && x >= r.x && x < r.x + r.w)).toBe(true);
+      }
+    }
+    expect(buf.attr[2 * buf.width + 31]! & INVERSE).toBe(0); // right border
+    expect(buf.attr[3 * buf.width + 0]! & INVERSE).toBe(0); // outside the empty row
+  }
+});
+
+test("bubble drags clamp outside endpoints and preserve whole wide graphemes", () => {
+  const chat = new ChatView();
+  chat.add({ role: "user", text: "aＨ👨‍👩‍👧e\u0301\nlast" });
+  const buf = new CellBuffer(50, 12);
+  chat.render(buf, { x: 2, y: 1, w: 30, h: 10 }, "");
+  const bounds = chat.selectionBoundsAt(28, 2)!;
+  const first = bounds.rows[0]!, last = bounds.rows.at(-1)!;
+  const s = new Selection();
+  s.press({ x: first.x + 2, y: first.y }, bounds); // second cell of the wide letter
+  s.release({ x: 49, y: 11 });
+  expect(s.text(buf)).toBe("Ｈ👨‍👩‍👧e\u0301\nlast");
+  s.press({ x: last.x + last.w - 1, y: last.y }, bounds);
+  s.release({ x: 0, y: 0 });
+  expect(s.text(buf)).toBe("aＨ👨‍👩‍👧e\u0301\nlast");
+});
+
+test("bubble bounds follow clipped and wrapped layouts inside the chat pane", () => {
+  for (const w of [30, 18]) for (const h of [3, 12]) {
+    const chat = new ChatView();
+    chat.add({ role: "user", text: "ＨＥＬＬＯＷＯＲＬＤ！\nsecond line" });
+    const buf = new CellBuffer(60, 20);
+    chat.render(buf, { x: 3, y: 2, w, h }, "");
+    const bounds = chat.selectionBoundsAt(3 + w - 2, 3)!;
+    expect(bounds.rows.length).toBeGreaterThan(0);
+    const s = new Selection();
+    s.press(bounds.rows[0]!, bounds);
+    s.release({ x: 59, y: 19 });
+    expect(s.text(buf)).not.toMatch(/[│╭╮╰╯─]/);
+    for (const row of bounds.rows) {
+      expect(row.y).toBeGreaterThanOrEqual(2);
+      expect(row.y).toBeLessThan(2 + h);
+      expect(row.x).toBeGreaterThanOrEqual(3);
+      expect(row.x + row.w).toBeLessThanOrEqual(3 + w - 2);
+    }
+  }
+});
+
+test("bubble selections survive animation but expire when their layout moves or is hidden", () => {
+  const chat = new ChatView();
+  chat.add({ role: "user", text: "one\ntwo" });
+  const buf = new CellBuffer(50, 12);
+  const rect = { x: 2, y: 1, w: 30, h: 10 };
+  chat.render(buf, rect, "", 0);
+  const select = () => {
+    const bounds = chat.selectionBoundsAt(28, 2)!;
+    const s = new Selection();
+    s.press(bounds.rows[0]!, bounds);
+    s.release({ x: 49, y: 11 });
+    return s;
+  };
+  const validate = (s: Selection) => s.validateBounds(p => chat.selectionBoundsAt(p.x, p.y));
+  const s = select();
+  chat.render(buf, rect, "", 1500);
+  validate(s);
+  expect(s.active).toBe(true);
+  chat.render(buf, { ...rect, w: 20 }, "");
+  validate(s);
+  expect(s.active).toBe(false);
+  chat.render(buf, rect, "");
+  const moving = select();
+  chat.add({ role: "assistant", text: Array.from({ length: 12 }, (_, i) => `streamed row ${i}`).join("\n") });
+  chat.render(buf, rect, "");
+  validate(moving);
+  expect(moving.active).toBe(false);
+  chat.scrollBy(100);
+  chat.render(buf, rect, "");
+  const hidden = select();
+  chat.resetInteractions();
+  validate(hidden);
+  expect(hidden.active).toBe(false);
+  expect(chat.selectionBoundsAt(28, 2)).toBeUndefined();
+});
 
 function screen(...rows: string[]): CellBuffer {
   const buf = new CellBuffer(12, rows.length);

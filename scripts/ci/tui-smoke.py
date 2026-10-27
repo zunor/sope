@@ -234,6 +234,29 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
         assert 'aaXaaaa' in screen.display[37], text()
         clear_draft()
 
+        # Sent multiline messages own their selection; it must not span the
+        # terminal's margins, the bubble frame, or the assistant's reply.
+        draft('bubble-first\n\nbubble-last')
+        os.write(fd, b'\r')
+        until('You said: bubble-first')
+        until('tip:', present=False)
+        first_y = next(y for y, line in enumerate(screen.display) if '│ bubble-first' in line)
+        last_y = next(y for y, line in enumerate(screen.display) if '│ bubble-last' in line)
+        text_x = screen.display[first_y].index('bubble-first')
+        for start, end in [((text_x, first_y), (111, 39)),
+                           ((text_x + len('bubble-last') - 1, last_y), (0, 0))]:
+            before = len(output)
+            drag(*start, *end)
+            until_copied('bubble-first\n\nbubble-last', before)
+            cells = [(text_x + x, y) for y, line in [(first_y, 'bubble-first'),
+                     (first_y + 1, ' '), (last_y, 'bubble-last')] for x in range(len(line))]
+            until_selected(cells)
+            allowed = set(cells)
+            for y in range(40):
+                for x in range(112):
+                    if (x, y) not in allowed:
+                        assert not screen.buffer[y][x].reverse, f'Selection escaped bubble at {(x, y)}\n{text()}'
+
         os.write(fd, b'/context\r')
         until('Context')
         (logs / 'tui-context.txt').write_text(text())
@@ -256,7 +279,7 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
             drain() # The application must be able to flush output before exiting.
         else:
             raise AssertionError(f'TUI did not exit\n{text()}')
-        print('PTY conversation, input copy and editable selections (shortcuts, whitespace, wide text, wraps, scrolling), /context, /effort and clean exit passed')
+        print('PTY conversation, bounded multiline bubble copy, input copy and editable selections (shortcuts, whitespace, wide text, wraps, scrolling), /context, /effort and clean exit passed')
     finally:
         (logs / 'tui-final.txt').write_text(text())
         if not reaped:

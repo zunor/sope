@@ -11,6 +11,7 @@ import { drawSummary, summaryWidth, TRANSCRIPT_SLOT, type Graphics } from "./cha
 import { contextRows, formatTokens, type ContextReport } from "./context";
 import { DiagramFrame, diagramSlice } from "./diagram";
 import { renderMarkdown, slice } from "./markdown";
+import type { SelectionBounds } from "./selection";
 import { formatElapsed } from "./status";
 import { wrapText } from "./wrap";
 
@@ -429,6 +430,7 @@ export class ChatView {
   #expanded = new WeakSet<Message>();
   #foldHits: Array<{ x0: number; x1: number; y: number; row: number; msg: Message; outputRow: number }> = [];
   #cardHits: Array<{ x0: number; x1: number; y: number; msg: Message }> = []; // change summaries on screen
+  #bubbleHits = new Map<Message, { hit: Rect; bounds: SelectionBounds }>();
   #pointer: { x: number; y: number } | null = null;
   #foldAnchor: { msg: Message; outputRow: number; row: number } | null = null;
   #breathingMessage: Message | null = null;
@@ -484,8 +486,16 @@ export class ChatView {
     this.#foldHits = [];
     this.#cardHits = [];
     this.#diagramHits = [];
+    this.#bubbleHits.clear();
     this.#pointer = null;
     this.hasVisibleAnimation = false;
+  }
+
+  /** Starting inside a user bubble selects only that message's visible text. */
+  selectionBoundsAt(x: number, y: number): SelectionBounds | undefined {
+    for (const { hit, bounds } of this.#bubbleHits.values()) {
+      if (bounds.rows.length && x >= hit.x && x < hit.x + hit.w && y >= hit.y && y < hit.y + hit.h) return bounds;
+    }
   }
 
   toggleAt(x: number, y: number): boolean {
@@ -661,6 +671,7 @@ export class ChatView {
     this.#foldHits = [];
     this.#cardHits = [];
     this.#diagramHits = [];
+    this.#bubbleHits.clear();
     this.hasVisibleAnimation = false;
     const latestUser = this.#messages.findLast((m) => m.role === "user") ?? null;
     if (latestUser !== this.#breathingMessage) {
@@ -776,6 +787,22 @@ export class ChatView {
         continue;
       }
       let x = r.x + GUTTER + (line.offset ?? 0);
+      if (msg?.role === "user") {
+        const width = Math.min(r.x + r.w - x, line.spans.reduce((n, span) => n + stringWidth(span.text), 0));
+        let bubble = this.#bubbleHits.get(msg);
+        if (!bubble) {
+          bubble = { hit: { x, y, w: width, h: 1 }, bounds: { id: msg, rows: [] } };
+          this.#bubbleHits.set(msg, bubble);
+        }
+        bubble.hit.h = y - bubble.hit.y + 1;
+        const src = line.src?.[0];
+        if (src) {
+          const textX = x + src.x;
+          const right = r.x + r.w - (row === r.h - 1 ? scrollLabel.length : 0);
+          const w = Math.min(right - textX, Math.max(1, stringWidth(src.text.slice(src.start, src.end))));
+          if (w > 0) bubble.bounds.rows.push({ x: textX, y, w });
+        }
+      }
       for (let i = 0; i < line.spans.length; i++) {
         const s = line.spans[i]!;
         const highlight = msg === hovered && (line.fold === "connector" ? i === 0 : line.fold === "control" && i === 1);
