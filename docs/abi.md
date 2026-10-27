@@ -276,14 +276,14 @@ Use `sope_agent_set_option(agent, key, value)`; `value == NULL` removes an optio
 | `image_model` | Model to switch to when the conversation contains images (for when `model` cannot process them) | Uses `model` |
 | `system` | System prompt | A short built-in prompt |
 | `max_rounds` | Maximum model calls per turn | `32` |
-| `openai.progress_timeout_ms` | Maximum silence in reasoning, text or tool argument progress; SSE keepalives do not reset it; retries share the request budget | `300000` |
+| `openai.progress_timeout_ms` | Maximum silence in reasoning, text or tool argument progress; SSE keepalives do not reset it; an explicit value applies before and after first progress | `300000` before first progress, then `60000` |
 | `openai.idle_timeout_ms` | Maximum silence between response chunks; first-byte wait is at most min(this value, 300000); retries share the request budget | `900000` |
 | `openai.max_retries` | Additional attempts per logical request (0 disables, maximum 20); timeouts allow at most three retries | `5` |
 | `openai.retry_delay_ms` | Initial exponential retry delay; jittered and capped at 10 seconds | `1000` |
 | `openai.request_timeout_ms` | Absolute time budget per model request, including all attempts and retry backoff | `1800000` |
 | `harness.max_calls` | All tool admissions per agent/user turn | `128` |
 | `harness.max_searches` | Native grep/glob admissions per agent/user turn | `16` |
-| `harness.max_repeats` | Identical read/program admissions or failed operation results before rejection | `2` |
+| `harness.max_repeats` | Identical read admissions, consecutive identical program admissions, or failed non-program results before rejection | `2` |
 | `cwd` | Working directory for built-in tools | Process's current directory |
 | `permissions` | `ask`: built-in tools requiring permission emit `PERMISSION` first; `allow`: execute immediately; `deny`: reject immediately | `ask` |
 | `subagents` | `off` hides the built-in `agent` tool | — |

@@ -205,6 +205,51 @@ static void test_failed_operation_retry_after_edit(void)
     sope__pending_free(p); sope_agent_free(a);
 }
 
+static void test_execution_repeats_are_consecutive(void)
+{
+    sope_agent_t *a = NULL;
+    CHECK(sope_agent_new(&a) == SOPE_OK);
+    const struct { const char *name, *input; int failed, blocked; } steps[] = {
+        {"bash", "{\"command\":\"start-service\"}", 0, 0},
+        {"bash", "{\"command\":\"start-service\",\"description\":\"again\"}", 0, 0},
+        {"bash_output", "{\"shell_id\":\"1\"}", 0, 0},
+        {"read", "{\"file_path\":\"config\"}", 0, 0},
+        {"bash", "{\"command\":\"start-service\"}", 0, 1},
+        /* An execution can change state even when its exit status is nonzero. */
+        {"bash", "{\"command\":\"repair-config; false\"}", 1, 0},
+        {"bash", "{\"command\":\"start-service\"}", 0, 0},
+        {"bash", "{\"command\":\"start-service\"}", 0, 0},
+        {"check", "{\"argv\":[\"repair-config\"]}", 0, 0},
+        {"bash", "{\"command\":\"start-service\"}", 0, 0},
+        {"bash", "{\"command\":\"start-service\"}", 0, 0},
+        {"bash", "{\"command\":\"start-service\"}", 0, 1},
+    };
+    for (size_t i = 0; i < sizeof steps / sizeof steps[0]; i++) {
+        pending_call *p = calloc(1, sizeof *p);
+        p->kind = PENDING_BUILTIN; p->name = sope__strdup(steps[i].name);
+        p->call_id = i + 1; p->turn_id = 1;
+        sope_tool_use u = {.name = p->name, .input = (char *)steps[i].input, .input_len = strlen(steps[i].input)};
+        CHECK(sope__harness_admit(a, p, &u));
+        CHECK(p->harness_blocked == steps[i].blocked);
+        if (!p->harness_blocked) p->is_error = steps[i].failed;
+        sope__harness_observe(a, p); sope__pending_free(p);
+        /* Compaction/reopen must retain both the guard and reopened allowance. */
+        char *saved = sope__harness_json(a);
+        CHECK(saved && sope__harness_load(a, saved)); free(saved);
+    }
+    CHECK(!sope__harness_exhausted(a));
+    /* Alternating programs must not bypass the overall tool-call budget. */
+    CHECK(sope_agent_set_option(a, "harness.max_calls", "12") == SOPE_OK);
+    pending_call *p = calloc(1, sizeof *p);
+    p->name = sope__strdup("bash"); p->call_id = 13; p->turn_id = 1;
+    sope_tool_use u = {.name = "bash", .input = "{\"command\":\"other\"}"};
+    u.input_len = strlen(u.input);
+    CHECK(sope__harness_admit(a, p, &u) && p->harness_blocked);
+    CHECK(strstr(p->content, "tool-call budget"));
+    CHECK(sope__harness_exhausted(a));
+    sope__pending_free(p); sope_agent_free(a);
+}
+
 static void test_work_state_survives_history_replacement(void)
 {
     sope_agent_t *a=NULL,*b=NULL;
@@ -241,6 +286,7 @@ int main(void)
     test_request_accounting();
     test_harness_checkpoint();
     test_failed_operation_retry_after_edit();
+    test_execution_repeats_are_consecutive();
     test_work_state_survives_history_replacement();
     return failures ? 1 : 0;
 }

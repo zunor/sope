@@ -115,19 +115,34 @@ int sope__harness_admit(sope_agent_t *a, pending_call *p, const sope_tool_use *u
     if (h->blocked >= 3) why = "turn execution circuit is open";
     else if (++h->calls > limit(a, "harness.max_calls", 128)) why = "tool-call budget exhausted";
     else if (search && ++h->searches > limit(a, "harness.max_searches", 16)) why = "search budget exhausted";
-    else if (!native_read && !exempt && op && (op->failures >= repeats || (readonly(u->name) && op->reads >= repeats) || (execution && op->runs >= repeats)))
+    else if (!native_read && !exempt && op && ((!execution && op->failures >= repeats) || (readonly(u->name) && op->reads >= repeats) || (execution && op->runs >= repeats)))
         why = "repeated operation budget exhausted";
     if (why) {
         sope_buf b = {0};
         sope__buf_appendf(&b, "harness: %s; operation did not run. Prior admitted call: #%" PRIu64 ". "
             "Use existing evidence, change the operation, or report the limitation. Three blocked calls end this turn. "
-            "A new user turn opens a new budget; old output is not asserted to be current.", why, op ? op->last : 0);
+            "This is still the same user turn; another model response does not reset the budget. "
+            "A new user input opens a new budget; old output is not asserted to be current.", why, op ? op->last : 0);
         p->content = b.ptr; p->len = b.len; p->is_error = 1; p->harness_blocked = 1;
         h->blocked++;
         return b.oom ? 0 : 1;
     }
     if (op && readonly(u->name) && !native_read) op->reads++;
-    if (op && execution) op->runs++;
+    if (execution) {
+        /* Programs observe mutable external state. A different execution may
+         * repair that state even when it exits nonzero (e.g. printf followed
+         * by a failing readiness probe). Bound consecutive identical
+         * executions, not all uses of a command during a long user turn.
+         * Reads/polling alone do not reopen this allowance. Aggregate call
+         * limits still bound alternating operations; no result is cached. */
+        for (size_t i = 0; i < KEYS; i++) {
+            struct operation *other = &h->ops[i];
+            if (other != op && other->key &&
+                (!strncmp(other->key, "bash:", 5) || !strncmp(other->key, "check:", 6)))
+                other->runs = other->failures = 0;
+        }
+        if (op) op->runs++;
+    }
     if (op && !native_read) op->last = p->call_id;
     if (!strcmp(u->name, "bash")) h->shells++;
     return 1;

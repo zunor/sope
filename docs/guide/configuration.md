@@ -92,6 +92,19 @@ The thirty-minute logical request deadline includes every retry and backoff.
 Explicit shorter idle and request limits remain supported; cancellation interrupts
 waiting. Web fetches retain their separate sixty-second transport limit.
 
-`openai.progress_timeout_ms` defaults to `300000` (five minutes) without new reasoning,
-text or tool arguments. Heartbeats and empty deltas do not extend this limit.
-The chunk idle and overall request deadlines still apply; retries share the latter.
+The progress deadline allows five minutes before the first reasoning, text or tool
+argument arrives, then defaults to one minute without further progress. This
+recovers stranded partial responses sooner while preserving initial reasoning time.
+Set `openai.progress_timeout_ms` to override both phases for a slower provider.
+Heartbeats and empty deltas do not extend this limit. The chunk idle and overall
+request deadlines still apply; retries share the latter. Retry traces include
+`idle_ms`, `progress_idle_ms` and `progress_limit_ms` to distinguish wire silence
+from a stream that sends only keepalives. Transport resets and EOF recover as
+soon as the HTTP client reports them, without waiting for these deadlines.
+
+Program repetition guards apply to consecutive identical `bash`/`check`
+admissions. Admitting a different program reopens the previous program's repeat
+allowance, even if it exits nonzero: shell commands can change configuration before
+a failing probe. Reads and background polling alone do not reopen it. This does
+not assert that any previous result is still valid. The overall tool-call limit
+continues to bound alternating operations, and three blocked calls end the turn.

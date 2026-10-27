@@ -36,7 +36,7 @@ typedef struct {
     uint32_t jitter;
     size_t thinking_bytes;
     int64_t deadline_ms, last_data_ms, idle_ms;
-    int64_t last_progress_ms, progress_timeout_ms;
+    int64_t last_progress_ms, progress_timeout_ms, initial_progress_timeout_ms;
     size_t semantic_bytes;
     size_t received;
     int first_byte;
@@ -310,6 +310,11 @@ static int64_t trace_now(void)
     return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
+static int64_t progress_allowance(const oa_state *s)
+{
+    return s->semantic_bytes ? s->progress_timeout_ms : s->initial_progress_timeout_ms;
+}
+
 static void trace_request(oa_state *s, const char *phase)
 {
     size_t tool_calls = 0, tool_bytes = 0;
@@ -322,7 +327,8 @@ static void trace_request(oa_state *s, const char *phase)
         "\"status\":%ld,\"elapsed_ms\":%lld,\"request_bytes\":%zu,\"received_bytes\":%zu,"
         "\"complete\":%d,\"failed\":%d,\"finish_state\":%d,\"stream_done\":%d,\"failure_kind\":%d,\"delay_ms\":%d,\"remaining_ms\":%lld,\"logical_ms\":%lld,"
         "\"text_bytes\":%zu,\"thinking_bytes\":%zu,\"tool_calls\":%zu,\"tool_argument_bytes\":%zu,"
-        "\"max_tokens\":%llu,\"next_max_tokens\":%llu,\"max_tokens_ceiling\":%llu}",
+        "\"max_tokens\":%llu,\"next_max_tokens\":%llu,\"max_tokens_ceiling\":%llu,"
+        "\"idle_ms\":%lld,\"progress_idle_ms\":%lld,\"progress_limit_ms\":%lld}",
         phase, (unsigned long long)sope__call_round(s->call), sope__call_is_compaction(s->call),
         s->attempts, s->status, (long long)(trace_now() - s->started_ms), s->body.len,
         s->received, s->call->complete, s->call->failed, s->finish, s->saw_done, s->failure, s->delay_ms,
@@ -330,7 +336,9 @@ static void trace_request(oa_state *s, const char *phase)
         (long long)(trace_now() - s->request_started_ms), s->call->text.len,
         s->thinking_bytes, tool_calls, tool_bytes,
         (unsigned long long)sope__call_max_tokens(s->call), (unsigned long long)s->next_output_tokens,
-        (unsigned long long)(s->call->compaction ? s->call->agent->turn.summary_ceiling : s->call->agent->turn.output_ceiling));
+        (unsigned long long)(s->call->compaction ? s->call->agent->turn.summary_ceiling : s->call->agent->turn.output_ceiling),
+        (long long)(trace_now() - s->last_data_ms), (long long)(trace_now() - s->last_progress_ms),
+        (long long)progress_allowance(s));
 }
 
 /* Deadlines bound one logical model request, including retry backoff. A new
@@ -381,7 +389,7 @@ static sope_step wait_http(sope_call *c, oa_state *s)
     int64_t allowance = !s->first_byte && s->idle_ms > 300000 ? 300000 : s->idle_ms;
     int64_t total = s->deadline_ms - now, idle = s->last_data_ms + allowance - now;
     if (total <= 0) return timed_out(c, s, "request");
-    int64_t progress = s->last_progress_ms + s->progress_timeout_ms - now;
+    int64_t progress = s->last_progress_ms + progress_allowance(s) - now;
     if (idle <= 0 || progress <= 0) {
         s->failure = RETRY_TIMEOUT;
         int permanent_http = (s->status >= 400 && s->status < 500 && s->status != 408 && s->status != 429) || s->status == 501 || s->status == 505;
@@ -510,7 +518,10 @@ static void *oa_start(sope_call *c)
                    (unsigned long long)sope__call_round(c), s->url.ptr, model, sope__call_tool_count(c),
                    s->body.len);
     s->idle_ms = timeout_option(c, "openai.idle_timeout_ms", 900000);
-    s->progress_timeout_ms = timeout_option(c, "openai.progress_timeout_ms", 300000);
+    /* Preserve startup/initial reasoning time, but recover a stranded partial
+     * stream sooner. An explicit host limit applies in both phases. */
+    s->initial_progress_timeout_ms = timeout_option(c, "openai.progress_timeout_ms", 300000);
+    s->progress_timeout_ms = timeout_option(c, "openai.progress_timeout_ms", 60000);
     s->request_started_ms = trace_now();
     s->deadline_ms = s->request_started_ms + timeout_option(c, "openai.request_timeout_ms", 1800000);
     s->retry_delay_ms = (int)timeout_option(c, "openai.retry_delay_ms", 1000);

@@ -4,7 +4,9 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
-- Bound streams that emit only heartbeats or stop making model progress with a separate five-minute progress deadline; continuous reasoning, text and tool arguments keep the request alive. Preserve excluded candidates and evidence references in compaction handoffs.
+- Bound streams that emit only heartbeats or stop making model progress with a five-minute allowance before initial progress and a one-minute deadline after progress begins; continuous reasoning, text and tool arguments keep the request alive. Preserve excluded candidates and evidence references in compaction handoffs.
+
+- Limit identical program repeats consecutively so a different shell command can repair state and reopen the retry allowance, even if its final probe fails. Keep aggregate tool-call limits and clarify that another model response does not start a new user turn.
 
 - Accommodate slow reasoning providers with five-minute first-byte and fifteen-minute chunk-idle limits, within a thirty-minute logical request budget; remove the conflicting curl low-speed cutoff for model streams.
 

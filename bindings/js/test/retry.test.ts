@@ -465,7 +465,7 @@ test("a recovery attempt timing out keeps the last validation reason terminal", 
   expect(error?.type === "error" && error.message).toContain("arguments are not valid JSON; recovery request deadline exceeded");
 });
 
- test("a stalled partial tool retries on progress timeout without dispatch or replay", async () => {
+test("a stalled partial tool retries on progress timeout without dispatch or replay", async () => {
   const partial = chunk({reasoning_content:"discard-this-thought"}) + chunk({tool_calls:[{index:0,id:"stalled",function:{name:"echo",arguments:'{"input":"unfinished'}}]});
   const r = await run(n => n === 1 ? new Response(new ReadableStream({start(c) {c.enqueue(new TextEncoder().encode(partial));}})) : success(),
     {"openai.progress_timeout_ms":"80", "openai.idle_timeout_ms":"1000"});
@@ -474,4 +474,39 @@ test("a recovery attempt timing out keeps the last validation reason terminal", 
   expect(r.history).not.toContain("unfinished");
   expect(r.history).not.toContain("discard-this-thought");
   expect(r.history).toContain("recovered");
- });
+});
+
+for (const override of [undefined, "1234"]) test(`startup and partial-stream progress limits (override: ${override})`, async () => {
+  const r = await run(() => success(), override ? {"openai.progress_timeout_ms":override} : {});
+  const traces = r.events.filter((e): e is Extract<SopeEvent, {type:"log"}> => e.type === "log" && e.message.startsWith('{"event":"provider.'))
+    .map(e => JSON.parse(e.message));
+  expect(traces.find(e => e.event === "provider.start").progress_limit_ms).toBe(override ? 1234 : 300000);
+  expect(traces.find(e => e.event === "provider.end").progress_limit_ms).toBe(override ? 1234 : 60000);
+  expect(r.attempts).toBe(1);
+});
+
+test("heartbeats after partial output cannot postpone recovery", async () => {
+  const encoder = new TextEncoder();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  try {
+    const r = await run(n => n === 1 ? new Response(new ReadableStream({
+      start(c) {
+        c.enqueue(encoder.encode(chunk({content:"uncommitted partial output"})));
+        timer = setInterval(() => c.enqueue(encoder.encode(": heartbeat\n\n")), 10);
+      },
+      cancel() { clearInterval(timer); },
+    })) : success(), {"openai.progress_timeout_ms":"100", "openai.idle_timeout_ms":"2000"});
+    expect(r.attempts).toBe(2);
+    expect(r.times[1]! - r.times[0]!).toBeLessThan(1500);
+    expect(r.events.at(-1)).toMatchObject({stopReason:"end_turn"});
+    expect(r.history).not.toContain("uncommitted partial output");
+    const trace = r.events.find(e => e.type === "log" && e.message.includes('"event":"provider.retry"'));
+    expect(trace?.type).toBe("log");
+    if (trace?.type === "log") {
+      const info = JSON.parse(trace.message);
+      expect(info.progress_idle_ms).toBeGreaterThanOrEqual(100);
+      expect(info.progress_limit_ms).toBe(100);
+      expect(info.idle_ms).toBeLessThan(info.progress_idle_ms);
+    }
+  } finally { clearInterval(timer); }
+});

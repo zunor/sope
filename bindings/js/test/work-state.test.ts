@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync, statSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync, readFileSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type SopeEvent } from "../src";
@@ -30,6 +30,31 @@ async function drain(a:Agent, tool?:(e:Extract<SopeEvent,{type:"tool_call"}>)=>v
  while(Date.now()<until){const e=a.poll(0);if(!e){await Bun.sleep(1);continue;}events.push(e);if(e.type==="tool_call")tool?.(e);if(e.type==="turn_end"&&!e.agentId)return events;}
  throw new Error("turn timed out");
 }
+
+test("a shell config repair reopens the same launch command in a durable turn", async () => {
+ const dir=mkdtempSync(join(tmpdir(),"sope-launch-repair-"));dirs.push(dir);
+ writeFileSync(join(dir,"config"),"bad");
+ const a=create(join(dir,"session"),{cwd:dir});
+ const launch={name:"bash",input:{command:"printf 'attempt\\n' >> attempts; test \"$(cat config)\" = good"}};
+ let round=0;
+ respond=()=>{
+  switch(++round){
+   case 1:case 2:return tools(launch);
+   // Mirrors the real failure: config write succeeded but the last probe did not.
+   case 3:return tools({name:"bash",input:{command:"printf good > config; false"}});
+   case 4:return tools(launch);
+   default:return text("Service check recovered after config repair.");
+  }
+ };
+ a.send("Repair configuration and retry the same service check.");
+ const events=await drain(a);
+ expect(events.at(-1)).toMatchObject({stopReason:"end_turn"});
+ const results=events.filter(e=>e.type==="tool_end");
+ expect(results.map(e=>e.isError)).toEqual([true,true,true,false]);
+ expect(readFileSync(join(dir,"attempts"),"utf8")).toBe("attempt\nattempt\nattempt\n");
+ expect(a.history()).not.toContain("budget exhausted");
+ expect(round).toBe(5);
+});
 
 test("a lossy summary cannot replace current intent, task status or execution outcomes",async()=>{
  const a=create(undefined,{"compact.threshold":"14000","compact.retain_tokens":"0"});
