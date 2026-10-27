@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise the real terminal with a mock model and bounded waits (needs pyte)."""
+import base64
 import codecs
 import fcntl
 import os
@@ -17,16 +18,25 @@ import pyte
 logs = Path('build-ci')
 logs.mkdir(exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
+    # Observe OSC 52 without changing the developer's desktop clipboard.
+    clipboard_bin = Path(scratch) / 'bin'
+    clipboard_bin.mkdir()
+    for command in ('pbcopy', 'wl-copy', 'xclip', 'xsel'):
+        stub = clipboard_bin / command
+        stub.write_text('#!/bin/sh\ncat > /dev/null\n')
+        stub.chmod(0o755)
     pid, fd = pty.fork()
     if pid == 0:
         os.environ.update(TERM='xterm-256color', SOPE_GRAPHICS='0', SOPE_API_KEY='', SOPE_MOUSE='1',
-                          SOPE_DB=f'{scratch}/session.db', XDG_CONFIG_HOME=f'{scratch}/config')
+                          SOPE_DB=f'{scratch}/session.db', XDG_CONFIG_HOME=f'{scratch}/config',
+                          PATH=f'{clipboard_bin}{os.pathsep}{os.environ["PATH"]}')
         os.execl(shutil.which('bun'), 'bun', 'tui/src/main.ts', '--provider', 'mock',
                  '--effort', 'medium', 'hello CI')
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 112, 0, 0))
     screen = pyte.Screen(112, 40)
     stream = pyte.Stream(screen)
     decoder = codecs.getincrementaldecoder('utf8')('replace')
+    output = bytearray()
     reaped = False
 
     def text():
@@ -35,7 +45,9 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
     def drain():
         if select.select([fd], [], [], 0.1)[0]:
             try:
-                stream.feed(decoder.decode(os.read(fd, 65536)))
+                data = os.read(fd, 65536)
+                output.extend(data)
+                stream.feed(decoder.decode(data))
             except OSError:
                 pass # Linux reports EIO when the PTY slave closes.
 
@@ -74,6 +86,15 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
 
     def draft(value):
         os.write(fd, b'\x1b[200~' + value.encode() + b'\x1b[201~')
+
+    def until_copied(value, after):
+        expected = b'\x1b]52;c;' + base64.b64encode(value.encode()) + b'\x07'
+        end = time.monotonic() + 5
+        while time.monotonic() < end:
+            if expected in output[after:]:
+                return
+            drain()
+        raise AssertionError(f'Expected clipboard text {value!r}\n{text()}')
 
     def clear_draft():
         os.write(fd, b'\x03')
@@ -125,9 +146,18 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
         for start, end, key in [(7, 10, b'\x7f'), (10, 7, b'\x1b[3~')]:
             draft('abcdefg')
             until('abcdefg')
+            before = len(output)
             drag(start, 37, end, 37)
+            until_copied('cde', before)
             until_selected([(x, 37) for x in range(7, 10)])
             assert not screen.buffer[37][6].reverse and not screen.buffer[37][10].reverse
+            # Copy shortcuts preserve both draft and range, so deletion still works.
+            for shortcut in (b'\x03', b'\x1b[99;9u', b'\x1b[99;6u'):
+                before = len(output)
+                os.write(fd, shortcut)
+                until_copied('cde', before)
+                until_selected([(x, 37) for x in range(7, 10)])
+                assert 'abcdefg' in text()
             os.write(fd, key)
             until('abfg')
             until_cursor(7, 37)
@@ -135,7 +165,9 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
 
         draft('abＨＩcd')
         until('abＨＩcd')
+        before = len(output)
         drag(7, 37, 11, 37)
+        until_copied('ＨＩ', before)
         until_selected([(x, 37) for x in range(7, 11)])
         draft('Z') # Pasting replaces the selected wide characters.
         until('abZcd')
@@ -152,7 +184,9 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
 
         draft('abc\n\nxyz')
         until('xyz')
+        before = len(output)
         drag(6, 35, 7, 37)
+        until_copied('bc\n\nxy', before)
         until_selected([(6, 35), (5, 36), (6, 37)])
         os.write(fd, b'\x1b[3~')
         until('› az')
@@ -160,10 +194,21 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
 
         draft('a' * 104 + 'tail')
         until('tail')
+        before = len(output)
         drag(107, 36, 7, 37)
+        until_copied('aata', before)
         until_selected([(107, 36), (108, 36), (5, 37), (6, 37)])
         os.write(fd, b'\x7f')
         until('aail')
+        clear_draft()
+
+        draft('a   b')
+        until('a   b')
+        before = len(output)
+        drag(6, 37, 9, 37)
+        until_copied('   ', before)
+        os.write(fd, b'\x7f')
+        until('› ab')
         clear_draft()
 
         draft('\n'.join(f'line-{i:02}' for i in range(12)))
@@ -211,7 +256,7 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
             drain() # The application must be able to flush output before exiting.
         else:
             raise AssertionError(f'TUI did not exit\n{text()}')
-        print('PTY conversation, input clicks and editable selections (wide text, wraps, scrolling), /context, /effort and clean exit passed')
+        print('PTY conversation, input copy and editable selections (shortcuts, whitespace, wide text, wraps, scrolling), /context, /effort and clean exit passed')
     finally:
         (logs / 'tui-final.txt').write_text(text())
         if not reaped:

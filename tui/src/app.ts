@@ -423,10 +423,14 @@ export class App {
           .finally(() => this.#scheduleRender());
         return;
       case "ctrl+c":
+        if (e.selection) return void this.#copyInputSelection();
         if (s.busy) return s.cancel();
         if (e.text) return e.clear();
         void this.quit();
         return;
+      case "super+c":
+      case "ctrl+shift+c":
+        return void this.#copyInputSelection();
       case "ctrl+d":
         if (!e.text) void this.quit();
         else e.deleteForward();
@@ -475,7 +479,10 @@ export class App {
     if (this.#inputDrag && !this.#list && !this.#docked) {
       if ((ev.action === "drag" || ev.action === "release") && ev.button === 0) {
         this.#moveInputPointer(this.#inputDrag, ev.x, ev.y, true);
-        if (ev.action === "release") this.#inputDrag = null;
+        if (ev.action === "release") {
+          this.#inputDrag = null;
+          this.#copyInputSelection();
+        }
         return;
       }
     }
@@ -600,6 +607,18 @@ export class App {
     const screen = this.#renderer.screen;
     const text = screen ? this.#selection.text(screen) : "";
     if (!text.trim()) return;
+    this.#copyText(text);
+  }
+
+  #copyInputSelection(): void {
+    const editor = this.#session.editor;
+    const range = editor.selection;
+    // Read the buffer, not rendered rows: preserve whitespace and hard newlines,
+    // omit soft wraps, and leave the selection available for further editing.
+    if (range) this.#copyText(editor.text.slice(...range));
+  }
+
+  #copyText(text: string): void {
     copyToClipboard(text, (s) => this.#term.write(s));
     this.#flash(`copied ${[...text].length} characters`);
   }
