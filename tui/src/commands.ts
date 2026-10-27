@@ -85,6 +85,7 @@ export const COMMANDS: Command[] = [
   { name: "find", args: "[text]", description: "Search this conversation; n/N step through the hits", keys: "ctrl+f", run: (h, args) => h.openSearch(args.join(" ")) },
   { name: "tasks", description: "Show subagents and background shells; stop one", keys: "↓ on an empty input", run: (h) => h.openTasks() },
   { name: "context", description: "Show what fills the model's context window", run: (h) => h.session.showContext() },
+  { name: "evidence", description: "Show retained execution records without asking the model", run: (h, args) => args.length ? fail(h, "usage: /evidence") : h.session.showEvidence() },
   { name: "compact", args: "[focus]", description: "Summarize the conversation to free context (also automatic)", run: (h, args) => h.session.compact(args.join(" ")) },
   { name: "recover", args: "[resume|resolve <id> <ok|error> <outcome>]", description: "Inspect and resume an interrupted task after verifying tool outcomes", run: (h, args) => h.session.recover(args) },
   { name: "thinking", description: "Show or hide the model's full reasoning", run: (h) => info(h, `full reasoning ${h.toggleThinking() ? "shown" : "collapsed"}`) },

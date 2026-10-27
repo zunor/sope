@@ -257,6 +257,18 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
                     if (x, y) not in allowed:
                         assert not screen.buffer[y][x].reverse, f'Selection escaped bubble at {(x, y)}\n{text()}'
 
+        draft('!bash {"command":"printf evidence-pty"}')
+        os.write(fd, b'\r')
+        until('[exit code 0]')
+        until('tip:', present=False)
+        assert 'Execution evidence' not in text(), text()
+        os.write(fd, b'/evidence\r')
+        until('Execution evidence')
+        until('1 retained executions')
+        until('process completed (exit 0)')
+        until('Output archive:')
+        (logs / 'tui-evidence.txt').write_text(text())
+
         os.write(fd, b'/context\r')
         until('Context')
         (logs / 'tui-context.txt').write_text(text())

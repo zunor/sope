@@ -217,6 +217,30 @@ export function shutdown(): void {
   check(C().sope_shutdown(), "sope_shutdown");
 }
 
+export interface ExecutionReceipt {
+  version: number;
+  session_id: string;
+  agent_id: number;
+  call_id: number;
+  turn_id: number;
+  tool: string;
+  input: Record<string, unknown> | null;
+  input_omitted?: boolean;
+  cwd: string;
+  exit_code: number;
+  outcome: string;
+  test_verdict: string;
+  output_path: string;
+}
+
+export interface ExecutionEvidence {
+  session_id: string;
+  agent_id: number;
+  retention: number;
+  scope: string;
+  receipts: ExecutionReceipt[];
+}
+
 export class Agent {
   #handle: Pointer | null;
   readonly #owned: boolean;
@@ -402,6 +426,13 @@ export class Agent {
     const len = new BigUint64Array(1);
     check(C().sope_agent_context(this.#ptr(), ptr, len), "sope_agent_context");
     return JSON.parse(readString(Number(ptr[0]), Number(len[0]))) as ContextUsage;
+  }
+
+  /** Snapshot of retained executions, without a model request or tool execution. */
+  evidence(): ExecutionEvidence {
+    const ptr = new BigUint64Array(1), len = new BigUint64Array(1);
+    check(C().sope_agent_evidence(this.#ptr(), ptr, len), "sope_agent_evidence");
+    return JSON.parse(readString(Number(ptr[0]), Number(len[0]))) as ExecutionEvidence;
   }
 
   /**

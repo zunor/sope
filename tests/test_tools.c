@@ -636,7 +636,12 @@ static void test_check_evidence(void)
     run(a, "!check {\"argv\":[\"printf\",\"%s\",\"literal ' $HOME; touch forbidden-check\"]}", &log, NO_ANSWER, NULL);
     CHECK(log.n == 1 && !log.is_error[0] && strstr(log.result[0], "literal ' $HOME; touch forbidden-check"));
     CHECK(slurp("forbidden-check") == NULL);
-    CHECK(strstr(log.result[0], "\"test_verdict\":\"unverified\"") && strstr(log.text, "Execution evidence"));
+    CHECK(strstr(log.result[0], "\"test_verdict\":\"unverified\"") && !strstr(log.text, "Execution evidence"));
+    const char *json; size_t len;
+    CHECK(sope_agent_evidence(NULL, &json, &len) == SOPE_EINVAL);
+    CHECK(sope_agent_evidence(a, NULL, &len) == SOPE_EINVAL);
+    CHECK(sope_agent_evidence(a, &json, &len) == SOPE_OK && len == strlen(json));
+    CHECK(strstr(json, "\"receipts\":[{") && strstr(json, "process_exited_zero"));
     run(a, "!check {\"argv\":[\"false\"]}", &log, NO_ANSWER, NULL);
     CHECK(log.is_error[0] && strstr(log.result[0], "\"exit_code\":1") && strstr(log.result[0], "process_failed"));
     run(a, "!check {\"argv\":[\"sleep\",\"10\"],\"timeout\":20}", &log, NO_ANSWER, NULL);

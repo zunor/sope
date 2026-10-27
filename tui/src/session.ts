@@ -23,6 +23,7 @@ import { palette } from "./theme";
 import { ChatView, type Message, type Step } from "./ui/chat";
 import { contextSummary } from "./ui/context";
 import { Editor } from "./ui/editor";
+import { formatEvidence } from "./ui/evidence";
 import { EventLog } from "./ui/eventlog";
 import { TokenRate } from "./ui/status";
 
@@ -363,6 +364,17 @@ export class Session {
     this.trace.call("sope_agent_context", `${usage.used} tokens`);
     const report = { ...usage, model: this.model };
     this.chat.add({ role: "context", text: contextSummary(report), context: report });
+  }
+
+  /** A local read-only report; this never becomes a message in model history. */
+  showEvidence(): void {
+    if (!this.#bridge && !this.#id) {
+      this.chat.add({ role: "info", text: "Execution evidence\nNo completed native executions recorded for this session." });
+      return;
+    }
+    const evidence = this.#agent.evidence();
+    this.trace.call("sope_agent_evidence", `${evidence.receipts.length} records`);
+    this.chat.add({ role: "info", text: formatEvidence(evidence) });
   }
 
   /** What the first request of a new session would hold. */

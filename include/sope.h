@@ -357,6 +357,15 @@ SOPE_API int sope_agent_history(sope_agent_t *agent, const char **json, size_t *
  * long. */
 SOPE_API int sope_agent_context(sope_agent_t *agent, const char **json, size_t *len);
 
+/* Read-only execution ledger, available even while a turn runs. JSON contains
+ * session_id, agent_id, retention (32), scope and receipts (oldest first).
+ * Receipts describe completed native check/foreground bash executions, including
+ * call_id, turn_id, tool, input, cwd, exit_code, outcome and output_path.
+ * Exit zero is not proof of test success. No model request or tool is executed.
+ * Shares history()'s returned-string storage. Retained across compaction/reopen;
+ * reset takes effect at the next turn, as for conversation history. */
+SOPE_API int sope_agent_evidence(sope_agent_t *agent, const char **json, size_t *len);
+
 /* Replaces the conversation history with one from sope_agent_history, to
  * resume a saved conversation. Between turns only (SOPE_EBUSY otherwise);
  * SOPE_EINVAL if json is not such an array. Unanswered tool uses at the end

@@ -321,6 +321,30 @@ type Status struct {
 	Sealed       bool   `json:"sealed"`
 }
 
+type ExecutionReceipt struct {
+	Version      int             `json:"version"`
+	SessionID    string          `json:"session_id"`
+	AgentID      uint64          `json:"agent_id"`
+	CallID       uint64          `json:"call_id"`
+	TurnID       uint64          `json:"turn_id"`
+	Tool         string          `json:"tool"`
+	Input        json.RawMessage `json:"input"`
+	InputOmitted bool            `json:"input_omitted,omitempty"`
+	Cwd          string          `json:"cwd"`
+	ExitCode     int             `json:"exit_code"`
+	Outcome      string          `json:"outcome"`
+	TestVerdict  string          `json:"test_verdict"`
+	OutputPath   string          `json:"output_path"`
+}
+
+type ExecutionEvidence struct {
+	SessionID string             `json:"session_id"`
+	AgentID   uint64             `json:"agent_id"`
+	Retention int                `json:"retention"`
+	Scope     string             `json:"scope"`
+	Receipts  []ExecutionReceipt `json:"receipts"`
+}
+
 type DelegationState struct {
 	HostReconciledCallIDs []uint64 `json:"host_reconciled_call_ids"`
 	AgentID               uint64   `json:"agent_id"`
@@ -459,6 +483,8 @@ func (a *Agent) queryContext(ctx context.Context, kind int, id uint64, limit uin
 			rc = C.sope_agent_history(p, &raw, &size)
 		case 5:
 			rc = C.sope_agent_context(p, &raw, &size)
+		case 6:
+			rc = C.sope_agent_evidence(p, &raw, &size)
 		}
 		if err := result(rc); err != nil {
 			return err
@@ -467,6 +493,13 @@ func (a *Agent) queryContext(ctx context.Context, kind int, id uint64, limit uin
 	})
 }
 func (a *Agent) Status() (Status, error) { var v Status; err := a.query(0, 0, 0, &v); return v, err }
+
+// Evidence reads retained process observations without starting a model request or tool.
+func (a *Agent) Evidence() (ExecutionEvidence, error) {
+	var v ExecutionEvidence
+	err := a.query(6, 0, 0, &v)
+	return v, err
+}
 func (a *Agent) Recovery() (Recovery, error) {
 	var v Recovery
 	err := a.query(1, 0, 0, &v)

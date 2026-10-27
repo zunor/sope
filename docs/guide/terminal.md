@@ -26,6 +26,15 @@ The status bar's pixel meteor travels around a small square once every 3 seconds
 
 Typing `/` opens a command list above the input box; keep typing to filter it. Use `↑`/`↓` to select, `Enter` to use a command, `Tab` to complete it without executing, and `Esc` to dismiss the list. Mouse selection and scrolling are also supported. Commands that require arguments are first completed into the input box.
 
+`/evidence` shows up to 32 retained native execution records for this session:
+commands/arguments, working directories, exit codes, failure or timeout outcomes,
+and output archive paths. It reads local state without asking the model or
+executing any commands, and its display does not enter the model's history.
+Records survive compaction and session reopen. Exit zero means the process
+completed, not that test assertions or the current source have been verified.
+Ordinary replies no longer append an execution-evidence footer. Old saved
+messages retain their original text.
+
 ## Working directory and missing files
 
 Each session captures its absolute working directory when it is created. Restored

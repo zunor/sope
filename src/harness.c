@@ -327,30 +327,36 @@ int sope__harness_load(sope_agent_t *a, const char *text)
     sope__json_free(v);return ok;
 }
 
-void sope__harness_evidence(sope_agent_t *a, sope_buf *out, int summary)
+void sope__harness_evidence(sope_agent_t *a, sope_buf *out)
 {
-    struct sope_harness *h=a->harness;
-    if(summary){
-        if(!h || (!h->count && !h->shells))return;
-        sope__buf_appends(out,"\n\nExecution evidence — recorded by sope (historical observations, not proof of correctness):\n");
-        if(!h->count){sope__buf_appends(out,"No structured checks recorded. Shell completion alone does not establish test success.\n");return;}
-        sope__buf_appendf(out,"Session %s; agent %" PRIu64 ". Call IDs from other runs are not these receipts.\n", a->root->session_id,a->agent_id);
-    } else {
-        sope__buf_appendf(out,"{\"session_id\":\"%s\",\"agent_id\":%" PRIu64 ",", a->root->session_id,a->agent_id);
-        sope__buf_appends(out,"\"retention\":32,\"scope\":\"historical execution facts; no claim of current source validity\",\"receipts\":[");
+    struct sope_harness *h = a->harness;
+    sope__buf_appendf(out, "{\"session_id\":\"%s\",\"agent_id\":%" PRIu64 ",", a->root->session_id, a->agent_id);
+    sope__buf_appends(out, "\"retention\":32,\"scope\":\"historical execution facts; no claim of current source validity\",\"receipts\":[");
+    for (unsigned i = 0; h && i < h->count; i++) {
+        if (i) sope__buf_appends(out, ",");
+        sope__buf_appends(out, h->receipts[i]);
     }
-    unsigned count=h?h->count:0;
-    unsigned start=summary && count>8 ? count-8:0;
-    if (summary) sope__buf_appendf(out,"Showing latest %u of %u retained executions (retention: 32).\n",count-start,count);
-    for(unsigned i=start;i<count;i++){
-        if(!summary){if(i)sope__buf_appends(out,",");sope__buf_appends(out,h->receipts[i]);continue;}
-        sope_json *r=sope__json_parse(h->receipts[i],strlen(h->receipts[i]));
-        const char *outcome=sope__json_string(sope__json_get(r,"outcome"),NULL);
-        sope__buf_appendf(out,"- execution #%" PRIu64 ": %s; process exit %.0f; test verdict unverified",(uint64_t)sope__json_number(sope__json_get(r,"call_id"),0),outcome?outcome:"unknown",sope__json_number(sope__json_get(r,"exit_code"),-1));
-        sope__buf_appends(out,"\n");sope__json_free(r);
+    sope__buf_appends(out, "]}");
+}
+
+int sope_agent_evidence(sope_agent_t *a, const char **json, size_t *len)
+{
+    if (!a || !json) return sope__set_error(SOPE_EINVAL, "sope_agent_evidence: agent or json is NULL");
+    sope_buf b = {0};
+    pthread_mutex_lock(a->mu);
+    sope__harness_evidence(a, &b);
+    if (!b.oom) {
+        free(a->history_json);
+        a->history_json = b.ptr;
+        *json = b.ptr;
+        if (len) *len = b.len;
     }
-    if(summary)sope__buf_appends(out,"Exact commands and output archives: evidence tool. Coverage, assertion quality and source freshness are not established by these receipts.\n");
-    else sope__buf_appends(out,"]}");
+    pthread_mutex_unlock(a->mu);
+    if (b.oom) {
+        sope__buf_free(&b);
+        return sope__set_error(SOPE_ENOMEM, "sope_agent_evidence: out of memory");
+    }
+    return SOPE_OK;
 }
 
 static sope_next evidence(tool_run *r)
@@ -375,7 +381,7 @@ static sope_next evidence(tool_run *r)
     } else {
         pthread_mutex_lock(r->agent->mu);
         int ok=1;
-        if(agent==r->agent->agent_id)sope__harness_evidence(r->agent,&r->out,0);
+        if(agent==r->agent->agent_id)sope__harness_evidence(r->agent,&r->out);
         else ok=sope__journal_observations(r->agent,agent,&r->out);
         pthread_mutex_unlock(r->agent->mu);
         if(!ok)return sope__run_fail(r,"Only own or directly delegated child evidence is accessible");

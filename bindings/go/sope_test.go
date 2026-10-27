@@ -64,6 +64,10 @@ func TestReceiptsReplayAndSeal(t *testing.T) {
 	cfg := config(t.TempDir())
 	a := openTest(t, cfg)
 	before, _ := a.Status()
+	evidence, err := a.Evidence()
+	if err != nil || evidence.SessionID != before.SessionID || evidence.Retention != 32 || len(evidence.Receipts) != 0 {
+		t.Fatal(evidence, err)
+	}
 	id := submit(t, a, "req-1", "preserve target and constraints")
 	if got := submit(t, a, "req-1", "preserve target and constraints"); got != id {
 		t.Fatal("duplicate ID")

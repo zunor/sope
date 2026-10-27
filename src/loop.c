@@ -639,23 +639,8 @@ static sope_next end_call(sope_agent_t *a, int32_t rc)
             return start_call(a);
         }
         if (t->report_mode) return finish_report(a, asst);
-        sope_buf facts = {0}, combined = {0};
-        pthread_mutex_lock(a->mu);
-        sope__harness_evidence(a, &facts, 1);
-        pthread_mutex_unlock(a->mu);
-        int evidence_ok = !facts.oom;
-        if (facts.len) {
-            sope__buf_append(&combined, asst->content, asst->content_len);
-            sope__buf_append(&combined, facts.ptr, facts.len);
-            if (!combined.oom && !facts.oom) {
-                free(asst->content); asst->content = combined.ptr; asst->content_len = combined.len;
-                combined.ptr = NULL;
-                sope__push_event(a, SOPE_EVENT_TEXT_DELTA, sope__turn_id(a), 0, 0, NULL, 0, facts.ptr, facts.len);
-            } else evidence_ok = 0;
-        }
-        sope__buf_free(&facts); sope__buf_free(&combined);
-        if (!evidence_ok) turn_error(a, SOPE_ENOMEM, "Cannot render execution evidence.");
-        finish_turn(a, evidence_ok ? SOPE_STOP_END_TURN : SOPE_STOP_ERROR);
+        /* Receipts remain queryable through evidence; they are not assistant prose. */
+        finish_turn(a, SOPE_STOP_END_TURN);
         return next(SOPE__NEXT_CONTINUE);
     }
 

@@ -532,9 +532,17 @@ at most two completion reconciliations; unresolved work ends with `SOPE_STOP_ERR
 Plans are model assertions and do not establish that deliverables are correct.
 See [working-state.md](design/working-state.md).
 
-A deterministic footer on normal completion
-shows up to eight recent receipts, even if the model omits failures. These are
-historical observations; **exit zero does not establish test success**. Receipts
+`sope_agent_evidence(agent, &json, &len)` reads the current agent's retained ledger
+without running a tool, requesting model output, consuming events or changing
+conversation history. It works during a turn and returns the same JSON as the
+no-argument `evidence()` tool: `session_id`, `agent_id`, `retention` (32), `scope`
+and `receipts` in execution-record order. It shares history's returned-string
+storage. JS exposes `Agent.evidence()` and Go exposes `Agent.Evidence()`.
+
+The TUI displays these records only when the user runs `/evidence`. Normal
+completion does not append receipts to assistant text, including print mode
+and durable final outcomes. Existing historical messages are not rewritten.
+These are historical observations; **exit zero does not establish test success**. Receipts
 do not verify assertion quality, coverage, test count, current source freshness
 or the correctness of the model's prose. Arbitrary test output is not parsed
 into pass/fail claims. Use the archived output and exact invocation to assess

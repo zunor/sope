@@ -256,7 +256,7 @@ int sope__journal_harness(sope_agent_t *a);
 char *sope__harness_json(sope_agent_t *a);
 int sope__harness_load(sope_agent_t *a, const char *json);
 void sope__harness_clear(sope_agent_t *a);
-void sope__harness_evidence(sope_agent_t *a, sope_buf *out, int summary);
+void sope__harness_evidence(sope_agent_t *a, sope_buf *out);
 int sope__harness_context(sope_agent_t *a);
 const char *sope__harness_contract(sope_agent_t *a);
 const char *sope__harness_report(sope_agent_t *a);
