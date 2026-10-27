@@ -26,6 +26,22 @@ The status bar's pixel meteor travels around a small square once every 3 seconds
 
 Typing `/` opens a command list above the input box; keep typing to filter it. Use `↑`/`↓` to select, `Enter` to use a command, `Tab` to complete it without executing, and `Esc` to dismiss the list. Mouse selection and scrolling are also supported. Commands that require arguments are first completed into the input box.
 
+## Working directory and missing files
+
+Each session captures its absolute working directory when it is created. Restored
+sessions use their workspace directory, not the execution-journal directory or a
+later process directory. Model context, relative tool paths, approval decisions,
+file previews, and change tracking use the same directory. Print mode explicitly
+binds its startup directory too.
+
+When `read` cannot find a file, its error includes the working directory and
+resolved path. It suggests at most three nearby file names in the requested
+parent directory, comparing casing, partial names, and small ASCII typos. If that
+parent does not exist, it checks the session root instead. This lookup scans at
+most 2,048 directory entries without recursion. Suggestions do not read files,
+change the requested path, or satisfy the read-before-edit requirement. The model
+must make a separate read using a chosen path.
+
 ## Text diagrams
 
 Recognized ASCII and Unicode box diagrams use a separate horizontal viewport:

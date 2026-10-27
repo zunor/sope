@@ -65,9 +65,9 @@ function lines(text: string, kind: PreviewLine["kind"], max = PREVIEW_LINES): Pr
 }
 
 /** The file as it is now, or null; relative paths are against the working directory. */
-export function readCurrent(path: string): string | null {
+export function readCurrent(path: string, directory = process.cwd()): string | null {
   try {
-    const file = resolve(process.cwd(), path);
+    const file = resolve(directory, path);
     return statSync(file).size > 4 << 20 ? null : readFileSync(file, "utf8");
   } catch {
     return null;

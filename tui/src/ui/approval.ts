@@ -15,7 +15,7 @@
 //   │   4. No, and stop  ends the turn                             │
 //   ╰─────── ↑↓ select · enter confirm · y/a/n answer · esc stop ──╯
 
-import { previewFor, type PreviewLine } from "../agent/tools";
+import { previewFor, readCurrent, type PreviewLine } from "../agent/tools";
 import type { CellBuffer } from "../render/buffer";
 import type { Approval, Decision, Session } from "../session";
 import { palette, type Surfaces } from "../theme";
@@ -79,9 +79,9 @@ export function drawPreviewLines(buf: CellBuffer, x: number, y: number, end: num
 /** Rows besides the preview: the question, why it asks, a gap, the answers. */
 const askingRows = (a: Approval) => 1 + (a.reason ? 1 : 0) + 1 + DECISIONS.length;
 
-function previewRows(a: Approval, max: number): PreviewLine[] {
+function previewRows(a: Approval, max: number, directory?: string): PreviewLine[] {
   if (max <= 0) return [];
-  const rows = previewFor(a.name, a.input);
+  const rows = previewFor(a.name, a.input, (path) => readCurrent(path, directory));
   return rows.length > max ? [...rows.slice(0, max - 1), { text: `⋯ ${rows.length - max + 1} more lines`, kind: "gap" }] : rows;
 }
 
@@ -109,7 +109,7 @@ export class ApprovalPrompt implements Popup {
     const a = this.#approval;
     if (!a) return 0;
     const asking = askingRows(a);
-    return asking + previewRows(a, Math.max(0, Math.min(MAX_PREVIEW_ROWS, room - asking))).length;
+    return asking + previewRows(a, Math.max(0, Math.min(MAX_PREVIEW_ROWS, room - asking)), this.session().directory).length;
   }
 
   key(id: string): Reply {
@@ -141,7 +141,7 @@ export class ApprovalPrompt implements Popup {
   render(buf: CellBuffer, x: number, y: number, w: number, h: number, colors: Surfaces): PopupFrame {
     const a = this.#approval;
     if (!a) return { hits: [] };
-    const preview = previewRows(a, h - askingRows(a));
+    const preview = previewRows(a, h - askingRows(a), this.session().directory);
     const waiting = this.session().approvals.length;
     const end = x + w;
     let cx = buf.text(x, y, `${a.subagent ? `subagent ${a.subagent} wants` : "sope wants"} to run `);

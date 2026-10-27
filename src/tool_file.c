@@ -16,6 +16,7 @@
 
 #include "tools.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -358,6 +359,98 @@ static sope_next stale_file(tool_run *r, const char *shown, int state)
 /* read                                                                     */
 /* ------------------------------------------------------------------------ */
 
+/* Missing-file hints inspect one directory, never recursively search or read
+ * candidate contents. Keep errors as errors: the model chooses any next read. */
+#define HINT_LIMIT 3
+#define HINT_SCAN_LIMIT 2048
+#define HINT_NAME_LIMIT 255
+
+typedef struct { char *path; int score; } file_hint;
+
+static void fold_name(char *out, const char *in)
+{
+    for (; *in; in++, out++) *out = *in >= 'A' && *in <= 'Z' ? (char)(*in + 'a' - 'A') : *in;
+    *out = '\0';
+}
+
+static int hint_score(const char *wanted, const char *name)
+{
+    size_t n = strlen(wanted), m = strlen(name);
+    char a[HINT_NAME_LIMIT + 1], b[HINT_NAME_LIMIT + 1];
+    if (!n || n > HINT_NAME_LIMIT || !m || m > HINT_NAME_LIMIT) return 0;
+    fold_name(a, wanted); fold_name(b, name);
+    if (!strcmp(a, b)) return 1;
+    if (n >= 3 && m >= 3 && (strstr(a, b) || strstr(b, a))) return 2;
+    if (n < 4 || m < 4 || n > m + 2 || m > n + 2) return 0;
+    /* Small ASCII typos only; do not mistake UTF-8 bytes for characters. */
+    for (size_t i = 0; i < n; i++) if ((unsigned char)a[i] >= 128) return 0;
+    for (size_t i = 0; i < m; i++) if ((unsigned char)b[i] >= 128) return 0;
+    unsigned short prev[HINT_NAME_LIMIT + 1], next[HINT_NAME_LIMIT + 1];
+    for (size_t j = 0; j <= m; j++) prev[j] = (unsigned short)j;
+    for (size_t i = 1; i <= n; i++) {
+        next[0] = (unsigned short)i;
+        unsigned short best = next[0];
+        for (size_t j = 1; j <= m; j++) {
+            unsigned short v = prev[j - 1] + (a[i - 1] != b[j - 1]);
+            if (prev[j] + 1 < v) v = prev[j] + 1;
+            if (next[j - 1] + 1 < v) v = next[j - 1] + 1;
+            next[j] = v;
+            if (v < best) best = v;
+        }
+        if (best > 2) return 0;
+        memcpy(prev, next, (m + 1) * sizeof *prev);
+    }
+    return prev[m] <= 2 ? 2 + prev[m] : 0;
+}
+
+static void missing_file(tool_run *r, const char *path)
+{
+    sope__run_fail(r, "File does not exist: %s", sope__display_path(r, path));
+    sope__buf_appends(&r->out, "\nWorking directory: ");
+    sope__buf_append_json_string(&r->out, r->cwd, strlen(r->cwd));
+    sope__buf_appends(&r->out, "\nResolved path: ");
+    sope__buf_append_json_string(&r->out, path, strlen(path));
+    char *parent = sope__strdup(path);
+    if (!parent) return;
+    char *slash = strrchr(parent, '/');
+    if (!slash) { free(parent); return; }
+    const char *name = strrchr(path, '/') + 1;
+    if (slash == parent) slash[1] = '\0'; else *slash = '\0';
+    const char *directory = parent;
+    DIR *dir = opendir(directory);
+    /* A hallucinated parent should still expose the actual session root. */
+    if (!dir && (errno == ENOENT || errno == ENOTDIR)) { directory = r->cwd; dir = opendir(directory); }
+    if (!dir) { free(parent); return; }
+    file_hint hints[HINT_LIMIT] = {{0}};
+    struct dirent *entry;
+    size_t scanned = 0;
+    while (scanned++ < HINT_SCAN_LIMIT && (entry = readdir(dir))) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..") ||
+            (entry->d_name[0] == '.' && name[0] != '.')) continue;
+        int score = hint_score(name, entry->d_name);
+        if (!score) continue;
+        sope_buf candidate = {0};
+        sope__buf_appendf(&candidate, "%s%s%s", directory, !strcmp(directory, "/") ? "" : "/", entry->d_name);
+        struct stat st;
+        if (candidate.oom || stat(candidate.ptr, &st) || !S_ISREG(st.st_mode)) { sope__buf_free(&candidate); continue; }
+        size_t i = 0;
+        while (i < HINT_LIMIT && hints[i].path && (hints[i].score < score ||
+               (hints[i].score == score && strcmp(hints[i].path, candidate.ptr) < 0))) i++;
+        if (i == HINT_LIMIT) { sope__buf_free(&candidate); continue; }
+        free(hints[HINT_LIMIT - 1].path);
+        for (size_t j = HINT_LIMIT - 1; j > i; j--) hints[j] = hints[j - 1];
+        hints[i] = (file_hint){ candidate.ptr, score };
+    }
+    closedir(dir);
+    if (hints[0].path) sope__buf_appends(&r->out, "\nDid you mean one of these? (Suggestions only; no file was read.)");
+    for (size_t i = 0; i < HINT_LIMIT && hints[i].path; i++) {
+        sope__buf_appends(&r->out, "\n  ");
+        sope__buf_append_json_string(&r->out, hints[i].path, strlen(hints[i].path));
+        free(hints[i].path);
+    }
+    free(parent);
+}
+
 static sope_next tool_read(tool_run *r)
 {
     const char *arg = sope__arg_string(r, "file_path"), *shown;
@@ -374,7 +467,8 @@ static sope_next tool_read(tool_run *r)
     shown = sope__display_path(r, path);
     if (stat(path, &st) != 0) {
         int err = errno;
-        sope__run_fail(r, err == ENOENT ? "File does not exist: %s" : "Cannot read %s: %s", shown, strerror(err));
+        if (err == ENOENT || err == ENOTDIR) missing_file(r, path);
+        else sope__run_fail(r, "Cannot read %s: %s", shown, strerror(err));
         free(path);
         return sope__run_done(r);
     }

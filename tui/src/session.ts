@@ -8,7 +8,7 @@
 // A restored session opens its journal on first use and waits for /recover.
 
 import { Agent, type ContextUsage, type Shell, type SopeEvent } from "sope";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { AgentBridge } from "./agent/bridge";
 import { ChangeTracker, COMMAND_TOOLS, EDIT_TOOLS } from "./agent/changes";
@@ -76,7 +76,9 @@ export class Session {
   readonly trace = new EventLog();
   readonly rate = new TokenRate();
   /** The files sope changed in the running turn; the transcript keeps them when it ends. */
-  readonly changes = new ChangeTracker();
+  readonly changes: ChangeTracker;
+  /** Captured at creation, independent of later process directory changes. */
+  readonly directory: string;
   readonly hostTools: HostTool[];
   title = UNTITLED;
   provider: string;
@@ -121,6 +123,8 @@ export class Session {
     onEvents: (session: Session, events: SopeEvent[]) => void,
     persist?: Persistence,
   ) {
+    this.directory = realpathSync(persist?.directory ?? process.cwd());
+    this.changes = new ChangeTracker(undefined, undefined, this.directory);
     this.#config = config;
     this.#onEvents = onEvents;
     this.#persist = persist;
@@ -189,12 +193,12 @@ export class Session {
     if (!this.#bridge) {
       if (this.#persist && !this.#id) {
         this.#id = crypto.randomUUID();
-        this.#persist.store.create(this.#id, this.#persist.directory, this.title);
+        this.#persist.store.create(this.#id, this.directory, this.title);
       }
       const directory = this.#persist && this.#id ? this.#persist.store.executionDirectory(this.#id) : undefined;
       if (directory && this.#history && this.#history !== "[]" && !existsSync(join(directory, "execution.sqlite")))
         throw new Error("This saved conversation has no execution journal. Start a new session; transcript snapshots are not resumable execution state.");
-      const bridge = new AgentBridge(agentOptions(this.#config), (events) => {
+      const bridge = new AgentBridge(agentOptions(this.#config, this.directory), (events) => {
         this.#onAgentEvents(events);
         this.#onEvents(this, events);
       }, directory);
@@ -233,7 +237,7 @@ export class Session {
     if (!this.#id) {
       if (!messages.some((m) => m.role === "user")) return;
       this.#id = crypto.randomUUID();
-      p.store.create(this.#id, p.directory, this.title);
+      p.store.create(this.#id, this.directory, this.title);
     }
     let history: string | undefined;
     if (this.#bridge) {
@@ -363,7 +367,7 @@ export class Session {
 
   /** What the first request of a new session would hold. */
   #measureNew(): ContextUsage {
-    const options = { ...agentOptions(this.#config), ...contextOptions(this.#config, this.#modelWindow), provider: this.provider };
+    const options = { ...agentOptions(this.#config, this.directory), ...contextOptions(this.#config, this.#modelWindow), provider: this.provider };
     const agent = Agent.create(this.model ? { ...options, model: this.model } : options);
     try {
       for (const tool of this.hostTools) agent.registerTool(tool);
@@ -400,6 +404,8 @@ export class Session {
   }
 
   setOption(key: string, value: string | null): void {
+    if (key === "cwd" && (!value || realpathSync(value) !== this.directory))
+      throw new Error("The session working directory is fixed; create a new session to change it.");
     this.#agent.setOption(key, value);
     this.trace.call("sope_agent_set_option", `${key}=${key.includes("key") ? "***" : (value ?? "(unset)")}`);
     if (key === "provider") this.provider = value ?? "mock";
@@ -442,7 +448,7 @@ export class Session {
   /** Whether a request runs without asking: the mode decides, or an earlier "don't ask again". */
   #verdict(name: string, input: Record<string, unknown>) {
     if (this.alwaysAllowed.has(name)) return { allow: true, reason: `${name} is allowed for this session` };
-    return judge(this.mode(), name, input);
+    return judge(this.mode(), name, input, this.directory);
   }
 
   #onPermission(callId: number, turnId: number, name: string, rawInput: string, agentId = 0, subagent?: string): void {

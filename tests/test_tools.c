@@ -214,6 +214,10 @@ static void test_read_write_edit(void)
 
     /* A file the agent never read cannot be edited or overwritten. */
     write_file("theirs.txt", "alpha beta alpha\n");
+    run(a, "!read {\"file_path\":\"theirs.txt.bak\"}", &log, NO_ANSWER, NULL);
+    CHECK(log.n == 1 && log.is_error[0] && strstr(log.result[0], "Did you mean one of these?"));
+    CHECK(strstr(log.result[0], "Working directory:") && strstr(log.result[0], dir));
+    CHECK(!strstr(log.result[0], "alpha beta alpha"));
     run(a, "!edit {\"file_path\":\"theirs.txt\",\"old_string\":\"beta\",\"new_string\":\"BETA\"}", &log, NO_ANSWER,
         NULL);
     CHECK(log.n == 1 && log.is_error[0] && strstr(log.result[0], "has not been read"));

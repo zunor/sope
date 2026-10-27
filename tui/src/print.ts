@@ -16,6 +16,7 @@ import { agentOptions, type Config } from "./config";
 export async function runPrint(config: Config, prompt: string, images: ImageFile[] = []): Promise<number> {
   const err = (line: string) => process.stderr.write(`${line}\n`);
   const tools = hostToolsFor(config.provider);
+  const options = agentOptions(config);
   let exitCode = 1;
   let interrupted: number | undefined;
   let outputClosed = false;
@@ -24,7 +25,7 @@ export async function runPrint(config: Config, prompt: string, images: ImageFile
   let finish!: () => void;
   const finished = new Promise<void>((resolve) => (finish = resolve));
 
-  const bridge = new AgentBridge(agentOptions(config), (events) => {
+  const bridge = new AgentBridge(options, (events) => {
     for (const ev of events) {
       if (ev.type === "closed") continue;
       if (ev.type === "turn_end") runner.endTurn(ev.turnId, ev.agentId);
@@ -33,7 +34,7 @@ export async function runPrint(config: Config, prompt: string, images: ImageFile
         if (ev.type === "tool_call") runner.run(ev.callId, ev.turnId, ev.name, ev.input, ev.agentId);
       } else if (ev.type === "permission") {
         if (interrupted !== undefined) continue; // cancellation owns pending calls now
-        const v = judge(config.permissions, ev.name, parseInput(ev.input));
+        const v = judge(config.permissions, ev.name, parseInput(ev.input), options.cwd);
         if (!v.allow && config.permissions === "auto") err(`sope: refused ${ev.name}: ${v.reason}, and -p cannot ask (--permissions full runs it)`);
         else if (!v.allow) err(`sope: refused ${ev.name}: ${modeLabel(config.permissions)} is on, and -p cannot ask (--permissions auto or full)`);
         bridge.agent.permit(ev.callId, v.allow, v.allow ? "" : `Automatic permission policy (${config.permissions}): ${v.reason}. This noninteractive run cannot ask for approval; adjust the operation to the allowed scope.`);

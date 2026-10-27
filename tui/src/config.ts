@@ -25,7 +25,7 @@
 //   SOPE_PERMISSIONS        ask | auto | full: who approves edits, commands and
 //                           fetches (default auto, "Approve for me")
 
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseEffort, type Effort } from "./agent/effort";
@@ -149,8 +149,9 @@ export function contextOptions(c: Config, window = 0): Record<"context.window" |
  * answers each request by the permission mode (agent/permissions.ts), so a
  * new mode applies at once, even to requests already waiting.
  */
-export function agentOptions(c: Config): Record<string, string> {
-  const options: Record<string, string> = { provider: c.provider, system: systemPrompt(), permissions: "ask" };
+export function agentOptions(c: Config, directory = process.cwd()): Record<string, string> {
+  const cwd = realpathSync(directory);
+  const options: Record<string, string> = { provider: c.provider, cwd, system: systemPrompt(cwd), permissions: "ask" };
   if (c.acceptanceContract) options["acceptance.contract"] = c.acceptanceContract;
   if (c.model) options.model = c.model;
   if (c.imageModel && c.imageModel !== c.model) options.image_model = c.imageModel;

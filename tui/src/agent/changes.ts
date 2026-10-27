@@ -106,9 +106,9 @@ export class ChangeTracker implements ChangeSet {
   #read: (path: string) => string | null;
   #list: () => string[];
 
-  constructor(read = readText, list = () => listFiles()) {
+  constructor(read = readText, list: (() => string[]) | undefined = undefined, private readonly directory = process.cwd()) {
     this.#read = read;
-    this.#list = list;
+    this.#list = list ?? (() => listFiles(this.directory));
   }
 
   get files(): readonly FileChange[] {
@@ -138,7 +138,7 @@ export class ChangeTracker implements ChangeSet {
   /** Before write or edit: keeps the file as it is now, unless it already has a baseline. */
   track(path: string): void {
     if (!path) return;
-    const file = resolve(process.cwd(), path);
+    const file = resolve(this.directory, path);
     if (!this.#before.has(file)) this.#before.set(file, this.#read(file));
   }
 
@@ -195,14 +195,14 @@ export class ChangeTracker implements ChangeSet {
         else if (l.kind === "remove") removed++;
       }
       if (!added && !removed) continue;
-      files.push({ path: shown(file), lang: langFor(file), lines: hunks(diff, CONTEXT), added, removed });
+      files.push({ path: shown(file, this.directory), lang: langFor(file), lines: hunks(diff, CONTEXT), added, removed });
     }
     this.#files = files.sort((a, b) => a.path.localeCompare(b.path));
   }
 }
 
-function shown(file: string): string {
-  const rel = relative(process.cwd(), file);
+function shown(file: string, directory: string): string {
+  const rel = relative(directory, file);
   if (rel && !rel.startsWith("..") && !isAbsolute(rel)) return rel;
   const home = homedir();
   return file.startsWith(home + "/") ? `~${file.slice(home.length)}` : file;
