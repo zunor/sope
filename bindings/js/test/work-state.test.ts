@@ -70,13 +70,13 @@ test("a lossy summary cannot replace current intent, task status or execution ou
    default:return text("Verification failed; unresolved, not a success.");
   }
  };
- a.send("EXACT TASK: verify; never change production files. 中文约束");
+ a.send("EXACT TASK: verify; never change production files. Preserve this exact constraint.");
  const events=await drain(a,e=>a.toolResult(e.callId,"bulk data ".repeat(10000)));
  expect(events.at(-1)).toMatchObject({stopReason:"end_turn"});
  expect(events.filter(e=>e.type==="compact")).toHaveLength(1);
  expect(String(requests.find(isCompact)!.messages![1]!.content)).toContain("call_id=2");
  const after=requests.filter(r=>!isCompact(r))[2]!;
- expect(working(after)).toContain("EXACT TASK: verify; never change production files. 中文约束");
+ expect(working(after)).toContain("EXACT TASK: verify; never change production files. Preserve this exact constraint.");
  expect(working(after)).toContain('"status":"pending"');
  expect(working(after)).toContain('"exit_code":1');
  expect(working(after)).toContain('"outcome":"process_failed"');
@@ -99,7 +99,7 @@ test("the first durable model request includes the actual default working direct
 
 test("locations remain factual across children, false summaries and reconfigured reopen",async()=>{
  const root=mkdtempSync(join(tmpdir(),"sope-location-"));dirs.push(root);
- const workspace=join(realpathSync(root),'workspace "中文"');mkdirSync(workspace);
+ const workspace=join(realpathSync(root),'workspace "ＡＢ"');mkdirSync(workspace);
  const execution=join(root,"execution");let a=create(execution,{cwd:workspace});
  let parent=0,child=0;
  respond=r=>{
@@ -183,7 +183,7 @@ test("evidence recalls exact paginated tool results after compaction and reopen 
  let a=create(dir);a.registerTool({name:"probe",description:"observation",inputSchema:{type:"object"}});
  let round=0, runs=0;
  respond=r=>isCompact(r)?text("The earlier observation is unavailable."):++round===1?tools({name:"probe",input:{}}):text("observed");
- a.send("Observe once");await drain(a,e=>{runs++;a.toolResult(e.callId,"A😀B中文C",true);});
+ a.send("Observe once");await drain(a,e=>{runs++;a.toolResult(e.callId,"A😀BＡＢC",true);});
  a.compact();await drain(a);a.free();agents.splice(agents.indexOf(a),1);
  a=create(dir);a.registerTool({name:"probe",description:"observation",inputSchema:{type:"object"}});
  const db=new Database(join(dir,"execution.sqlite"),{readonly:true});
@@ -193,7 +193,7 @@ test("evidence recalls exact paginated tool results after compaction and reopen 
  const results=events.flatMap(e=>e.type==="tool_end"&&e.name==="evidence"?[JSON.parse(e.result)]:[]);
  expect(results).toHaveLength(2);
  expect(results[0]).toMatchObject({call_id:1,is_error:true,historical:true,offset:0,next_offset:5,content:"A😀"});
- expect(results[1]).toMatchObject({offset:5,content:"B中文C"});expect(runs).toBe(1);
+ expect(results[1]).toMatchObject({offset:5,content:"BＡＢC"});expect(runs).toBe(1);
 });
 
 test("runtime state is also carried by the Responses API",async()=>{

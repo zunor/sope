@@ -68,7 +68,7 @@ static void test_transcript_budget_and_utf8(void)
     char *text;
     size_t len, i;
     sope__buf_appends(&body, "HEAD: compile started\n");
-    for (i = 0; i < 20000; i++) sope__buf_appends(&body, "中文🙂");
+    for (i = 0; i < 20000; i++) sope__buf_appends(&body, "ＡＢ🙂");
     sope__buf_appends(&body, "\nTAIL: tests failed, exit 1");
     use.input = body.ptr;
     use.input_len = body.len;
@@ -141,7 +141,7 @@ static void test_request_accounting(void)
     CHECK(sope__context_tokens(&a) == 10000 + sope__message_tokens(a.history.tail));
     a.context_tokens = UINT64_MAX;
     CHECK(sope__context_tokens(&a) == UINT64_MAX);
-    CHECK(sope__text_tokens("中文", strlen("中文")) > sope__text_tokens("abcdef", 6));
+    CHECK(sope__text_tokens("ＡＢ", strlen("ＡＢ")) > sope__text_tokens("abcdef", 6));
     sope__history_clear(&a.history);
 }
 

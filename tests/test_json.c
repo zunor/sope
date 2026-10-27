@@ -43,9 +43,9 @@ static void test_values(void)
 static void test_strings(void)
 {
     size_t n;
-    sope_json *v = parse("\"tab\\t quote\\\" \\u4f60\\u597d \\ud83d\\ude00 \\/\"");
+    sope_json *v = parse("\"tab\\t quote\\\" \\uff28\\uff29 \\ud83d\\ude00 \\/\"");
     const char *s = sope__json_string(v, &n);
-    CHECK(s && !strcmp(s, "tab\t quote\" 你好 😀 /"));
+    CHECK(s && !strcmp(s, "tab\t quote\" ＨＩ 😀 /"));
     CHECK(n == strlen(s));
     sope__json_free(v);
 
@@ -78,11 +78,11 @@ static void test_depth_limit(void)
 
 static void test_escape_roundtrip(void)
 {
-    static const char raw[] = "a\"b\\c\n\x01 你好";
+    static const char raw[] = "a\"b\\c\n\x01 ＨＩ";
     sope_buf b = { 0 };
     sope_json *v;
     sope__buf_append_json_string(&b, raw, sizeof raw - 1);
-    CHECK(!strcmp(b.ptr, "\"a\\\"b\\\\c\\n\\u0001 你好\""));
+    CHECK(!strcmp(b.ptr, "\"a\\\"b\\\\c\\n\\u0001 ＨＩ\""));
     v = sope__json_parse(b.ptr, b.len);
     CHECK(v && v->len == sizeof raw - 1 && !memcmp(v->str, raw, v->len));
     sope__json_free(v);

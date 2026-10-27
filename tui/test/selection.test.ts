@@ -35,11 +35,11 @@ test("a click selects nothing", () => {
 });
 
 test("wide characters are copied whole and highlighted", () => {
-  const buf = screen("你好世界");
+  const buf = screen("ＨＩＡＢ");
   const s = new Selection();
-  s.press({ x: 3, y: 0 }); // the second half of 好
+  s.press({ x: 3, y: 0 }); // the second half of Ｉ
   s.release({ x: 4, y: 0 });
-  expect(s.text(buf)).toBe("好世");
+  expect(s.text(buf)).toBe("ＩＡ");
   s.highlight(buf);
   expect([...buf.attr.slice(0, 7)].map((a) => (a & INVERSE ? 1 : 0))).toEqual([0, 0, 1, 1, 1, 1, 0]);
 });

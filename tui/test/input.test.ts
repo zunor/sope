@@ -18,7 +18,7 @@ function parse(...chunks: string[]): string[] {
 }
 
 test("text runs and control keys", () => {
-  expect(parse("hi你好\r")).toEqual(["text:hi你好", "enter"]);
+  expect(parse("hiＨＩ\r")).toEqual(["text:hiＨＩ", "enter"]);
   expect(parse("\x03\x0a\x7f\t")).toEqual(["ctrl+c", "ctrl+j", "backspace", "tab"]);
 });
 
@@ -62,10 +62,10 @@ test("a lone ESC resolves on flush, a split sequence does not", () => {
 });
 
 test("UTF-8 split across reads", () => {
-  const bytes = enc.encode("你");
+  const bytes = enc.encode("Ｈ");
   const p = new InputParser();
   expect(p.feed(bytes.slice(0, 1))).toEqual([]);
-  expect(ids(p.feed(bytes.slice(1)))).toEqual(["text:你"]);
+  expect(ids(p.feed(bytes.slice(1)))).toEqual(["text:Ｈ"]);
 });
 
 test("bracketed paste, including a split terminator", () => {
@@ -103,7 +103,7 @@ test("pointer motion without a button is a move (hover)", () => {
 test("editor clicks map display cells to whole graphemes and clamp to line ends", () => {
   const editor = new Editor();
   const family = "👨‍👩‍👧";
-  editor.set(`a你${family}e\u0301z`);
+  editor.set(`aＨ${family}e\u0301z`);
   const row = editor.layout(40).rows[0]!;
   for (const [column, offset] of [[-2, 0], [0, 0], [1, 1], [2, 1], [3, 2], [4, 2], [5, 2 + family.length], [6, 4 + family.length], [30, editor.text.length]]) {
     editor.moveToCell(row, column!);
@@ -111,12 +111,12 @@ test("editor clicks map display cells to whole graphemes and clamp to line ends"
   }
   editor.moveToCell(row, 4);
   editor.insert("X");
-  expect(editor.text).toBe(`a你X${family}e\u0301z`);
+  expect(editor.text).toBe(`aＨX${family}e\u0301z`);
 });
 
 test("editor clicks follow soft wraps, explicit newlines and empty rows", () => {
   const editor = new Editor();
-  editor.set("ab cd\n\n你好世界");
+  editor.set("ab cd\n\nＨＩＡＢ");
   const { rows } = editor.layout(4);
   for (const [row, column, offset] of [[0, 1, 1], [0, 10, 3], [1, 1, 4], [1, 10, 5], [2, 2, 6], [3, 3, 8], [4, 0, 9]]) {
     editor.moveToCell(rows[row!]!, column!);

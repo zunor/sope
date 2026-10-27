@@ -8,18 +8,18 @@ const row = (b: CellBuffer, y: number) => b.chars.slice(y * b.width, (y + 1) * b
 
 test("wide characters occupy two cells and clip cleanly", () => {
   const b = new CellBuffer(5, 1);
-  expect(b.text(0, 0, "a你好")).toBe(5);
-  expect(row(b, 0)).toBe("a你好"); // continuation cells are ""
+  expect(b.text(0, 0, "aＨＩ")).toBe(5);
+  expect(row(b, 0)).toBe("aＨＩ"); // continuation cells are ""
   b.clear();
-  b.text(0, 0, "abcd你"); // 你 would straddle the edge
+  b.text(0, 0, "abcdＨ"); // Ｈ would straddle the edge
   expect(row(b, 0)).toBe("abcd ");
 });
 
 test("overwriting half of a wide character blanks the other half", () => {
   const b = new CellBuffer(4, 1);
-  b.text(0, 0, "你好");
+  b.text(0, 0, "ＨＩ");
   b.text(1, 0, "x");
-  expect(row(b, 0)).toBe(" x好");
+  expect(row(b, 0)).toBe(" xＩ");
 });
 
 test("second frame only writes the changed cells", () => {
@@ -41,12 +41,12 @@ test("second frame only writes the changed cells", () => {
   expect(out).not.toContain("rld");
 });
 
-test("editor moves by grapheme and word, CJK included", () => {
+test("editor moves by grapheme and word, wide characters included", () => {
   const e = new Editor();
   e.insert("hi 👨‍👩‍👧");
   e.backspace();
   expect(e.text).toBe("hi ");
-  e.insert("你好世界");
+  e.insert("ＨＩＡＢ");
   e.left();
   e.left();
   expect(e.cursor).toBe(5);

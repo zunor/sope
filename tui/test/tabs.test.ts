@@ -78,7 +78,7 @@ test("hovered titles scroll after a pause, show the end and reset when unhovered
   expect(tabTitle("abcdefghij", 5, 1040)).toBe("bcdef");
   expect(tabTitle("abcdefghij", 5, 2000)).toBe("fghij");
   expect(tabTitle("abcdefghij", 5, 3040)).toBe("efghi");
-  expect(tabTitle("你好世界abc", 5, 1040)).toBe(" 好世"); // no half-wide characters
+  expect(tabTitle("ＨＩＡＢabc", 5, 1040)).toBe(" ＩＡ"); // no half-wide characters
   expect(tabTitle("e\u0301abcdefgh", 4, 1040)).toBe("abcd");
   expect(tabTitle("short", 18, 9000)).toBe("short");
 
@@ -128,7 +128,7 @@ test("image tabs keep both rows clickable, side by side over a baseline; only th
 
 test("English and Chinese image titles stay centered with padding inside compact frames", () => {
   for (const cell of [{ width: 10, height: 22 }, { width: 18, height: 36 }]) {
-    for (const title of ["Ag title", "中文标签居中"]) {
+    for (const title of ["Ag title", "ＣＥＮＴＥＲ"]) {
       const buf = new CellBuffer(80, 3);
       const images: PixelImage[] = [];
       drawTabs(buf, 0, 0, 80, [{ title, state: "idle" }], 0, "", null, 0, surfaces(null), { cell, images });

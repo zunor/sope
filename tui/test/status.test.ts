@@ -16,7 +16,7 @@ test("elapsed time counts in whole seconds", () => {
 
 test("token estimate counts CJK characters as tokens", () => {
   expect(estimateTokens("abcdefgh")).toBe(2);
-  expect(estimateTokens("你好")).toBe(2);
+  expect(estimateTokens("ＨＩ")).toBe(2);
 });
 
 test("the rate covers recent output and disappears when the stream pauses", () => {

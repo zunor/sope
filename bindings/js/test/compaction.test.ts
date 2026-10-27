@@ -90,13 +90,13 @@ for (const [name, response] of Object.entries({
 test("restored history triggers preflight compaction without a usage report", async () => {
   const agent = create({ "compact.threshold": "12000" });
   agent.loadHistory(JSON.stringify(oldHistory()));
-  agent.send("NEW_REQUEST: quote this exactly 中文");
+  agent.send("NEW_REQUEST: quote this exactly ＡＢ");
   const events = await drain(agent);
   expect(events.at(-1)).toMatchObject({ stopReason: "end_turn" });
   expect(requests).toHaveLength(2);
   expect(compact(requests[0]!)).toBe(true);
   expect(String(requests[0]!.messages[1]!.content)).not.toContain("NEW_REQUEST");
-  expect(requests[1]!.messages.at(-1)?.content).toBe("NEW_REQUEST: quote this exactly 中文");
+  expect(requests[1]!.messages.at(-1)?.content).toBe("NEW_REQUEST: quote this exactly ＡＢ");
   expect(requests[1]!.messages[0]?.content).toBe("Preserve user permissions.");
   expect(events.filter((e) => e.type === "compact")).toHaveLength(1);
 });
@@ -170,7 +170,7 @@ test("retains recent raw user messages, complete parallel tool groups and images
 test("bounds the entire summary request and gives it a separate output limit", async () => {
   const agent = create({ "compact.input_tokens": "1500", "compact.max_tokens": "700", "openai.max_tokens": "90" });
   agent.loadHistory(JSON.stringify([
-    { role: "user", content: "HEAD_USER " + "中文".repeat(20000) + " TAIL_USER" },
+    { role: "user", content: "HEAD_USER " + "ＡＢ".repeat(20000) + " TAIL_USER" },
     { role: "assistant", content: "HEAD_ASSISTANT " + "large ".repeat(20000) + " TAIL_ASSISTANT" },
   ]));
   agent.compact("preserve failures");

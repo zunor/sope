@@ -28,8 +28,8 @@ test("typing, paste and newline replace selections; empty insert leaves them alo
   const editor = selected("abcdefg", 5, 2);
   editor.insert("");
   expect(editor.selection).toEqual([2, 5]);
-  editor.insert("你好\nworld");
-  expect(editor.text).toBe("ab你好\nworldfg");
+  editor.insert("ＨＩ\nworld");
+  expect(editor.text).toBe("abＨＩ\nworldfg");
   expect(editor.cursor).toBe(10);
   expect(editor.selection).toBeNull();
   const newline = selected("abcdefg", 2, 5);
@@ -37,9 +37,9 @@ test("typing, paste and newline replace selections; empty insert leaves them alo
   expect(newline.text).toBe("ab\nfg");
 });
 
-test("selection never splits CJK, combining marks or emoji clusters", () => {
+test("selection never splits wide characters, combining marks or emoji clusters", () => {
   const family = "👨‍👩‍👧";
-  const editor = selected(`a你${family}e\u0301z`, 2, 6);
+  const editor = selected(`aＨ${family}e\u0301z`, 2, 6);
   expect(editor.selection).toEqual([1, 4 + family.length]);
   editor.backspace();
   expect(editor.text).toBe("az");
@@ -47,15 +47,15 @@ test("selection never splits CJK, combining marks or emoji clusters", () => {
 
 test("selection spans soft wraps, hard newlines and empty lines", () => {
   const editor = new Editor();
-  editor.set("abcdef\n\n你好世界");
+  editor.set("abcdef\n\nＨＩＡＢ");
   const { rows } = editor.layout(4);
   editor.moveToCell(rows[0]!, 2);
   editor.moveToCell(rows[3]!, 2, true);
-  expect(editor.text.slice(...editor.selection!)).toBe("cdef\n\n你");
+  expect(editor.text.slice(...editor.selection!)).toBe("cdef\n\nＨ");
   // Reflowing the input cannot change its selected text.
   editor.layout(40);
   editor.deleteForward();
-  expect(editor.text).toBe("ab好世界");
+  expect(editor.text).toBe("abＩＡＢ");
 });
 
 test("drag reversal retains the original anchor, including passing through it", () => {
@@ -89,7 +89,7 @@ test("clicks, cursor motion and resets clear the selection", () => {
 });
 
 test("select all deletes to an empty input and the next edit has no stale range", () => {
-  const editor = selected("你好", 0, 99);
+  const editor = selected("ＨＩ", 0, 99);
   editor.deleteForward();
   expect(editor.text).toBe("");
   expect(editor.cursor).toBe(0);

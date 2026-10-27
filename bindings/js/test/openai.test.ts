@@ -87,7 +87,7 @@ beforeAll(() => {
               delta({ content: "check." }),
               delta({ tool_calls: [{ index: 0, id: "call_a", type: "function", function: { name: "echo", arguments: "" } }] }),
               delta({ tool_calls: [{ index: 0, id: null, function: { name: null, arguments: '{"input":' } }] }),
-              delta({ tool_calls: [{ index: 0, id: null, function: { name: null, arguments: '"你好"}' } }] }),
+              delta({ tool_calls: [{ index: 0, id: null, function: { name: null, arguments: '"ＨＩ"}' } }] }),
               delta({}, "tool_calls"),
               { choices: [], usage: { prompt_tokens: 42, completion_tokens: 7 } },
             ]);
@@ -137,17 +137,17 @@ function openaiAgent(key = "test-key", prefix = "") {
 
 test("streams text and reasoning, assembles tool calls, loops until the model stops", async () => {
   agent = openaiAgent();
-  agent.send("echo 你好");
+  agent.send("echo ＨＩ");
   const events = await drainTurn(agent, (call) => {
     expect(call.name).toBe("echo");
-    expect(JSON.parse(call.input)).toEqual({ input: "你好" });
-    agent!.toolResult(call.callId, "你好!");
+    expect(JSON.parse(call.input)).toEqual({ input: "ＨＩ" });
+    agent!.toolResult(call.callId, "ＨＩ!");
   });
 
   const joined = (type: "text_delta" | "thinking_delta") =>
     events.map((e) => (e.type === type ? e.text : "")).join("");
   expect(joined("thinking_delta")).toBe("Need the echo tool.");
-  expect(joined("text_delta")).toBe("Let me check.echo said: 你好!");
+  expect(joined("text_delta")).toBe("Let me check.echo said: ＨＩ!");
   expect(events.find((e) => e.type === "usage")).toMatchObject({ inputTokens: 42, outputTokens: 7 });
   expect(events.at(-1)).toMatchObject({ type: "turn_end", stopReason: "end_turn" });
 
@@ -164,9 +164,9 @@ test("streams text and reasoning, assembles tool calls, loops until the model st
   // Round two replays the assistant tool call and answers it by id.
   expect(second!.messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool"]);
   expect(second!.messages[2]!.tool_calls).toEqual([
-    { id: "call_a", type: "function", function: { name: "echo", arguments: '{"input":"你好"}' } },
+    { id: "call_a", type: "function", function: { name: "echo", arguments: '{"input":"ＨＩ"}' } },
   ]);
-  expect(second!.messages[3]).toEqual({ role: "tool", tool_call_id: "call_a", content: "你好!" });
+  expect(second!.messages[3]).toEqual({ role: "tool", tool_call_id: "call_a", content: "ＨＩ!" });
 });
 
 test("surfaces HTTP errors", async () => {

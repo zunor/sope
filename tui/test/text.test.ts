@@ -6,10 +6,10 @@ import { wrapText } from "../src/ui/wrap";
 const rows = (text: string, width: number) => wrapText(text, width).map((r) => text.slice(r.start, r.end));
 
 describe("width", () => {
-  test("ASCII, CJK, fullwidth punctuation", () => {
+  test("ASCII, CJK range boundaries, fullwidth letters and punctuation", () => {
     expect(stringWidth("hello")).toBe(5);
-    expect(stringWidth("你好")).toBe(4);
-    expect(stringWidth("你好，世界")).toBe(10);
+    expect(stringWidth(String.fromCodePoint(0x4e00, 0x9fff))).toBe(4);
+    expect(stringWidth("ＨＩ，ＡＢ")).toBe(10);
     expect(stringWidth("ｈｉ")).toBe(4);
   });
 
@@ -22,7 +22,7 @@ describe("width", () => {
   });
 
   test("truncate respects wide characters", () => {
-    expect(truncate("你好世界", 5)).toBe("你好…");
+    expect(truncate("ＨＩＡＢ", 5)).toBe("ＨＩ…");
     expect(truncate("short", 10)).toBe("short");
   });
 });
@@ -37,9 +37,9 @@ describe("wrap", () => {
     expect(rows("abcdefghij", 4)).toEqual(["abcd", "efgh", "ij"]);
   });
 
-  test("breaks between CJK characters", () => {
-    expect(rows("你好世界", 5)).toEqual(["你好", "世界"]);
-    expect(rows("abc你好", 4)).toEqual(["abc", "你好"]);
+  test("breaks between wide characters", () => {
+    expect(rows("ＨＩＡＢ", 5)).toEqual(["ＨＩ", "ＡＢ"]);
+    expect(rows("abcＨＩ", 4)).toEqual(["abc", "ＨＩ"]);
   });
 
   test("keeps hard newlines and empty lines", () => {

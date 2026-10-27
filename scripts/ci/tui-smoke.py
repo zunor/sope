@@ -84,16 +84,16 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
         until('tip:', present=False) # Wait for the turn to finish before Ctrl+C clears drafts.
         # Real SGR clicks must reposition the editing cursor, including on the
         # second cell of a wide character. Typing proves the buffer moved too.
-        draft('ab你好cd')
-        until('ab你好cd')
+        draft('abＨＩcd')
+        until('abＨＩcd')
         click(8, 37)
         until_cursor(7, 37)
         os.write(fd, b'X')
-        until('abX你好cd')
+        until('abXＨＩcd')
         click(100, 37)
         until_cursor(14, 37)
         os.write(fd, b'!')
-        until('abX你好cd!')
+        until('abXＨＩcd!')
         clear_draft()
 
         # A long word wraps at the input's 104-cell width.
@@ -133,8 +133,8 @@ with tempfile.TemporaryDirectory(prefix='sope-pty-') as scratch:
             until_cursor(7, 37)
             clear_draft()
 
-        draft('ab你好cd')
-        until('ab你好cd')
+        draft('abＨＩcd')
+        until('abＨＩcd')
         drag(7, 37, 11, 37)
         until_selected([(x, 37) for x in range(7, 11)])
         draft('Z') # Pasting replaces the selected wide characters.

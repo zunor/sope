@@ -15,11 +15,11 @@ const render = (chat: ChatView, rect: Rect = { x: 1, y: 2, w: 70, h: 25 }) => {
 
 test("user bubbles align right while assistant replies retain their left gutter", () => {
   const chat = new ChatView();
-  chat.add({ role: "user", text: "你好" });
+  chat.add({ role: "user", text: "ＨＩ" });
   chat.add({ role: "assistant", text: "Hello" });
   const buf = render(chat, { x: 1, y: 2, w: 30, h: 20 });
   expect(row(buf, 2)).toBe(" ".repeat(23) + "╭──────╮");
-  expect(row(buf, 3)).toBe(" ".repeat(23) + "│ 你好 │");
+  expect(row(buf, 3)).toBe(" ".repeat(23) + "│ ＨＩ │");
   expect(row(buf, 4)).toBe(" ".repeat(23) + "╰──────╯");
   expect(row(buf, 6)).toBe(" ● Hello");
 });
@@ -75,9 +75,9 @@ test("border animation stops offscreen and resumes when the newest bubble return
   expect(chat.hasVisibleAnimation).toBe(false);
 });
 
-test("user bubbles preserve wrapped CJK and multiline text across resizing and scrolling", () => {
+test("user bubbles preserve wrapped wide and multiline text across resizing and scrolling", () => {
   const chat = new ChatView();
-  const text = "你好世界这是一个长消息\nsecond line";
+  const text = "ＨＥＬＬＯＷＯＲＬＤ！\nsecond line";
   chat.add({ role: "user", text });
   for (const w of [50, 18]) {
     const rect = { x: 1, y: 0, w, h: 30 };
