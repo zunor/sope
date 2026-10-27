@@ -20,7 +20,7 @@
 
 #define MAX_TOOL_CALLS 64
 #define MAX_ERROR_BODY 1500
-enum { RETRY_NONE, RETRY_RATE, RETRY_SERVER, RETRY_TRANSPORT, RETRY_TIMEOUT, RETRY_INCOMPLETE, RETRY_OUTPUT_LIMIT, RETRY_TOOL_BATCH };
+enum { RETRY_NONE, RETRY_RATE, RETRY_SERVER, RETRY_TRANSPORT, RETRY_TIMEOUT, RETRY_INCOMPLETE, RETRY_OUTPUT_LIMIT, RETRY_TOOL_BATCH, RETRY_ABORT };
 
 typedef struct {
     sope_buf id, name, args;
@@ -742,6 +742,14 @@ static int handle_chunk(sope_call *c, oa_state *s, const char *data, size_t n)
         if (!strcmp(str, "stop")) s->finish = 1;
         else if (!strcmp(str, "tool_calls") && !sope__call_is_compaction(c)) s->finish = 2;
         else if (!strcmp(str, "length")) s->finish = 3;
+        else if (!strcmp(str, "abort")) {
+            /* The provider abandoned this attempt, not the user's turn.
+             * Discard its provisional output and use the existing bounded
+             * request retry path; committed tools must never be replayed. */
+            s->failure = RETRY_ABORT;
+            sope__json_free(root);
+            return 0;
+        }
         else {
             sope__call_error(c, SOPE_ERROR, "openai: incomplete response (finish_reason=%s)", str);
             sope__json_free(root);
@@ -826,6 +834,7 @@ static const char *failure_name(int failure)
     case RETRY_INCOMPLETE: return "incomplete_stream";
     case RETRY_OUTPUT_LIMIT: return "output_limit";
     case RETRY_TOOL_BATCH: return "invalid_tool_batch";
+    case RETRY_ABORT: return "aborted_response";
     default: return "permanent";
     }
 }

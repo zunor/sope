@@ -562,7 +562,10 @@ their own budgets. These are per-request limits, not a whole-turn time budget.
 One model round may have multiple HTTP attempts. Rate limits (429), request
 timeouts (408), transient 5xx (excluding 501/505), classified transport errors,
 structured transient provider errors (including errors inside HTTP 200), and
-truncated streams are retryable. Authentication, invalid requests, context
+truncated streams and Chat `finish_reason="abort"` are retryable. Provider aborts
+share the configured attempt limit and absolute request deadline, including
+compaction; they are distinct from user cancellation, which never retries.
+Authentication, invalid requests, context
 window overflow, refusals and complete malformed tool batches
 are terminal for this retry policy. Context overflow uses compaction recovery.
 The policy is provider-independent; it does not match human error prose.
@@ -605,7 +608,8 @@ input cannot bypass that wait. Cancellation interrupts backoff and I/O.
 
 `SOPE_EVENT_MODEL_RETRY` (15) marks an abandoned attempt. `call_id` identifies
 the model round (not a tool), `code` is the next attempt number, and `name` is
-`rate_limit`, `server`, `transport`, `timeout`, `incomplete_stream` or `output_limit`.
+`rate_limit`, `server`, `transport`, `timeout`, `incomplete_stream`, `output_limit`,
+`invalid_tool_batch` or `aborted_response`.
 The JSON data contains `delay_ms`, boolean `compaction`, `discarded_text_bytes` and
 `discarded_thinking_bytes`, `max_tokens` and `next_max_tokens`. JS exposes `model_retry`; Go exposes `EventModelRetry`.
 Text and reasoning deltas before this boundary are provisional: hosts must mark

@@ -50,6 +50,57 @@ test("a disconnected tool fragment is discarded before retry", async () => {
   expect(r.history).toContain("recovered");
 });
 
+const aborted = () => new Response(chunk({ content: "abandoned text", reasoning_content: "abandoned reasoning",
+  tool_calls: [{ index: 0, id: "abandoned", type: "function", function: { name: "bash", arguments: '{"command":"touch bad"}' } }],
+}) + chunk({}, "abort") + "data: [DONE]\n\n");
+
+test("provider abort discards partial output and tools and retries the same request", async () => {
+  const r = await run(n => n === 1 ? aborted() : success());
+  expect(r.attempts).toBe(2);
+  expect(r.bodies[1]).toEqual(r.bodies[0]);
+  expect(r.events.find(e => e.type === "model_retry")).toMatchObject({ reason: "aborted_response",
+    attempt: 2, discardedTextBytes: 14, discardedThinkingBytes: 19 });
+  expect(r.history).not.toContain("abandoned");
+  expect(r.history).toContain("recovered");
+  expect(r.events.some(e => e.type === "error")).toBe(false);
+  expect(r.events.at(-1)).toMatchObject({ stopReason: "end_turn" });
+});
+
+for (const retries of [0, 2]) test(`provider abort obeys max_retries=${retries}`, async () => {
+  const r = await run(aborted, { "openai.max_retries": String(retries) });
+  expect(r.attempts).toBe(retries + 1);
+  expect(r.events.filter(e => e.type === "model_retry")).toHaveLength(retries);
+  expect(r.events.at(-1)).toMatchObject({ stopReason: "error" });
+  expect(r.history).not.toContain("abandoned");
+});
+
+test("provider abort backoff cannot outlive the request deadline", async () => {
+  const r = await run(aborted, { "openai.retry_delay_ms": "1000", "openai.request_timeout_ms": "120" });
+  expect(r.attempts).toBe(1);
+  expect(r.events.find(e => e.type === "error")).toMatchObject({ code: -9 });
+  expect(r.events.at(-1)).toMatchObject({ stopReason: "error" });
+});
+
+test("user cancellation during provider abort recovery prevents another request", async () => {
+  let requests = 0;
+  const server = Bun.serve({ port: 0, fetch() { requests++; return aborted(); } });
+  const agent = Agent.create({ provider: "openai", model: "fixture", "openai.base_url": `http://127.0.0.1:${server.port}`,
+    "openai.retry_delay_ms": "1000" });
+  try {
+    agent.send("cancel recovery");
+    let ended = false, cancelled = false;
+    const deadline = performance.now() + 2000;
+    while (!ended && performance.now() < deadline) {
+      const ev = agent.poll(0);
+      if (!ev) { await Bun.sleep(2); continue; }
+      if (ev.type === "model_retry") { cancelled = true; agent.cancel(); }
+      if (ev.type === "turn_end") { ended = true; expect(ev.stopReason).toBe("cancelled"); }
+    }
+    expect(ended && cancelled).toBe(true);
+    expect(requests).toBe(1);
+  } finally { agent.free(); server.stop(true); }
+});
+
 test("Retry-After sets the earliest retry time", async () => {
   const r = await run(n => n === 1 ? new Response("busy", { status: 429, headers: { "Retry-After": "2" } }) : success());
   expect(r.attempts).toBe(2);
@@ -71,6 +122,8 @@ for (const [name, response] of [
   ["JSON auth with status 200", () => Response.json({ error: { code: "invalid_api_key" } })],
   ["context overflow", () => Response.json({ error: { code: "context_length_exceeded" } }, { status: 500 })],
   ["malformed data", () => new Response("data: {bad json}\n\n")],
+  ["content filter", () => new Response(chunk({}, "content_filter"))],
+  ["unknown finish reason", () => new Response(chunk({}, "unknown"))],
 ] as const) test(`${name} is terminal, not transient`, async () => {
   const r = await run(response);
   expect(r.attempts).toBe(1);
@@ -163,13 +216,13 @@ for (const cancel of [false, true]) test(cancel ? "cancellation interrupts backo
   } finally { agent.free(); server.stop(true); }
 });
 
-for (const length of [false, true]) test(`retry after a committed tool preserves durable evidence (output limit: ${length})`, async () => {
+for (const finish of [null, "length", "abort"]) test(`retry after a committed tool preserves durable evidence (${finish ?? "EOF"})`, async () => {
   const dir = mkdtempSync(join(tmpdir(), "sope-retry-durable-"));
   const bodies: unknown[] = [];
   const server = Bun.serve({ port: 0, async fetch(req) {
     bodies.push(await req.json());
     if (bodies.length === 1) return new Response(chunk({ tool_calls: [{ index: 0, id: "once", type: "function", function: { name: "effect", arguments: "{}" } }] }, "tool_calls") + "data: [DONE]\n\n");
-    if (bodies.length === 2) return new Response(chunk({ content: "abandoned" }, length ? "length" : null) + (length ? "data: [DONE]\n\n" : ""));
+    if (bodies.length === 2) return new Response(chunk({ content: "abandoned" }) + (finish ? chunk({}, finish) + "data: [DONE]\n\n" : ""));
     return success();
   } });
   let agent = Agent.open(dir, { provider: "openai", model: "fixture", "openai.max_tokens": "4096", "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": "10" });
@@ -187,7 +240,7 @@ for (const length of [false, true]) test(`retry after a committed tool preserves
     expect(ended).toBe(true);
     expect(effects).toBe(1);
     expect(bodies).toHaveLength(3);
-    expect(bodies[2]).toEqual(length ? { ...bodies[1] as object, max_tokens: 8192 } : bodies[1]);
+    expect(bodies[2]).toEqual(finish === "length" ? { ...bodies[1] as object, max_tokens: 8192 } : bodies[1]);
     agent.free();
     agent = Agent.open(dir);
     expect(agent.history()).toContain("committed result");
@@ -202,8 +255,8 @@ for (const length of [false, true]) test(`retry after a committed tool preserves
   } finally { agent.free(); server.stop(true); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("compaction discards an incomplete summary and installs only the successful retry", async () => {
-  const server = Bun.serve({ port: 0, fetch() { return ++attempts === 1 ? new Response(chunk({ content: "abandoned summary" })) : success(); } });
+for (const finish of [null, "abort"]) test(`compaction discards an incomplete summary and installs only the successful retry (${finish ?? "EOF"})`, async () => {
+  const server = Bun.serve({ port: 0, fetch() { return ++attempts === 1 ? new Response(chunk({ content: "abandoned summary" }) + (finish ? chunk({}, finish) : "")) : success(); } });
   let attempts = 0;
   const agent = Agent.create({ provider: "openai", model: "fixture", "openai.max_tokens": "4096", "openai.base_url": `http://127.0.0.1:${server.port}`, "openai.retry_delay_ms": "10" });
   try {
