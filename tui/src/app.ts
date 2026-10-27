@@ -40,7 +40,7 @@ import { listModels, type ModelInfo } from "./agent/models";
 import { MODES, modeLabel, type PermissionMode } from "./agent/permissions";
 import { COMMANDS, runCommand, type CommandHost } from "./commands";
 import type { Config } from "./config";
-import type { CellBuffer } from "./render/buffer";
+import { INVERSE, type CellBuffer } from "./render/buffer";
 import { parseOscColor } from "./render/color";
 import { Renderer } from "./render/renderer";
 import { FrameScheduler } from "./render/scheduler";
@@ -55,7 +55,7 @@ import { ChangesPanel, drawChangeSummary, type Graphics } from "./ui/changes";
 import { CommandSuggestions } from "./ui/commands";
 import { formatTokens } from "./ui/context";
 import { EffortPicker } from "./ui/effort";
-import type { Editor } from "./ui/editor";
+import type { Editor, EditorLayout } from "./ui/editor";
 import { METEOR_ROWS } from "./ui/meteor";
 import { ModePicker } from "./ui/modes";
 import { ModelPicker } from "./ui/models";
@@ -87,6 +87,16 @@ export interface AppOptions {
   prompt?: string;
   /** Attached to the first message (--image). */
   images?: ImageFile[];
+}
+
+interface InputHit {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  textX: number;
+  editor: Editor;
+  rows: EditorLayout["rows"];
 }
 
 /** The background from $COLORFGBG ("fg;bg", set by some terminals) until the terminal answers the OSC 11 query. */
@@ -137,6 +147,9 @@ export class App {
   #showThinking = false;
   #showTrace = false;
   #inputWidth = 40;
+  #inputScroll = 0;
+  #inputHit: InputHit | null = null;
+  #inputDrag: InputHit | null = null;
   #ticker: ReturnType<typeof setInterval> | null = null;
   #tickInterval = 0;
   #escTimer: ReturnType<typeof setTimeout> | null = null;
@@ -172,6 +185,7 @@ export class App {
     this.#term.onDrain(() => this.#frames.resume());
     this.#term.enter();
     this.#term.onResize(() => {
+      this.#inputDrag = null;
       this.#renderer.invalidate();
       this.#scheduleRender();
     });
@@ -246,6 +260,10 @@ export class App {
     this.#commandHits = [];
     this.#commandBounds = null;
     this.#selection.clear();
+    this.#inputHit = null;
+    this.#inputDrag = null;
+    this.#inputScroll = 0;
+    this.#session.editor.clearSelection();
   }
 
   #openList(): void {
@@ -322,6 +340,7 @@ export class App {
     if (ev.type === "apc") return this.#term.graphics.reply(ev.data);
     if (ev.type === "osc") return this.#handleOsc(ev.data);
     if (ev.type === "mouse") return this.#handleMouse(ev);
+    this.#inputDrag = null;
     this.#selection.clear();
     if (this.#list) {
       if (ev.type !== "key") return this.#list.type(ev.text);
@@ -413,6 +432,7 @@ export class App {
         else e.deleteForward();
         return;
       case "escape":
+        if (e.selection) return e.clearSelection();
         if (this.#changes) this.#changes = null; // the diff panel first, then the turn
         else if (s.busy) s.cancel();
         return;
@@ -453,6 +473,26 @@ export class App {
     // never turn its horizontal reports into downward motion or a click.
     if (ev.action === "wheel-left" || ev.action === "wheel-right") return;
     const p = { x: ev.x, y: ev.y };
+    // An input drag owns motion/release even outside the box. Its saved rows
+    // keep endpoints stable while the cursor moves or a command menu closes.
+    if (this.#inputDrag && !this.#list && !this.#docked) {
+      if ((ev.action === "drag" || ev.action === "release") && ev.button === 0) {
+        this.#moveInputPointer(this.#inputDrag, ev.x, ev.y, true);
+        if (ev.action === "release") this.#inputDrag = null;
+        return;
+      }
+    }
+    if (ev.action === "press" && ev.button === 0) {
+      this.#inputDrag = null;
+      this.#session.editor.clearSelection();
+      const hit = this.#inputHit;
+      if (!this.#list && !this.#docked && hit && hit.editor === this.#session.editor && ev.x >= hit.x && ev.x < hit.x + hit.w && ev.y >= hit.y && ev.y < hit.y + hit.h) {
+        this.#selection.clear();
+        this.#inputDrag = hit;
+        this.#moveInputPointer(hit, ev.x, ev.y, false);
+        return;
+      }
+    }
     this.#session.chat.hover(null);
     if (ev.action === "move" || ev.action === "drag") this.#setHover(this.#tabAt(ev.x, ev.y)?.index ?? null);
     if (this.#list) return this.#handleListMouse(ev);
@@ -533,7 +573,14 @@ export class App {
         return this.#selection.drag(p);
       case "release":
         if (this.#selection.release(p)) this.#copySelection();
+        return;
     }
+  }
+
+  #moveInputPointer(hit: InputHit, x: number, y: number, extend: boolean): void {
+    const row = hit.rows[Math.max(0, Math.min(hit.rows.length - 1, y - hit.y))];
+    const column = y < hit.y ? 0 : y >= hit.y + hit.h ? Infinity : x - hit.textX;
+    if (row) hit.editor.moveToCell(row, column, extend);
   }
 
   #handleListMouse(ev: MouseInput): void {
@@ -568,6 +615,7 @@ export class App {
   #syncCommands(): boolean {
     if (this.#list || this.#docked) return false;
     const editor = this.#session.editor;
+    if (editor.selection) return false;
     return this.#commands.sync(editor.text, editor.cursor);
   }
 
@@ -740,6 +788,7 @@ export class App {
     this.#commandHits = [];
     this.#commandBounds = null;
     this.#changesHit = null;
+    this.#inputHit = null;
     const s = this.#session;
 
     // The diff panel takes the right half and everything else fits in the left;
@@ -774,11 +823,13 @@ export class App {
     const layout = s.editor.layout(this.#inputWidth);
     // A popup takes the input's place, its box where the two rules were.
     const popup = this.#docked;
+    if (popup || this.#list) this.#inputDrag = null;
     // Between the transcript and the input: a blank row, then while a turn
     // runs the status and the tip below it, its change summary beside both.
     const band = s.busy ? 1 + METEOR_ROWS + 1 : 1;
-    const room = H - TAB_ROWS - 2 - band - 2 - 1; // tab bar, transcript, band, box edges, footer
-    const inputRows = popup ? popup.height(room) : Math.max(1, Math.min(MAX_INPUT_ROWS, room, layout.rows.length));
+    const bodyY = TAB_ROWS + 1; // one blank row between the tab bar and the content
+    const room = H - bodyY - 2 - band - 2 - 1; // header, transcript, band, box edges, footer
+    const inputRows = popup ? popup.height(room) : this.#inputDrag?.h ?? Math.max(1, Math.min(MAX_INPUT_ROWS, room, layout.rows.length));
     this.#popupRows = popup ? inputRows + 2 : 0;
 
     const footerY = H - 1;
@@ -787,7 +838,6 @@ export class App {
     const ruleTopY = inputY - 1;
     const bandY = ruleTopY - band;
     const statusY = bandY + 1;
-    const bodyY = TAB_ROWS; // immediately below the two-row tab bar
     const bodyH = Math.max(1, bandY - bodyY); // the band starts with a blank row
 
     const tabGraphics = this.#term.graphics.supported && this.#term.cellSize
@@ -819,7 +869,7 @@ export class App {
     }
     this.#selection.highlight(buf);
     if (this.#syncCommands()) {
-      const h = this.#commands.height(ruleTopY - TAB_ROWS);
+      const h = this.#commands.height(ruleTopY - bodyY);
       if (h) {
         const y = ruleTopY - h;
         this.#commandBounds = { x: PAD, y, w: inner, h };
@@ -877,21 +927,35 @@ export class App {
   #drawInput(buf: CellBuffer, y: number, rows: number, layout: ReturnType<Editor["layout"]>, promptWidth: number): void {
     const editor = this.#session.editor;
     const x = PAD + 2 + promptWidth;
+    // Retain the viewport while the cursor stays visible, including after a click.
+    const scroll = Math.max(0, Math.min(this.#inputScroll, layout.rows.length - rows, layout.cursorRow));
+    if (!this.#inputDrag) this.#inputScroll = Math.max(scroll, layout.cursorRow - rows + 1);
+    const visibleRows = this.#inputDrag?.rows ?? layout.rows.slice(this.#inputScroll, this.#inputScroll + rows);
+    this.#inputHit = { x: PAD + 1, y, w: this.#inputWidth + promptWidth + 2, h: rows, textX: x, editor, rows: visibleRows };
     buf.text(PAD + 2, y, PROMPT, { fg: palette.accent, bold: true });
 
     if (!editor.text) {
       const placeholder = this.#session.provider === "mock" ? "Message sope…  try !echo hi, !agent a | b, or /help" : "Message sope…  /help for commands";
       buf.text(x, y, placeholder, { fg: palette.faint }, x + this.#inputWidth);
     } else {
-      const scroll = Math.max(0, layout.cursorRow - rows + 1);
       for (let i = 0; i < rows; i++) {
-        const row = layout.rows[scroll + i];
-        if (row) buf.text(x, y + i, editor.text.slice(row.start, row.end), {}, x + this.#inputWidth);
+        const row = visibleRows[i];
+        if (!row) continue;
+        buf.text(x, y + i, editor.text.slice(row.start, row.end), {}, x + this.#inputWidth);
+        const range = editor.selection;
+        if (range && range[0] <= row.end && range[1] > row.start) {
+          const start = Math.max(row.start, range[0]);
+          const end = Math.min(row.end, range[1]);
+          const x0 = x + stringWidth(editor.text.slice(row.start, start));
+          // A selected hard newline gets one highlighted blank cell.
+          const newline = range[1] > row.end && editor.text[row.end] === "\n" ? 1 : 0;
+          const x1 = Math.min(x + this.#inputWidth, x + stringWidth(editor.text.slice(row.start, end)) + newline);
+          for (let col = x0; col < x1; col++) buf.attr[(y + i) * buf.width + col]! |= INVERSE;
+        }
       }
-      layout.cursorRow -= scroll;
     }
     // The real cursor sits in the input so IME candidate windows appear in the right place.
-    this.#renderer.cursor = { x: x + layout.cursorCol, y: y + layout.cursorRow, visible: true };
+    this.#renderer.cursor = { x: x + layout.cursorCol, y: y + layout.cursorRow - this.#inputScroll, visible: true };
   }
 
   /** The permission mode, what runs in the background, then a notice when there is one; on the right, the model and how full the context is. */

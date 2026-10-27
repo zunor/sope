@@ -16,11 +16,13 @@ export interface EditorLayout {
 export class Editor {
   text = "";
   cursor = 0; // UTF-16 offset, always on a grapheme boundary
+  #anchor: number | null = null;
   #history: string[] = [];
   #historyIndex = -1; // -1: editing the draft, not browsing history
   #draft = "";
 
   set(text: string, cursor = text.length): void {
+    this.clearSelection();
     this.text = text;
     this.cursor = cursor;
   }
@@ -30,37 +32,46 @@ export class Editor {
   }
 
   insert(s: string): void {
+    if (!s) return;
+    this.#deleteSelection();
     this.text = this.text.slice(0, this.cursor) + s + this.text.slice(this.cursor);
     this.cursor += s.length;
   }
 
   backspace(): void {
+    if (this.#deleteSelection()) return;
     const prev = this.#prevBoundary(this.cursor);
     this.#delete(prev, this.cursor);
   }
 
   deleteForward(): void {
+    if (this.#deleteSelection()) return;
     this.#delete(this.cursor, this.#nextBoundary(this.cursor));
   }
 
   left(): void {
-    this.cursor = this.#prevBoundary(this.cursor);
+    this.cursor = this.selection?.[0] ?? this.#prevBoundary(this.cursor);
+    this.clearSelection();
   }
 
   right(): void {
-    this.cursor = this.#nextBoundary(this.cursor);
+    this.cursor = this.selection?.[1] ?? this.#nextBoundary(this.cursor);
+    this.clearSelection();
   }
 
   lineStart(): void {
+    this.clearSelection();
     this.cursor = this.text.lastIndexOf("\n", this.cursor - 1) + 1;
   }
 
   lineEnd(): void {
+    this.clearSelection();
     const nl = this.text.indexOf("\n", this.cursor);
     this.cursor = nl < 0 ? this.text.length : nl;
   }
 
   wordLeft(): void {
+    this.clearSelection();
     let target = 0;
     for (const s of words.segment(this.text)) {
       if (s.index >= this.cursor) break;
@@ -70,6 +81,7 @@ export class Editor {
   }
 
   wordRight(): void {
+    this.clearSelection();
     for (const s of words.segment(this.text)) {
       const end = s.index + s.segment.length;
       if (end > this.cursor && s.isWordLike) {
@@ -81,18 +93,21 @@ export class Editor {
   }
 
   deleteWordLeft(): void {
+    if (this.#deleteSelection()) return;
     const end = this.cursor;
     this.wordLeft();
     this.#delete(this.cursor, end);
   }
 
   killToLineStart(): void {
+    if (this.#deleteSelection()) return;
     const end = this.cursor;
     this.lineStart();
     this.#delete(this.cursor, end);
   }
 
   killToLineEnd(): void {
+    if (this.#deleteSelection()) return;
     const start = this.cursor;
     this.lineEnd();
     this.#delete(start, this.cursor === start ? Math.min(start + 1, this.text.length) : this.cursor);
@@ -116,19 +131,37 @@ export class Editor {
 
   /** Moves the cursor one visual row up (-1) or down (+1). Returns false at the edge. */
   moveVertical(dir: -1 | 1, width: number): boolean {
+    this.clearSelection();
     const { rows, cursorRow, cursorCol } = this.layout(width);
     const target = rows[cursorRow + dir];
     if (!target) return false;
+    this.moveToCell(target, cursorCol);
+    return true;
+  }
+
+  /** Places the cursor at a display column of a rendered row, keeping graphemes whole. */
+  moveToCell(target: Row, column: number, extend = false): void {
+    if (extend) this.#anchor ??= this.cursor;
+    else this.clearSelection();
     let col = 0;
     let off = target.start;
     for (const [g, i] of segments(this.text.slice(target.start, target.end))) {
       const w = graphemeWidth(g);
-      if (col + w > cursorCol) break;
+      if (col + w > Math.max(0, column)) break;
       col += w;
       off = target.start + i + g.length;
     }
     this.cursor = off;
-    return true;
+  }
+
+  /** Half-open UTF-16 range, independent of wrapping and screen coordinates. */
+  get selection(): [number, number] | null {
+    if (this.#anchor === null || this.#anchor === this.cursor) return null;
+    return [Math.min(this.#anchor, this.cursor), Math.max(this.#anchor, this.cursor)];
+  }
+
+  clearSelection(): void {
+    this.#anchor = null;
   }
 
   /**
@@ -213,6 +246,7 @@ export class Editor {
   }
 
   historyPrev(): void {
+    this.clearSelection();
     if (!this.#history.length) return;
     if (this.#historyIndex === -1) {
       this.#draft = this.text;
@@ -222,6 +256,7 @@ export class Editor {
   }
 
   historyNext(): void {
+    this.clearSelection();
     if (this.#historyIndex === -1) return;
     if (++this.#historyIndex >= this.#history.length) {
       this.#historyIndex = -1;
@@ -229,6 +264,14 @@ export class Editor {
     } else {
       this.set(this.#history[this.#historyIndex]!);
     }
+  }
+
+  #deleteSelection(): boolean {
+    const range = this.selection;
+    this.clearSelection();
+    if (!range) return false;
+    this.#delete(...range);
+    return true;
   }
 
   #delete(start: number, end: number): void {

@@ -99,3 +99,41 @@ test("pointer motion without a button is a move (hover)", () => {
   expect(parse("\x1b[<35;10;1M")).toEqual(["mouse:move"]);
   expect(parse("\x1b[<32;10;1M")).toEqual(["mouse:drag"]);
 });
+
+test("editor clicks map display cells to whole graphemes and clamp to line ends", () => {
+  const editor = new Editor();
+  const family = "👨‍👩‍👧";
+  editor.set(`a你${family}e\u0301z`);
+  const row = editor.layout(40).rows[0]!;
+  for (const [column, offset] of [[-2, 0], [0, 0], [1, 1], [2, 1], [3, 2], [4, 2], [5, 2 + family.length], [6, 4 + family.length], [30, editor.text.length]]) {
+    editor.moveToCell(row, column!);
+    expect(editor.cursor).toBe(offset!);
+  }
+  editor.moveToCell(row, 4);
+  editor.insert("X");
+  expect(editor.text).toBe(`a你X${family}e\u0301z`);
+});
+
+test("editor clicks follow soft wraps, explicit newlines and empty rows", () => {
+  const editor = new Editor();
+  editor.set("ab cd\n\n你好世界");
+  const { rows } = editor.layout(4);
+  for (const [row, column, offset] of [[0, 1, 1], [0, 10, 3], [1, 1, 4], [1, 10, 5], [2, 2, 6], [3, 3, 8], [4, 0, 9]]) {
+    editor.moveToCell(rows[row!]!, column!);
+    expect(editor.cursor).toBe(offset!);
+  }
+});
+
+test("editor clicks handle an empty input and the extra cursor row after a full line", () => {
+  const editor = new Editor();
+  editor.moveToCell(editor.layout(4).rows[0]!, 3);
+  expect(editor.cursor).toBe(0);
+  editor.set("abcd");
+  const { rows } = editor.layout(4);
+  expect(rows).toHaveLength(2);
+  editor.moveToCell(rows[1]!, 2);
+  expect(editor.cursor).toBe(4);
+  editor.moveToCell(rows[0]!, 2);
+  editor.insert("X");
+  expect(editor.text).toBe("abXcd");
+});

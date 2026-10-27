@@ -120,7 +120,7 @@ test("the panel lists the files and shows the picked one's diff", () => {
   const buf = new CellBuffer(40, 10);
   panel.render(buf, { x: 0, y: 0, w: 40, h: 10 }, surfaces(0));
   expect(row(buf, 0)).toBe("Changes · 2 files +2 -1" + " ".repeat(16) + "✕");
-  expect(row(buf, 1)).toBe("› a.ts" + " ".repeat(29) + "+1 -1");
+  expect(row(buf, 1)).toBe("▾ a.ts" + " ".repeat(29) + "+1 -1");
   expect(row(buf, 3)).toBe("─".repeat(40));
   expect(row(buf, 4)).toBe("1 - one");
   expect(row(buf, 5)).toBe("1 + ONE");
@@ -128,11 +128,79 @@ test("the panel lists the files and shows the picked one's diff", () => {
   expect(panel.click(5, 2)).toBe("handled"); // b.ts
   buf.clear();
   panel.render(buf, { x: 0, y: 0, w: 40, h: 10 }, surfaces(0));
-  expect(row(buf, 2).startsWith("› b.ts")).toBe(true);
+  expect(row(buf, 2).startsWith("▾ b.ts")).toBe(true);
   expect(row(buf, 4)).toBe("1   two");
   expect(row(buf, 5)).toBe("2 + three");
   expect(panel.click(39, 0)).toBe("close");
   expect(panel.click(5, 6)).toBeNull(); // the diff: left to text selection
+});
+
+test("clicking a file collapses and reopens its diff, preserving its scroll position", () => {
+  const t = new ChangeTracker();
+  t.track("a.txt");
+  t.track("b.txt");
+  put("a.txt", Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join("\n") + "\n");
+  put("b.txt", "other file\n");
+  t.refresh();
+  const panel = new ChangesPanel(() => t);
+  const buf = new CellBuffer(40, 10);
+  const paint = () => {
+    buf.clear();
+    panel.render(buf, { x: 0, y: 0, w: 40, h: 10 }, surfaces(0));
+  };
+  paint();
+  panel.wheel(5, 3);
+  paint();
+  expect(row(buf, 4).trim()).toBe("4 + line 4");
+  expect(panel.click(5, 1)).toBe("handled");
+  paint();
+  expect(row(buf, 1).startsWith("▸ a.txt")).toBe(true);
+  expect(row(buf, 2)).toContain("b.txt");
+  expect(Array.from({ length: 7 }, (_, i) => row(buf, i + 3))).toEqual(Array(7).fill(""));
+  panel.wheel(5, 20); // hidden diff does not scroll
+  expect(panel.click(41, 1)).toBeNull(); // outside the file row
+  expect(panel.click(5, 1)).toBe("handled");
+  paint();
+  expect(row(buf, 1).startsWith("▾ a.txt")).toBe(true);
+  expect(row(buf, 4).trim()).toBe("4 + line 4");
+  panel.click(5, 1);
+  paint();
+  panel.click(5, 2); // another file opens directly
+  paint();
+  expect(row(buf, 2).startsWith("▾ b.txt")).toBe(true);
+  expect(row(buf, 4)).toBe("1 + other file");
+});
+
+test("live file-list updates keep a collapsed diff attached to its path", () => {
+  const t = new ChangeTracker();
+  t.track("b.txt");
+  put("b.txt", "B\n");
+  t.refresh();
+  const panel = new ChangesPanel(() => t);
+  const buf = new CellBuffer(40, 10);
+  const paint = () => {
+    buf.clear();
+    panel.render(buf, { x: 0, y: 0, w: 40, h: 10 }, surfaces(0));
+  };
+  paint();
+  panel.click(5, 1);
+  t.track("a.txt");
+  put("a.txt", "A\n");
+  t.refresh();
+  paint();
+  expect(row(buf, 2).startsWith("▸ b.txt")).toBe(true);
+  expect(row(buf, 4)).toBe("");
+  panel.click(5, 2);
+  paint();
+  expect(row(buf, 4)).toBe("1 + B");
+  unlinkSync(join(dir, "b.txt"));
+  t.refresh();
+  paint();
+  expect(row(buf, 1).startsWith("▾ a.txt")).toBe(true);
+  expect(row(buf, 3)).toBe("1 + A");
+  t.reset();
+  paint();
+  expect(panel.click(5, 1)).toBeNull();
 });
 
 test("diff wheel uses single rows, honors speed, and reverses immediately at an edge", () => {

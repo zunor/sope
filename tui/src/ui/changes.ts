@@ -12,15 +12,16 @@
 //                                              (the text half a row down)
 //
 //   tabs, transcript, input … │ Changes · 2 files +42 -7               ✕
-//                             │ › src/retry.ts                     +3 -1
-//                             │   src/retry.test.ts               +39 -6
+//                             │ ▾ src/retry.ts                     +3 -1
+//                             │ ▸ src/retry.test.ts               +39 -6
 //                             │ ──────────────────────────────────────
 //                             │  1   /** Exponential backoff …
 //                             │  2 -   return 250 * 2 ** attempt;
 //                             │  2 +   return Math.min(2000, …);
 //
-// A click picks a file, the wheel scrolls the list or the diff under the
-// pointer, esc (or the summary again) closes the panel.
+// A click opens a file; clicking the open file toggles its diff. The wheel
+// scrolls the list or the diff under the pointer; esc (or the summary again)
+// closes the panel.
 
 import type { ChangeSet } from "../agent/changes";
 import type { PreviewLine } from "../agent/tools";
@@ -94,6 +95,8 @@ export function drawChangeSummary(buf: CellBuffer, start: number, end: number, y
 
 export class ChangesPanel {
   #selected = 0;
+  #selectedPath: string | null = null;
+  #expanded = true;
   #listScroll = 0;
   #scroll = 0; // first diff line shown
   // Where the last frame put things, for the pointer.
@@ -112,23 +115,31 @@ export class ChangesPanel {
 
   /** A press inside the panel: "close" on ✕, "handled" on a file, null elsewhere (the diff: text to select). */
   click(x: number, y: number): "close" | "handled" | null {
+    if (!this.contains(x, y)) return null;
     if (y === this.#close.y && x >= this.#close.x0 && x < this.#close.x1) return "close";
     if (y < this.#list.y || y >= this.#list.y + this.#list.h) return null;
-    this.#pick(this.#listScroll + y - this.#list.y);
+    const index = this.#listScroll + y - this.#list.y;
+    if (index === this.#selected) this.#expanded = !this.#expanded;
+    else this.#pick(index);
     return "handled";
   }
 
   /** The wheel inside the panel: over the list it moves the pick, elsewhere it scrolls the diff. */
   wheel(y: number, by: number, speed = 1): void {
     if (y >= this.#list.y && y < this.#list.y + this.#list.h) return this.#pick(this.#selected + by);
+    if (!this.#expanded) return;
     this.#scroll = Math.max(0, Math.min(this.#scroll + speed * by, this.#diff.lines - this.#diff.h));
   }
 
   #pick(index: number): void {
     const n = this.changes().files.length;
     const next = Math.max(0, Math.min(n - 1, index));
-    if (next !== this.#selected) this.#scroll = 0;
+    if (next !== this.#selected) {
+      this.#scroll = 0;
+      this.#expanded = true;
+    }
     this.#selected = next;
+    this.#selectedPath = this.changes().files[next]?.path ?? null;
   }
 
   render(buf: CellBuffer, area: Rect, colors: Surfaces): void {
@@ -139,6 +150,8 @@ export class ChangesPanel {
     const bottom = area.y + area.h;
     const changes = this.changes();
     const files = changes.files;
+    this.#list = { y, h: 0 };
+    this.#diff = { y, h: 0, lines: 0 };
 
     // Title row, ✕ on the right.
     let tx = buf.text(x, y, "Changes", { bold: true }, end - 2);
@@ -152,12 +165,24 @@ export class ChangesPanel {
     y++;
 
     if (!files.length) {
-      this.#list = { y, h: 0 };
-      this.#diff = { y, h: 0, lines: 0 };
+      this.#selected = 0;
+      this.#selectedPath = null;
+      this.#expanded = true;
+      this.#scroll = 0;
       if (y < bottom) buf.text(x, y + 1, truncate("No files changed yet.", w), { fg: palette.muted });
       return;
     }
-    this.#selected = Math.min(this.#selected, files.length - 1);
+    // Live changes can insert files before the current one. Keep the open or
+    // collapsed state attached to the same path, rather than its list index.
+    const kept = files.findIndex((f) => f.path === this.#selectedPath);
+    if (kept >= 0) this.#selected = kept;
+    else {
+      this.#selected = Math.min(this.#selected, files.length - 1);
+      this.#expanded = true;
+      this.#scroll = 0;
+    }
+    this.#selectedPath = files[this.#selected]!.path;
+    if (y >= bottom) return;
 
     // The files: a third of the panel at most, scrolled to keep the pick in view.
     const listH = Math.max(1, Math.min(files.length, Math.floor((bottom - y) / 3)));
@@ -172,13 +197,13 @@ export class ChangesPanel {
       if (sel) buf.fill(x, y, w, 1, { bg });
       const stats = `+${f.added} -${f.removed}`;
       const sx = end - stats.length;
-      buf.text(x, y, sel ? "›" : " ", { fg: palette.accent, bg, bold: true });
+      buf.text(x, y, sel && this.#expanded ? "▾" : "▸", { fg: palette.accent, bg, bold: true });
       buf.text(x + 2, y, truncate(f.path, Math.max(0, sx - x - 4)), { bg, bold: sel }, sx - 1);
       const ax = buf.text(sx, y, `+${f.added}`, { fg: palette.ok, bg });
       buf.text(ax + 1, y, `-${f.removed}`, { fg: palette.error, bg });
       y++;
     }
-    if (y >= bottom) return;
+    if (y >= bottom || !this.#expanded) return;
     buf.text(x, y++, "─".repeat(w), { fg: palette.faint });
 
     // The picked file's diff.
