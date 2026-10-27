@@ -4,6 +4,7 @@
 // quote lines, fenced code blocks, **bold** and `inline code`. Anything else
 // (including unclosed markers while a reply is still streaming) shows as is.
 
+import { diagramBlocks, DiagramFrame } from "./diagram";
 import type { Style } from "../render/buffer";
 import { palette } from "../theme";
 
@@ -15,6 +16,7 @@ export interface Run {
 
 export interface Styled {
   text: string;
+  diagrams?: Array<{ start: number; end: number; frame: DiagramFrame }>;
   runs: Run[]; // sorted, non-overlapping; uncovered text uses the base style
 }
 
@@ -55,18 +57,37 @@ function inline(out: Styled, line: string, base: Style | null): void {
   }
 }
 
-export function renderMarkdown(src: string): Styled {
+export function renderMarkdown(src: string, streaming = false, frames = new Map<number, DiagramFrame>()): Styled {
   const out: Styled = { text: "", runs: [] };
   let inFence = false;
   const lines = src.split("\n");
 
+  const blocks = new Map(diagramBlocks(lines, streaming).map((b) => [b.first, b]));
+  const used = new Set<number>();
+  let skip = -1;
   lines.forEach((line, n) => {
+    if (n < skip) return;
+    const block = blocks.get(n);
+    if (block) {
+      const frame = frames.get(n) ?? new DiagramFrame();
+      frame.update(block.text, block.complete);
+      frames.set(n, frame);
+      used.add(n);
+      if (out.text.length) out.text += "\n";
+      const start = out.text.length;
+      out.text += frame.source;
+      (out.diagrams ??= []).push({ start, end: out.text.length, frame });
+      out.runs.push({ start, end: out.text.length, style: CODE });
+      skip = block.last;
+      return;
+    }
     const fence = /^\s*```/.test(line);
     if (fence) {
       inFence = !inFence;
       return; // fence lines themselves are not shown
     }
     if (n > 0 && out.text.length > 0) out.text += "\n";
+    line = line.replace(/\t/g, "    ");
     const start = out.text.length;
 
     if (inFence) {
@@ -92,6 +113,7 @@ export function renderMarkdown(src: string): Styled {
       inline(out, line, null);
     }
   });
+  for (const key of frames.keys()) if (!used.has(key)) frames.delete(key);
   return out;
 }
 

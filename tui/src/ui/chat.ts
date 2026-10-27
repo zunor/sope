@@ -9,6 +9,7 @@ import { palette, surfaces, type Surfaces } from "../theme";
 import { stringWidth, truncate } from "../unicode/width";
 import { drawSummary, summaryWidth, TRANSCRIPT_SLOT, type Graphics } from "./changes";
 import { contextRows, formatTokens, type ContextReport } from "./context";
+import { DiagramFrame, diagramSlice } from "./diagram";
 import { renderMarkdown, slice } from "./markdown";
 import { formatElapsed } from "./status";
 import { wrapText } from "./wrap";
@@ -83,6 +84,7 @@ export interface Hit {
 }
 
 interface Line {
+  diagram?: { frame: DiagramFrame; row: number }; // row -1 is the viewport control
   spans: Span[];
   /** The text it shows that a search can find. */
   src?: Source[];
@@ -116,12 +118,30 @@ function textLines(text: string, width: number, style: Style, part: number, pref
   });
 }
 
-function markdownLines(text: string, width: number, part: number): Line[] {
-  const styled = renderMarkdown(text.replace(/\t/g, "    ").replace(/\n+$/, ""));
-  return wrapText(styled.text, width).map((row) => ({
-    spans: slice(styled, row.start, row.end, {}),
-    src: [{ part, text: styled.text, start: row.start, end: row.end, x: 0 }],
-  }));
+function markdownLines(m: Message, width: number, part: number, frames?: Map<number, DiagramFrame>): Line[] {
+  const styled = renderMarkdown(m.text, !!m.streaming, frames);
+  const lines: Line[] = [];
+  const prose = (start: number, end: number) => {
+    if (end <= start) return;
+    const text = styled.text.slice(start, end);
+    for (const row of wrapText(text, width)) lines.push({
+      spans: slice(styled, start + row.start, start + row.end, {}),
+      src: [{ part, text: styled.text, start: start + row.start, end: start + row.end, x: 0 }],
+    });
+  };
+  let pos = 0;
+  for (const block of styled.diagrams ?? []) {
+    prose(pos, Math.max(pos, block.start - 1));
+    let start = block.start;
+    block.frame.original.forEach((text, row) => {
+      lines.push({ spans: [], diagram: { frame: block.frame, row }, src: [{ part, text: styled.text, start, end: start + text.length, x: 0 }] });
+      start += text.length + 1;
+    });
+    lines.push({ spans: [], diagram: { frame: block.frame, row: -1 } });
+    pos = block.end + 1;
+  }
+  prose(pos, styled.text.replace(/\n+$/, "").length);
+  return lines;
 }
 
 /** Right-aligned user bubbles, with ordinary text and rounded character borders. */
@@ -265,7 +285,7 @@ function changeLines(changes: ChangeSet, width: number): Line[] {
   return [0, 1].map((cardRow) => ({ offset, card, cardRow, spans: [] }));
 }
 
-function linesFor(m: Message, width: number, showThinking: boolean, expanded: boolean): Line[] {
+function linesFor(m: Message, width: number, showThinking: boolean, expanded: boolean, frames?: Map<number, DiagramFrame>): Line[] {
   // Searchable strings are numbered the same way whatever is folded, so a hit
   // found in the unfolded layout names the same text in the one on screen.
   let part = 0;
@@ -276,7 +296,7 @@ function linesFor(m: Message, width: number, showThinking: boolean, expanded: bo
     case "changes":
       return m.changes ? changeLines(m.changes, width) : [];
     case "assistant":
-      lines = markdownLines(m.text, width, part);
+      lines = markdownLines(m, width, part, frames);
       break;
     case "error":
       lines = textLines(m.text, width, { fg: palette.error }, part);
@@ -399,6 +419,8 @@ export class ChatView {
   #messages: Message[] = [];
   #nextId = 1;
   #cache = new WeakMap<Message, { key: string; lines: Line[] }>();
+  #diagrams = new WeakMap<Message, Map<number, DiagramFrame>>();
+  #diagramHits: Array<{ frame: DiagramFrame; x: number; y: number; width: number; control: boolean }> = [];
   #foldWidths = new WeakMap<Line[], number>();
   #scroll = 0; // rows scrolled up from the bottom; 0 follows new output
   #maxScroll = 0;
@@ -461,11 +483,19 @@ export class ChatView {
   resetInteractions(): void {
     this.#foldHits = [];
     this.#cardHits = [];
+    this.#diagramHits = [];
     this.#pointer = null;
     this.hasVisibleAnimation = false;
   }
 
   toggleAt(x: number, y: number): boolean {
+    const diagram = this.#diagramHits.find((h) => h.control && h.y === y && x >= h.x && x < h.x + h.width);
+    if (diagram) {
+      if (x < diagram.x + 3) this.scrollDiagramAt(x, y, -8);
+      else if (x >= diagram.x + diagram.width - 3) this.scrollDiagramAt(x, y, 8);
+      else if (diagram.frame.changed) diagram.frame.showOriginal = !diagram.frame.showOriginal;
+      return true;
+    }
     const hit = this.#foldAt(x, y);
     if (!hit) return false;
     const opening = !this.#expanded.has(hit.msg);
@@ -486,6 +516,14 @@ export class ChatView {
 
   #foldAt(x: number, y: number) {
     return this.#foldHits.find((h) => h.y === y && x >= h.x0 && x < h.x1);
+  }
+
+  /** Horizontal gestures are consumed only inside a diagram viewport. */
+  scrollDiagramAt(x: number, y: number, columns: number): boolean {
+    const hit = this.#diagramHits.find((h) => h.y === y && x >= h.x && x < h.x + h.width);
+    if (!hit) return false;
+    hit.frame.offset = Math.max(0, Math.min(Math.max(0, hit.frame.width - hit.width), hit.frame.offset + columns));
+    return true;
   }
 
   scrollBy(rows: number): void {
@@ -580,7 +618,7 @@ export class ChatView {
     const key = `${this.#width}:${m.version}:${this.showThinking ? 1 : 0}`;
     let entry = this.#searchCache.get(m);
     if (entry?.key !== key) {
-      entry = { key, lines: linesFor(m, this.#width, this.showThinking, true), pattern: null, hits: [] };
+      entry = { key, lines: linesFor(m, this.#width, this.showThinking, true, this.#framesFor(m)), pattern: null, hits: [] };
       this.#searchCache.set(m, entry);
     }
     if (entry.pattern !== pattern) {
@@ -622,6 +660,7 @@ export class ChatView {
   render(buf: CellBuffer, r: Rect, spin: string, now = performance.now(), colors: Surfaces = DEFAULT_SURFACES, open?: ChangeSet, graphics?: Graphics): void {
     this.#foldHits = [];
     this.#cardHits = [];
+    this.#diagramHits = [];
     this.hasVisibleAnimation = false;
     const latestUser = this.#messages.findLast((m) => m.role === "user") ?? null;
     if (latestUser !== this.#breathingMessage) {
@@ -660,6 +699,13 @@ export class ChatView {
       this.#search.reveal = false;
       let at = all.findIndex(({ line, msg }) => msg === current.msg && line.src?.some((s) => s.part === current.part && s.start < current.end && current.start < s.end));
       if (at < 0) at = all.findIndex(({ msg }) => msg === current.msg); // folded away again
+      const target = all[at]?.line;
+      if (target?.diagram && target.src?.[0]) {
+        const source = target.src[0];
+        const col = stringWidth(source.text.slice(source.start, current.start));
+        const frame = target.diagram.frame;
+        if (col < frame.offset || col >= frame.offset + contentWidth) frame.offset = Math.max(0, col - Math.floor(contentWidth / 3));
+      }
       const top = this.#maxScroll - this.#scroll;
       const margin = Math.min(2, Math.floor(r.h / 4));
       if (at >= 0 && (at < top + margin || at > top + r.h - 1 - margin)) this.#scroll = this.#maxScroll - (at - Math.floor(r.h / 3));
@@ -712,6 +758,23 @@ export class ChatView {
         const g = gutterFor(msg, spin);
         buf.text(r.x, y, g.text, g.style);
       }
+      if (line.diagram) {
+        const { frame, row: diagramRow } = line.diagram;
+        const x = r.x + GUTTER;
+        frame.offset = Math.min(frame.offset, Math.max(0, frame.width - contentWidth));
+        this.#diagramHits.push({ frame, x, y, width: contentWidth, control: diagramRow < 0 });
+        if (diagramRow < 0) {
+          const state = !frame.complete ? "streaming" : frame.changed ? frame.showOriginal ? "original" : "repaired" : "original";
+          const label = ` Diagram · ${state}${frame.width > contentWidth ? ` · ${frame.offset + 1}/${frame.width}` : ""}${frame.changed ? " · click to switch" : ""} `;
+          buf.text(x, y, truncate(label, contentWidth, ""), { fg: palette.muted }, r.x + r.w);
+          if (frame.offset > 0) buf.text(x, y, "‹  ", { fg: palette.accent }, r.x + r.w);
+          if (frame.offset + contentWidth < frame.width && contentWidth >= 3) buf.text(r.x + r.w - 3, y, "  ›", { fg: palette.accent });
+        } else {
+          buf.text(x, y, diagramSlice(frame.rows[diagramRow] ?? "", frame.offset, contentWidth), { fg: palette.code }, r.x + r.w);
+          if (found && msg && line.src) this.#paintHits(buf, line, msg, x - frame.offset, y, r.x + r.w, current, colors, x);
+        }
+        continue;
+      }
       let x = r.x + GUTTER + (line.offset ?? 0);
       for (let i = 0; i < line.spans.length; i++) {
         const s = line.spans[i]!;
@@ -746,7 +809,7 @@ export class ChatView {
   }
 
   /** Tints the search hits on one drawn line; the current one stands out. */
-  #paintHits(buf: CellBuffer, line: Line, msg: Message, x: number, y: number, limit: number, current: Hit | null, colors: Surfaces): void {
+  #paintHits(buf: CellBuffer, line: Line, msg: Message, x: number, y: number, limit: number, current: Hit | null, colors: Surfaces, left = 0): void {
     const entry = this.#searchCache.get(msg);
     if (!entry?.pattern || entry.pattern !== this.#search?.pattern) return; // hits of an earlier query
     const hits = entry.hits;
@@ -757,13 +820,19 @@ export class ChatView {
         const x0 = x + s.x + stringWidth(s.text.slice(s.start, from));
         const x1 = Math.min(limit, buf.width, x0 + stringWidth(s.text.slice(from, Math.min(h.end, s.end))));
         const style = h === current ? CURRENT_HIT : { bg: colors.match };
-        for (let col = Math.max(0, x0); col < x1; col++) {
+        for (let col = Math.max(left, x0); col < x1; col++) {
           const i = y * buf.width + col;
           buf.bg[i] = style.bg!;
           if (style.fg !== undefined) buf.fg[i] = style.fg;
         }
       }
     }
+  }
+
+  #framesFor(m: Message): Map<number, DiagramFrame> {
+    let frames = this.#diagrams.get(m);
+    if (!frames) this.#diagrams.set(m, frames = new Map());
+    return frames;
   }
 
   #linesFor(m: Message, width: number): Line[] {
@@ -773,7 +842,7 @@ export class ChatView {
     const key = `${width}:${m.version}:${this.showThinking ? 1 : 0}:${expanded ? 1 : 0}`;
     const hit = this.#cache.get(m);
     if (!live && hit?.key === key) return hit.lines;
-    const lines = linesFor(m, width, this.showThinking, expanded);
+    const lines = linesFor(m, width, this.showThinking, expanded, this.#framesFor(m));
     this.#cache.set(m, { key, lines });
     return lines;
   }

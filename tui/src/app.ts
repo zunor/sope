@@ -469,9 +469,6 @@ export class App {
   }
 
   #handleMouse(ev: MouseInput): void {
-    // These panes only scroll vertically. A diagonal trackpad gesture must
-    // never turn its horizontal reports into downward motion or a click.
-    if (ev.action === "wheel-left" || ev.action === "wheel-right") return;
     const p = { x: ev.x, y: ev.y };
     // An input drag owns motion/release even outside the box. Its saved rows
     // keep endpoints stable while the cursor moves or a command menu closes.
@@ -524,6 +521,13 @@ export class App {
       if (ev.action === "press") this.#handleKey("enter");
       return;
     }
+    // A horizontal report belongs only to the diagram under the pointer.
+    // Never reinterpret a diagonal trackpad gesture as vertical motion.
+    if (ev.action === "wheel-left" || ev.action === "wheel-right") {
+      if (!this.#list && !this.#docked && !this.#inputDrag && !this.#changes?.contains(ev.x, ev.y)
+        && this.#session.chat.scrollDiagramAt(ev.x, ev.y, (ev.action === "wheel-left" ? -1 : 1) * this.#config.scrollSpeed)) this.#selection.clear();
+      return;
+    }
     const summary = this.#changesHit;
     this.#changesLit = !!summary && ev.y >= summary.y0 && ev.y < summary.y1 && ev.x >= summary.x0 && ev.x < summary.x1;
     if (this.#changesLit && ev.action === "press" && ev.button === 0) return void this.#toggleChanges(this.#session.changes);
@@ -545,6 +549,7 @@ export class App {
         if (this.#changes?.contains(ev.x, ev.y)) return this.#changes.wheel(ev.y, by, this.#config.scrollSpeed);
         if (popup?.wheel && ev.y >= this.#term.rows - 1 - this.#popupRows) return popup.wheel(by);
         this.#selection.clear(); // it is in screen cells: the text under it is about to move
+        if (ev.shift && this.#session.chat.scrollDiagramAt(ev.x, ev.y, by * this.#config.scrollSpeed)) return;
         return this.#session.chat.scrollBy(-this.#config.scrollSpeed * by);
       }
       case "press": {

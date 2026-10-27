@@ -26,6 +26,27 @@ The status bar's pixel meteor travels around a small square once every 3 seconds
 
 Typing `/` opens a command list above the input box; keep typing to filter it. Use `↑`/`↓` to select, `Enter` to use a command, `Tab` to complete it without executing, and `Esc` to dismiss the list. Mouse selection and scrolling are also supported. Commands that require arguments are first completed into the input box.
 
+## Text diagrams
+
+Recognized ASCII and Unicode box diagrams use a separate horizontal viewport:
+rows never wrap when the terminal narrows. Move the pointer over a diagram and
+scroll horizontally, use Shift+wheel, or click its footer arrows. Vertical wheel
+input still scrolls the conversation. Each diagram remembers its own horizontal
+position. Search can reveal labels outside the visible columns.
+
+The display conservatively aligns walls within two cells of matching corners
+and fills isolated gaps in horizontal borders. It preserves label positions,
+skips ambiguous or connected edges, and rejects repairs that would keep changing
+on a second pass. Large diagrams (over 256 rows or 512 columns) remain unmodified.
+Click the middle of a repaired diagram's footer to switch between original and
+repaired text; drag its text to select and copy the visible presentation.
+
+During streaming, recognized diagrams append complete rows without wrapping or
+repairing partial lines. Repair runs after the fence closes, an unfenced block
+ends, or the response completes. Message history and model input always retain
+the original text. Diagrams can be unfenced, or inside an unlabeled, `text`,
+`plaintext`, `ascii`, or `diagram` fence; other code fences remain ordinary code.
+
 ## Tools and permissions
 
 All tools are built into libsope (see [the built-in tool reference](../abi.md#6-built-in-tools) for details); `sope` handles display and approval:

@@ -216,3 +216,69 @@ test("resizing recalculates wrapped line counts and visible controls", () => {
   expect(rows(buf).join("\n")).not.toContain("fewer lines");
   expect(chat.toggleAt(3, 3)).toBe(false);
 });
+
+test("diagram viewports do not wrap, scroll independently, and keep message text intact", () => {
+  const chat = new ChatView();
+  const diagram = "┌────────────────────────┐\n│ LEFT            RIGHT  │\n└────────────────────────┘";
+  const msg = chat.add({ role: "assistant", text: `${diagram}\n\n${diagram}` });
+  const rect = { x: 1, y: 0, w: 15, h: 20 };
+  let buf = render(chat, rect);
+  expect(row(buf, 0)).toContain("┌────────────");
+  expect(row(buf, 1)).toContain("LEFT");
+  expect(row(buf, 2)).toContain("└────────────");
+  expect(row(buf, 3)).toContain("Diagram");
+  const second = rows(buf).findIndex((s, i) => i > 3 && s.includes("LEFT"));
+  expect(second).toBeGreaterThan(3);
+  expect(chat.scrollDiagramAt(6, 1, 100)).toBe(true);
+  buf = render(chat, rect);
+  expect(row(buf, 1)).toContain("RIGHT");
+  expect(row(buf, second)).toContain("LEFT");
+  expect(chat.scrollDiagramAt(0, 1, 1)).toBe(false);
+  expect(chat.scrollDiagramAt(6, 18, 1)).toBe(false);
+  expect(msg.text).toBe(`${diagram}\n\n${diagram}`);
+  expect(row(render(chat, { ...rect, w: 70 }), 1)).toContain("LEFT            RIGHT");
+  chat.resetInteractions();
+  expect(chat.scrollDiagramAt(6, 1, 1)).toBe(false);
+});
+
+test("diagram controls switch original presentation and keep text selectable", () => {
+  const chat = new ChatView();
+  const text = "┌────────┐\n│ ACTOR │\n└────────┘";
+  const msg = chat.add({ role: "assistant", text });
+  const rect = { x: 1, y: 0, w: 50, h: 12 };
+  expect(row(render(chat, rect), 1)).toContain("│ ACTOR  │");
+  expect(chat.toggleAt(12, 3)).toBe(true);
+  expect(row(render(chat, rect), 1)).toContain("│ ACTOR │");
+  expect(chat.toggleAt(12, 3)).toBe(true);
+  expect(row(render(chat, rect), 1)).toContain("│ ACTOR  │");
+  expect(chat.toggleAt(5, 1)).toBe(false); // text remains a drag-selection target
+  expect(msg.text).toBe(text);
+});
+
+test("search reveals clipped diagram labels without painting outside the viewport", () => {
+  const chat = new ChatView();
+  chat.add({ role: "assistant", text: "┌────────────────────────┐\n│ LEFT            RIGHT  │\n└────────────────────────┘" });
+  const rect = { x: 1, y: 0, w: 15, h: 12 };
+  render(chat, rect);
+  chat.startSearch();
+  chat.setQuery("RIGHT");
+  const buf = render(chat, rect);
+  expect(chat.searchStatus.total).toBe(1);
+  expect(row(buf, 1)).toContain("RIGHT");
+  expect(buf.bg[90 + 2]).toBe(-1); // the gutter remains untouched
+});
+
+test("streaming diagrams append complete rows without reflow and repair on completion", () => {
+  const chat = new ChatView();
+  const msg = chat.add({ role: "assistant", streaming: true, text: "```\n┌────────┐\n│ ACTOR │\n" });
+  const rect = { x: 1, y: 0, w: 30, h: 12 };
+  const before = rows(render(chat, rect));
+  chat.append(msg, "└────");
+  expect(rows(render(chat, rect))).toEqual(before);
+  chat.append(msg, "────┘\n```\nAfter");
+  const buf = render(chat, rect);
+  expect(row(buf, 1)).toContain("│ ACTOR  │");
+  expect(row(buf, 2)).toContain("└────────┘");
+  expect(row(buf, 4)).toContain("After");
+  expect(msg.text).toContain("│ ACTOR │");
+});
