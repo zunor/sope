@@ -78,7 +78,7 @@ const TICK_MS = 50; // animation frame rate while anything runs
 const SHELL_TICK_MS = 1000; // while only background shells run: notice when they exit
 const MAX_TABS = 5; // sessions shown as tabs; the rest are a click on ⋯ away
 
-const MODE_COLOR: Record<PermissionMode, number> = { ask: palette.muted, auto: palette.muted, full: palette.error };
+const MODE_COLOR: Record<PermissionMode, number> = { ask: palette.muted, auto: 0xfacc15, full: palette.error };
 const MODE_ICON: Record<PermissionMode, string> = { ask: "◇", auto: "◈", full: "◆" };
 
 export interface AppOptions {
