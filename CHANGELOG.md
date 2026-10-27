@@ -2,22 +2,17 @@
 
 The version in `include/sope.h` is authoritative. The library, bindings, and `sope` executable are released together; see [docs/release.md](docs/release.md) for the policy.
 
-## Unreleased
+## 0.7.0 — 2026-10-27
 
-- TUI: distinguish horizontal wheel reports from vertical scrolling, use precise one-row wheel steps (`SOPE_SCROLL_SPEED` overrides), and coalesce redraws at a 60 Hz target while honoring terminal write backpressure. Diagonal trackpad gestures no longer move vertical panes in the wrong direction; reversing or stopping does not leave queued scroll animation.
+- Add `/evidence` and read-only C, Go and JS evidence queries; stop appending execution records to ordinary replies.
+- Bind sessions to their working directory and suggest candidate paths when a file is missing.
+- Improve bounded recovery from aborted/stalled streams, preserve reasoning and output budgets, and avoid blocking legitimate retries after state changes.
+- Improve trackpad scrolling, multiline selection and copying; add change previews and stable diagram viewports.
+- Simplify the README around embedding scenarios and remove screenshots.
 
-- TUI: draw the tab bar like a browser's: the active tab is a grey outline, matching the input box, whose feet flare into a grey baseline under the bar, all within two rows, a hovered tab gets a subtle rounded ground, and thin grey separators stand between the others; the bar keeps the terminal's background. Pixel shapes where the terminal shows graphics, tinted text otherwise.
-
-- TUI: show "n files changed +n -n" for the files each turn changed, two rows tall in a rounded pixel outline like a tab (tinted text without terminal graphics), through write, edit or commands (no git needed): right of the status while the turn runs, then in the transcript when it ends; each turn counts from zero. It lights up under the pointer, and a click (or `/diff` for the last turn) opens that turn's diffs in a panel that takes the right of the screen. The running status gets its own row, with the tip below it.
-
-- Bound streams that emit only heartbeats or stop making model progress with a five-minute allowance before initial progress and a one-minute deadline after progress begins; continuous reasoning, text and tool arguments keep the request alive. Preserve excluded candidates and evidence references in compaction handoffs.
-
-- Limit identical program repeats consecutively so a different shell command can repair state and reopen the retry allowance, even if its final probe fails. Keep aggregate tool-call limits and clarify that another model response does not start a new user turn.
-
-- Accommodate slow reasoning providers with five-minute first-byte and fifteen-minute chunk-idle limits, within a thirty-minute logical request budget; remove the conflicting curl low-speed cutoff for model streams.
-
-- Start normal model requests with a 32000-token output target and summaries with an independent 8192-token budget; fit requests to remaining context and retain learned truncation budgets across turns and durable worker restarts.
-- Preserve completed Chat reasoning across tool rounds and durable history, replaying it only to its producing endpoint/model/effort; discard failed-attempt reasoning and count retained reasoning in context estimates.
+The C ABI advances to 0.7. Rebuild embedded hosts with the matching header,
+library and bindings. Durable sessions sealed under ABI 0.6 require their
+matching 0.6 runtime; start a new session when upgrading the sealed contract.
 
 ## 0.6.0 — 2026-10-26
 

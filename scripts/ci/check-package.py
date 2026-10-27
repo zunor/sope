@@ -34,9 +34,8 @@ with tempfile.TemporaryDirectory(prefix='sope-package-') as scratch:
     package = root / name
     for relative in ['bin/sope', 'lib/libsope.a', 'include/sope.h', 'LICENSE',
                      'licenses/sqlite.txt', 'README.md', 'CHANGELOG.md',
-                     'docs/assets/tui-edit.png', 'install.sh']:
+                     'install.sh']:
         assert (package / relative).is_file(), relative
-    assert (package / 'docs/assets/tui-edit.png').read_bytes() == Path('docs/assets/tui-edit.png').read_bytes()
     # Look for tokens in packaged text; the scanner never needs a real credential.
     subprocess.run(['gitleaks', 'dir', str(package), '--redact=100', '--no-banner'], check=True)
     env = os.environ.copy()

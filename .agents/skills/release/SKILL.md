@@ -114,7 +114,7 @@ user's global account. Local validation needs no GitHub authentication.
    JS and Go ABI guards, and documentation; do not assume the script covers
    every version reference. Convert the relevant Unreleased notes into a dated
    English changelog section and update feature docs. Check exported symbols
-   against `docs/abi.md`, and preserve the user-approved README screenshot.
+   against `docs/abi.md`. Keep the README concise and text-only unless the user requests images.
 3. Run `python3 scripts/ci/check-metadata.py`, targeted checks for the changes,
    and `git diff --check`. Before a public push, scan the intended source/history
    with Gitleaks using `--redact=100`, and compare against available local
@@ -160,7 +160,7 @@ because several instructions mention them.
 Download the two verified package artifacts by run ID into separate scratch
 folders, and check their filenames, versions and SHA-256 files. Use the tested
 bytes for publication, rather than rebuilding another binary after CI.
-`scripts/ci/check-package.py` checks archive contents, screenshot, credential
+`scripts/ci/check-package.py` checks archive contents, credential
 patterns, temporary-prefix installation and execution from outside the checkout
 on each package's own platform. Never try to run a Linux binary on macOS.
 
@@ -184,8 +184,8 @@ bytes: text scanning alone does not establish binary contents are clean.
    verification and package checksums. Create the annotated `vX.Y.Z` tag at
    that commit only after verification. Push that tag to the checked remote.
 2. Prepare English notes describing behavior changes, ABI compatibility,
-   available platforms and signing status. Include the tagged README screenshot
-   and changelog link. Supply multiline notes via `--notes-file`.
+   available platforms and signing status. Keep notes concise and text-only; include
+   a changelog link and add images only when the user requests them. Supply multiline notes via `--notes-file`.
 3. Inspect any existing tag/Release before creating or retrying. Create a draft,
    upload both platforms and their checksums, verify asset names/sizes/digests,
    then publish the draft. Use `git gh release ... --repo zunor/sope` throughout.

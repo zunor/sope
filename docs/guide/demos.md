@@ -64,6 +64,6 @@ In the offline scenario, two subagents inspect behavior and test coverage in par
 
 ## Captures
 
-Keep images in `docs/assets/` and reference them from the root README with relative paths. Captions must identify whether the active conversation used the live model or scripted responses; the three prepared tabs are always scripted. A Ghostty screenshot must come from an actual Ghostty window. Label terminal-rendered previews as such.
+Keep optional demo captures in `docs/assets/`. The root README and release notes are text-only. Captions must identify whether the active conversation used the live model or scripted responses; the three prepared tabs are always scripted. A Ghostty screenshot must come from an actual Ghostty window. Label terminal-rendered previews as such.
 
 For a GLM 5.3 README capture, configure your API key, run `bun run demo edit`, approve the edits and test command, and wait for the final result. Verify `glm-5.3` is visible in the bottom bar before capturing. See [the capture inventory](../assets/README.md) for the current README image.

@@ -51,7 +51,7 @@ jobs:
           cmake --build build --parallel 3
           python3 scripts/ci/check-ctest.py build
           ctest --test-dir build --output-on-failure --timeout 120
-          bun test
+          bun run test
           bun run typecheck
       - name: macOS leak checks
         if: matrix.platform == 'darwin-arm64'

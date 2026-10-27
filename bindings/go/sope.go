@@ -8,8 +8,8 @@ package sope
 #cgo sope_static pkg-config: sope-static
 #include <sope.h>
 #include <stdlib.h>
-#if SOPE_VERSION_MAJOR != 0 || SOPE_VERSION_MINOR != 6
-#error "Go SDK requires sope ABI 0.6"
+#if SOPE_VERSION_MAJOR != 0 || SOPE_VERSION_MINOR != 7
+#error "Go SDK requires sope ABI 0.7"
 #endif
 */
 import "C"
@@ -123,7 +123,7 @@ func Open(cfg Config) (*Agent, error) {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	if uint32(C.sope_version_number())>>8 != 0x0006 {
+	if uint32(C.sope_version_number())>>8 != 0x0007 {
 		return nil, &Error{Conflict, "header/library ABI mismatch"}
 	}
 	a := &Agent{gate: make(chan struct{}, 1), stopping: make(chan struct{}), closed: make(chan struct{})}

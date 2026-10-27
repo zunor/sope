@@ -26,11 +26,11 @@ only the platform system dependencies. A host may independently use SQLite.
 `cmake --install build --prefix /your/prefix` installs the header, libraries and
 relocatable `lib/pkgconfig` metadata. Set `PKG_CONFIG_PATH` to that installation.
 Go caches external C headers and archives: use `go build -a` / `go test -a`
-after rebuilding libsope. SDK 0.4 rejects a different native ABI before opening
+after rebuilding libsope. SDK 0.7 rejects a different native ABI before opening
 an agent. Rebuild both together when upgrading.
 
-This checkout has no configured public Git remote, so the module is deliberately
-local (`module sope`). A consuming repository can use:
+The SDK currently uses a local module path (`module sope`). From a checkout of
+[zunor/sope](https://github.com/zunor/sope), a consuming repository can use:
 
 ```go
 require sope v0.0.0

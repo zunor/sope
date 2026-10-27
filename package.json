@@ -1,6 +1,6 @@
 {
   "name": "sope-workspace",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -11,7 +11,7 @@
   "scripts": {
     "build:native": "cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build",
     "test:native": "ctest --test-dir build --output-on-failure",
-    "test": "bun test",
+    "test": "bun test ./bindings/js/test && bun test ./tui/test",
     "typecheck": "tsc --noEmit -p .",
     "tui": "bun tui/src/main.ts",
     "demo": "bun scripts/demo.ts",

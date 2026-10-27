@@ -8,11 +8,16 @@ Requirements: CMake ≥ 3.20, a C11 compiler, libcurl development libraries (inc
 bun install
 bun run build:native   # Build build/libsope.dylib, tests, and examples
 bun run test:native    # C tests
-bun test               # Binding and TUI tests
+bun run test           # Binding and TUI suites in separate processes
 bun run typecheck
 cp .env.example .env   # Fill in SOPE_API_KEY (.env is excluded from Git)
 bun run tui            # Run sope from source; same arguments as above, e.g. bun run tui -- -p "hi"
 ```
+
+The aggregate test command runs bindings and TUI suites in separate Bun processes
+to isolate native handles, worker teardown and local HTTP fixtures. Release builds
+and CI use this same command; individual test files can still use `bun test`.
+
 
 See [the build reference](abi.md#12-building-and-dependencies) for `-DSOPE_CURL=system|bundled|off`. To build with a sanitizer:
 
@@ -83,7 +88,7 @@ events and exact-match checks, plus `saved-history.json`. Credentials are not
 recorded. The script exits nonzero when any check fails. These checks detect
 loss of the fixture's facts; inspect the saved responses to assess their meaning.
 This is a bounded semantic regression probe, not proof of lossless summarization
-for arbitrary tasks. It is intentionally separate from offline `bun test`.
+for arbitrary tasks. It is intentionally separate from offline `bun run test`.
 
 ## Directory layout
 

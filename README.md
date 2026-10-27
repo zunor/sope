@@ -1,40 +1,34 @@
-<h1 align="center">sope</h1>
+# sope
 
-<p align="center">
-  <strong>An agent library you can embed.<br>A terminal workspace you can make your own.</strong>
-</p>
+An embeddable agent runtime in C11, with a C ABI, Go and Bun/TypeScript bindings,
+and a terminal UI built on the same library. MIT licensed.
 
-<p align="center">
-  C11 · C ABI · Go · Bun / TypeScript · MIT
-</p>
+Give sope a model and a task. It manages tool calls, subagents, streaming,
+context compaction and durable execution; your application owns the interface
+and execution policy.
 
-<p align="center">
-  <a href="#get-started">Get started</a> ·
-  <a href="https://github.com/zunor/sope/releases/latest">Download</a> ·
-  <a href="#a-place-to-work">The TUI</a> ·
-  <a href="#bring-the-agent-to-your-app">Embed</a> ·
-  <a href="docs/README.md">Documentation</a>
-</p>
+## Where it fits
 
----
+- **Developer tools:** add repository search, code changes and test execution to an IDE, desktop app or internal CLI.
+- **Automation services:** run investigation, maintenance or batch-processing agents with durable tasks, execution records and explicit recovery after interruption.
+- **Custom assistants:** expose your application's tools and approvals, stream progress into your own UI, and coordinate multiple agents from an event loop.
 
-sope is a small, embeddable agent library written in C. Give it a model and a task; it runs the conversation, calls tools, coordinates subagents, and streams events back to your application. Any language with FFI support can use the same public interface.
+## Why embed sope?
 
-The included `sope` executable puts that library to work in a full-screen terminal: persistent sessions, readable tool output, and changes you can inspect before approving.
+- **One native core.** Link a shared or static library through a C ABI; use the included Go or Bun/TypeScript bindings. No separate agent server is required.
+- **Host control.** Register tools, allowlist capabilities and route operations to your own executor or sandbox. Use an OpenAI-compatible model endpoint.
+- **Durable state.** SQLite-backed sessions retain admitted tasks, tool results and execution records. Unknown effects require reconciliation before resuming.
+- **Shared scheduling.** Agents use a common worker pool and release workers while waiting. An event descriptor integrates with `poll`, `epoll`, `kqueue` or `libuv`.
+- **Built-in workflow.** File/search/shell tools, subagents, bounded retries and context compaction are available through the same API.
 
-## A small core, ready to work
+Built-in tools run with the host process's privileges; they are not an OS sandbox.
+Embedding currently targets 64-bit macOS and Linux. Go hosts require cgo.
 
-| Capability | What it gives you |
-|---|---|
-| **One interface** | A C ABI for your application, with Go and Bun/TypeScript bindings included. |
-| **Useful tools, built in** | Read, edit, search, run commands, and fetch pages. Register your own tools when you need more. |
-| **Concurrency without dedicated threads** | A shared pool runs agents and parallel tool calls; waiting for a model or child agent releases the worker. |
-| **Context that carries forward** | Save and restore history, attach images, and compact long conversations. |
-| **Your model, your host** | Connect an OpenAI-compatible endpoint. The host decides permissions, session locations, and how events reach its UI. Durable storage is built into libsope. |
+[Go integration](bindings/go/README.md) · [C examples](examples/) · [Bun / TypeScript](bindings/js/) · [C ABI reference](docs/abi.md)
 
-## Get started
+## Try the terminal
 
-From a source checkout:
+From a checkout, with [Bun and native build dependencies](docs/development.md):
 
 ```sh
 bun install
@@ -42,94 +36,24 @@ bun run build:native
 bun run demo tour --offline
 ```
 
-The demo runs the real TUI and tools against a scripted local model. It needs no API key and uses a disposable project.
+The offline demo needs no API key. [Configure a model](docs/guide/quickstart.md),
+then run `bun run tui` in your project directory.
 
-For everyday work, [configure your model](docs/guide/quickstart.md) and run:
+The TUI includes persistent session tabs, approval diffs, conversation search,
+image input and diagram viewports. `/evidence` shows retained executions on demand.
 
-```sh
-bun run tui
-bun run tui -- "Explain how requests flow through this project."
-```
+## Download 0.7.0
 
-Prefer a ready-to-run executable? [Release 0.6.0](https://github.com/zunor/sope/releases/tag/v0.6.0) includes **macOS Apple Silicon (arm64)** and **Linux x64** packages with libsope embedded. Bun is not required to run it.
+[macOS arm64](https://github.com/zunor/sope/releases/download/v0.7.0/sope-0.7.0-darwin-arm64.tar.gz) ·
+[Linux x64](https://github.com/zunor/sope/releases/download/v0.7.0/sope-0.7.0-linux-x64.tar.gz) ·
+[Checksums and release notes](https://github.com/zunor/sope/releases/tag/v0.7.0)
 
-```sh
-curl -fLO https://github.com/zunor/sope/releases/download/v0.6.0/sope-0.6.0-darwin-arm64.tar.gz
-curl -fLO https://github.com/zunor/sope/releases/download/v0.6.0/sope-0.6.0-darwin-arm64.tar.gz.sha256
-shasum -a 256 -c sope-0.6.0-darwin-arm64.tar.gz.sha256
-tar xzf sope-0.6.0-darwin-arm64.tar.gz
-./sope-0.6.0-darwin-arm64/install.sh
-~/.local/bin/sope --version
-```
+Packages include the standalone executable, shared/static libraries, header and
+Go bindings. Verify the accompanying SHA-256 checksum, extract the archive and
+run `./sope-0.7.0-<platform>/install.sh` (`--lib` also installs the library).
+The executable needs no Bun installation. macOS binaries are ad-hoc signed, not notarized.
 
-The installer places `sope` in `~/.local/bin`; add that directory to your `PATH`, then [configure your model](docs/guide/quickstart.md#install). This release ships macOS arm64 and Linux x64 binaries; Intel Mac and Linux arm64 users can build from source. The macOS binary is ad-hoc signed and is not notarized.
+**Embedding upgrade:** 0.7.0 uses C ABI 0.7. Rebuild with matching headers,
+libraries and bindings. Sessions sealed under an older ABI require their matching runtime.
 
-Version 0.6.0 adds bounded model and summary recovery, native evidence-backed acceptance, durable subagent recovery, conversation search, and background task controls. See the [release notes](https://github.com/zunor/sope/releases/tag/v0.6.0) for the full changes. Embedded hosts must rebuild against the 0.6 C ABI and matching bindings.
-
-[Installation and first steps →](docs/guide/quickstart.md)
-
-## A place to work
-
-The TUI keeps the work in view: a conversation in the center, independent sessions above, and your next message below. It is written from scratch and uses the same ABI as an embedded application.
-
-[![Four sope session tabs in Ghostty, with GLM 5.3 editing a retry policy and running tests](docs/assets/tui-edit.png)](docs/assets/tui-edit.png)
-
-*Four sessions, one workspace. A live GLM 5.3 demo in Ghostty, showing real file edits and test output while awaiting the final model response. The other three tabs contain prepared notes. Click to view at full resolution.*
-
-**Follow the work.** Streamed Markdown, code, task lists, and foldable tool output keep long conversations readable. Subagents report their progress alongside the main conversation.
-
-**See the change first.** Edit approvals show a syntax-highlighted diff with line numbers. Choose Ask for approval, Approve for me, or Full access, and switch modes with `Shift+Tab`.
-
-**Keep your place.** Sessions run independently and restore from SQLite, including the model's history. Paste an image, switch models, or compact the context without losing the visible conversation.
-
-| Try it | What it shows |
-|---|---|
-| `bun run demo tour` | A calm walkthrough of a small codebase, with file discovery and source reading. |
-| `bun run demo edit` | A focused change: inspect the code, approve the diff, add a regression test, and run it. |
-| `bun run demo review` | Two subagents inspect behavior and test coverage in parallel, then report back. |
-
-Each interactive demo opens alongside three prepared conversations, so you can explore the session tabs immediately. With an API key configured, demos use real **GLM 5.3** responses and show `glm-5.3` in the bottom bar. Without a key, or with `--offline`, responses are scripted locally; the TUI and tools execute normally.
-
-[Explore the terminal →](docs/guide/terminal.md) · [Reproduce the demos →](docs/guide/demos.md)
-
-## Bring the agent to your app
-
-[Go SDK and durable host integration →](bindings/go/README.md)
-
-The library handles the agent loop. Your application handles the experience.
-
-```c
-#include <sope.h>
-#include <stdio.h>
-
-int main(void) {
-    sope_agent_t *agent;
-    if (sope_agent_new(&agent) != SOPE_OK) return 1;
-
-    /* The default mock provider works offline. */
-    sope_send(agent, "hello", 5, NULL);
-
-    sope_event_t event = { .size = sizeof event };
-    while (sope_poll(agent, &event, -1) == 1) {
-        if (event.type == SOPE_EVENT_TEXT_DELTA)
-            fwrite(event.data, 1, event.data_len, stdout);
-        if (event.type == SOPE_EVENT_TURN_END && event.agent_id == 0)
-            break;
-    }
-    sope_agent_free(agent);
-    return 0;
-}
-```
-
-Switch the provider to `openai` and set your model, endpoint, and API key for a live agent. Built-in tools request approval through `SOPE_EVENT_PERMISSION`; answer with `sope_permit`, or set a host policy. Integrate `sope_agent_fd` into an event loop when blocking polling does not fit your application.
-
-[C ABI reference](docs/abi.md) · [C examples](examples/) · [Bun / TypeScript bindings](bindings/js/)
-
-## Further reading
-
-- [Configuration](docs/guide/configuration.md) — models, permissions, storage, and terminal settings.
-- [Development](docs/development.md) — builds, tests, and a map of the source tree.
-- [Releases](docs/release.md) — packaging and ABI compatibility.
-- [Changelog](CHANGELOG.md) — what has changed.
-
-MIT licensed. See [LICENSE](LICENSE).
+[Documentation](docs/README.md) · [Terminal guide](docs/guide/terminal.md) · [Changelog](CHANGELOG.md) · [License](LICENSE)

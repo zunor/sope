@@ -11,11 +11,11 @@
     },
     "bindings/js": {
       "name": "sope",
-      "version": "0.6.0",
+      "version": "0.7.0",
     },
     "tui": {
       "name": "sope-tui",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "bin": {
         "sope": "src/main.ts",
       },

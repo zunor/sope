@@ -49,7 +49,7 @@ real_lib="$(readlink -f "$lib" 2>/dev/null || python3 -c 'import os,sys; print(o
 
 step "tests"
 ctest --test-dir "$build" --output-on-failure
-SOPE_LIB="$lib" bun test
+SOPE_LIB="$lib" bun run test
 bun run typecheck
 
 step "sope executable"

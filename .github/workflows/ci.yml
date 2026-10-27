@@ -73,7 +73,7 @@ jobs:
       - name: Native and Go tests
         run: ctest --test-dir build --output-on-failure --timeout 120
       - name: JS bindings and TUI
-        run: bun test
+        run: bun run test
       - name: TypeScript
         run: bun run typecheck
       - name: Native failure logs

@@ -7,9 +7,9 @@
 Install from a release archive:
 
 ```sh
-tar xzf sope-0.6.0-darwin-arm64.tar.gz
-sope-0.6.0-darwin-arm64/install.sh         # Install sope into ~/.local/bin
-sope-0.6.0-darwin-arm64/install.sh --lib   # Also install libsope and sope.h
+tar xzf sope-0.7.0-darwin-arm64.tar.gz
+sope-0.7.0-darwin-arm64/install.sh         # Install sope into ~/.local/bin
+sope-0.7.0-darwin-arm64/install.sh --lib   # Also install libsope and sope.h
 ```
 
 Build and install from source:
