@@ -49,6 +49,33 @@ const MARKS = { add: "+", remove: "-", context: " ", command: "$", gap: " ", pla
 const previewColor = (kind: PreviewLine["kind"]) =>
   kind === "add" ? palette.ok : kind === "remove" ? palette.error : kind === "command" ? palette.tool : palette.muted;
 
+/**
+ * Preview lines from row y, one each, between x and end. Diff lines: line
+ * number, +/- on a tinted row, highlighted code. Also the diff panel's (changes.ts).
+ */
+export function drawPreviewLines(buf: CellBuffer, x: number, y: number, end: number, lines: PreviewLine[], colors: Surfaces): void {
+  const numWidth = Math.max(0, ...lines.map((l) => (l.no ? String(l.no).length : 0)));
+  const code = lines.find((l) => l.lang)?.lang;
+  const hl = code ? new Highlighter(code) : null;
+  lines.forEach((line, i) => {
+    const ry = y + i;
+    const kind = line.kind ?? "plain";
+    const tint = kind === "add" ? colors.added : kind === "remove" ? colors.removed : undefined;
+    if (tint !== undefined) buf.fill(x, ry, end - x, 1, { bg: tint });
+    let lx = x;
+    if (numWidth) lx = buf.text(lx, ry, `${line.no ? String(line.no).padStart(numWidth) : " ".repeat(numWidth)} `, { fg: palette.faint, bg: tint }, end);
+    lx = buf.text(lx, ry, `${MARKS[kind]} `, { fg: previewColor(line.kind), bg: tint, bold: kind === "add" || kind === "remove" }, end);
+    const text = line.text.replace(/\t/g, "  ");
+    if (kind === "gap" || kind === "plain") return void buf.text(lx, ry, truncate(text, end - lx), { fg: palette.muted });
+    if (!hl || !line.lang) return void buf.text(lx, ry, truncate(text, end - lx), { bg: tint });
+    // Removed and added lines are both highlighted by the same pass; good enough for a preview.
+    for (const tok of hl.line(text)) {
+      if (lx >= end) break;
+      lx = buf.text(lx, ry, tok.text, { fg: SYNTAX[tok.kind], bg: tint, italic: tok.kind === "comment", dim: kind === "remove" && tok.kind === "plain" }, end);
+    }
+  });
+}
+
 /** Rows besides the preview: the question, why it asks, a gap, the answers. */
 const askingRows = (a: Approval) => 1 + (a.reason ? 1 : 0) + 1 + DECISIONS.length;
 
@@ -121,27 +148,7 @@ export class ApprovalPrompt implements Popup {
     cx = buf.text(cx, y, a.name, { fg: palette.tool, bold: true });
     if (waiting > 1) buf.text(cx, y, `  (+${waiting - 1} more waiting)`, { fg: palette.faint });
 
-    // Diff lines: line number, +/- on a tinted row, highlighted code.
-    const numWidth = Math.max(0, ...preview.map((l) => (l.no ? String(l.no).length : 0)));
-    const code = preview.find((l) => l.lang)?.lang;
-    const hl = code ? new Highlighter(code) : null;
-    preview.forEach((line, i) => {
-      const ry = y + 1 + i;
-      const kind = line.kind ?? "plain";
-      const tint = kind === "add" ? colors.added : kind === "remove" ? colors.removed : undefined;
-      if (tint !== undefined) buf.fill(x + 2, ry, w - 2, 1, { bg: tint });
-      let lx = x + 2;
-      if (numWidth) lx = buf.text(lx, ry, `${line.no ? String(line.no).padStart(numWidth) : " ".repeat(numWidth)} `, { fg: palette.faint, bg: tint });
-      lx = buf.text(lx, ry, `${MARKS[kind]} `, { fg: previewColor(line.kind), bg: tint, bold: kind === "add" || kind === "remove" });
-      const text = line.text.replace(/\t/g, "  ");
-      if (kind === "gap" || kind === "plain") return void buf.text(lx, ry, truncate(text, end - lx), { fg: palette.muted });
-      if (!hl || !line.lang) return void buf.text(lx, ry, truncate(text, end - lx), { bg: tint });
-      // Removed and added lines are both highlighted by the same pass; good enough for a preview.
-      for (const tok of hl.line(text)) {
-        if (lx >= end) break;
-        lx = buf.text(lx, ry, tok.text, { fg: SYNTAX[tok.kind], bg: tint, italic: tok.kind === "comment", dim: kind === "remove" && tok.kind === "plain" }, end);
-      }
-    });
+    drawPreviewLines(buf, x + 2, y + 1, end, preview, colors);
 
     let ry = y + 1 + preview.length;
     if (a.reason) buf.text(x, ry++, truncate(`Approve for me asks because ${a.reason}.`, w), { fg: palette.muted });

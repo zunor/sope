@@ -21,7 +21,7 @@ export type PasteEvent = { type: "paste"; text: string };
 export type MouseEvent = {
   type: "mouse";
   /** "move": the pointer moved with no button held (hover). */
-  action: "press" | "release" | "drag" | "move" | "wheel-up" | "wheel-down";
+  action: "press" | "release" | "drag" | "move" | "wheel-up" | "wheel-down" | "wheel-left" | "wheel-right";
   button: number;
   x: number;
   y: number;
@@ -103,7 +103,7 @@ function parseCsi(s: string, i: number, final: boolean): Parsed {
     const button = b & 3;
     const action =
       b & 64
-        ? button === 0 ? "wheel-up" : "wheel-down"
+        ? (["wheel-up", "wheel-down", "wheel-left", "wheel-right"] as const)[button]!
         : b & 32
           ? button === 3 ? "move" : "drag"
           : fin === "m" ? "release" : "press";

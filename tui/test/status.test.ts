@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { mix } from "../src/render/color";
 import { CellBuffer } from "../src/render/buffer";
 import type { CellBuffer as Buf } from "../src/render/buffer";
-import { drawStatus, estimateTokens, formatElapsed, shimmerAt, tipAt, TIPS, TokenRate } from "../src/ui/status";
+import { drawStatus, drawTip, estimateTokens, formatElapsed, shimmerAt, tipAt, TIPS, TokenRate } from "../src/ui/status";
 
 const row = (buf: Buf, y: number) => buf.chars.slice(y * buf.width, (y + 1) * buf.width).join("").trimEnd();
 
@@ -27,11 +27,10 @@ test("the rate covers recent output and disappears when the stream pauses", () =
   expect(r.rate(5000)).toBeNull();
 });
 
-test("tips show for a third of each cycle and rotate", () => {
-  expect(tipAt(5_000, 0)).toBeNull();
-  expect(tipAt(12_000, 0)).toBe(TIPS[0]!);
-  expect(tipAt(25_000, 0)).toBeNull();
-  expect(tipAt(42_000, 0)).toBe(TIPS[1]!);
+test("a tip always shows and another follows every 20 seconds", () => {
+  expect(tipAt(0, 0)).toBe(TIPS[0]!);
+  expect(tipAt(19_999, 0)).toBe(TIPS[0]!);
+  expect(tipAt(20_000, 0)).toBe(TIPS[1]!);
   expect(tipAt(12_000, 3)).toBe(TIPS[3]!);
 });
 
@@ -51,13 +50,15 @@ test("colors mix", () => {
   expect(mix(-1, 0xffffff, 0.5)).toBe(-1);
 });
 
-test("the status line reads verb, time, rate and tip", () => {
+test("the status line reads verb, time and rate; the tip goes below its verb", () => {
   const buf = new CellBuffer(80, 2);
-  drawStatus(buf, 0, 0, 80, { verb: "Thinking", color: 0xa78bfa, elapsedMs: 64_000, rate: 37.6, tip: "esc cancels the turn" }, 250);
-  expect(row(buf, 0)).toBe("⠏  Thinking… (1m 4s · 38 tok/s · tip: esc cancels the turn)");
-  expect(row(buf, 1)).toBe("");
+  drawStatus(buf, 0, 0, 80, { verb: "Thinking", color: 0xa78bfa, elapsedMs: 64_000, rate: 37.6 }, 250);
+  drawTip(buf, 0, 1, 80, "esc cancels the turn");
+  expect(row(buf, 0)).toBe("⠏  Thinking… (1m 4s · 38 tok/s)");
+  expect(row(buf, 1)).toBe("   tip: esc cancels the turn");
   buf.clear();
-  drawStatus(buf, 0, 0, 30, { verb: "Thinking", color: 0xa78bfa, elapsedMs: 3_000, rate: null, tip: "esc cancels the turn" }, 750);
+  drawStatus(buf, 0, 0, 30, { verb: "Thinking", color: 0xa78bfa, elapsedMs: 3_000, rate: null }, 750);
+  drawTip(buf, 0, 1, 20, "esc cancels the turn"); // left out rather than cut off
   expect(row(buf, 0)).toBe("⠉⠉ Thinking… (3s)");
   expect(row(buf, 1)).toBe("");
 });

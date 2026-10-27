@@ -4,6 +4,12 @@ The version in `include/sope.h` is authoritative. The library, bindings, and `so
 
 ## Unreleased
 
+- TUI: distinguish horizontal wheel reports from vertical scrolling, use precise one-row wheel steps (`SOPE_SCROLL_SPEED` overrides), and coalesce redraws at a 60 Hz target while honoring terminal write backpressure. Diagonal trackpad gestures no longer move vertical panes in the wrong direction; reversing or stopping does not leave queued scroll animation.
+
+- TUI: draw the tab bar like a browser's: the active tab is a grey outline, matching the input box, whose feet flare into a grey baseline under the bar, all within two rows, a hovered tab gets a subtle rounded ground, and thin grey separators stand between the others; the bar keeps the terminal's background. Pixel shapes where the terminal shows graphics, tinted text otherwise.
+
+- TUI: show "n files changed +n -n" for the files each turn changed, two rows tall in a rounded pixel outline like a tab (tinted text without terminal graphics), through write, edit or commands (no git needed): right of the status while the turn runs, then in the transcript when it ends; each turn counts from zero. It lights up under the pointer, and a click (or `/diff` for the last turn) opens that turn's diffs in a panel that takes the right of the screen. The running status gets its own row, with the tip below it.
+
 - Bound streams that emit only heartbeats or stop making model progress with a five-minute allowance before initial progress and a one-minute deadline after progress begins; continuous reasoning, text and tool arguments keep the request alive. Preserve excluded candidates and evidence references in compaction handoffs.
 
 - Limit identical program repeats consecutively so a different shell command can repair state and reopen the retry allowance, even if its final probe fails. Keep aggregate tool-call limits and clarify that another model response does not start a new user turn.

@@ -19,6 +19,7 @@ Precedence, from lowest to highest: `~/.config/sope/config` (`KEY=VALUE` format)
 | `SOPE_TRACE_DIR` | | Unset; environment-only opt-in directory for bounded metadata-only JSONL diagnostics |
 | `SOPE_LIB` | | Load a different libsope instead of the embedded copy |
 | `SOPE_MOUSE` | | `1`; `0` leaves mouse input to the terminal (the wheel becomes ↑/↓) |
+| `SOPE_SCROLL_SPEED` | | `1` row per vertical wheel report; positive integer (`3` restores the previous speed). Horizontal reports do not move vertical panes. |
 | `SOPE_GRAPHICS` | | Automatically probes for the Kitty graphics protocol; `0` disables image tabs and the pixel meteor |
 | `SOPE_TRUECOLOR` | | Automatically detected; `0`/`1` forces 256 colors / true color |
 

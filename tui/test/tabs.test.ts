@@ -16,9 +16,9 @@ test("tabs sit side by side; + follows them, the directory and ⋯ sit at the ri
   const l = layoutTabs(tabs(2), 0, 1, 80, "~/src/app");
   expect(l.tabs.map((t) => [t.x, t.width])).toEqual([
     [1, 20],
-    [22, 20],
+    [21, 20],
   ]);
-  expect(l.plusX).toBe(42);
+  expect(l.plusX).toBe(41);
   expect(l.moreX).toBe(78);
   expect(l.dir).toEqual({ x: 68, text: "~/src/app" });
 });
@@ -38,7 +38,7 @@ test("titles truncate inside fixed boxes and overflowing tabs keep the active on
   expect(scrolled.plusX + 3).toBeLessThanOrEqual(scrolled.moreX);
 });
 
-test("two-row tab area retains the subtle text fallback and compact hit targets", () => {
+test("the text fallback: a bright active title, a hovered ground, separators between the rest, compact hit targets", () => {
   expect(TAB_ROWS).toBe(2);
   for (const background of [0x18191e, 0xffffff]) {
     const colors = surfaces(background);
@@ -46,25 +46,28 @@ test("two-row tab area retains the subtle text fallback and compact hit targets"
     const hits = drawTabs(buf, 0, 0, 100, [
       { title: "one", state: "idle" }, { title: "two", state: "waiting" }, { title: "three", state: "unread" },
     ], 0, "~/x", 1, 0, colors);
-    expect(row(buf, 1).slice(0, 41)).toBe("  one                  ? two          ×  ");
+    expect(row(buf, 1).slice(0, 41)).toBe("   one                 ? two          ×  "); // one cell in: room for the first foot
     expect(row(buf, 0)).toBe("");
     expect(row(buf, 2)).toBe("");
     for (let i = 0; i < 20; i++) {
-      expect(buf.bg[100 + i]).toBe(colors.tabSelected);
+      expect(buf.bg[101 + i]).toBe(-1);
       expect(buf.bg[121 + i]).toBe(colors.tabHover);
-      expect(buf.bg[142 + i]).toBe(colors.tab);
+      expect(buf.bg[141 + i]).toBe(-1);
     }
-    expect(buf.bg[120]).toBe(-1);
-    expect(buf.bg[141]).toBe(-1);
-    expect(buf.attr[at(buf, 2, 1)]! & BOLD).toBe(0);
+    // No separator beside the active or hovered tab; one in the last tab's last column, before +.
+    expect([buf.chars[120], buf.chars[140], buf.chars[160]]).toEqual([" ", " ", "│"]);
+    expect(buf.attr[at(buf, 3, 1)]! & BOLD).toBe(0);
+    expect(buf.fg[at(buf, 3, 1)]).toBe(-1); // the active title is bright, the others grey
+    expect(buf.fg[at(buf, 45, 1)]).toBe(palette.muted); // after the unread mark
     const hit = (x: number, y: number) => hits.find((h) => x >= h.x0 && x < h.x1 && y >= h.y0 && y < h.y1);
     expect(hit(38, 1)).toMatchObject({ index: 1, close: true });
     expect(hit(38, 0)?.index).toBe(1);
     expect(hit(38, 0)?.close).toBeUndefined();
     expect(hit(30, 0)).toEqual({ x0: 21, x1: 41, y0: 0, y1: 2, index: 1 });
-    expect(hit(20, 0)).toBeUndefined();
+    expect(hit(0, 0)).toBeUndefined();
+    expect(hit(20, 0)?.index).toBe(0); // side by side
     expect(hit(21, 0)?.index).toBe(1);
-    expect(hit(63, 1)?.index).toBe(NEW_TAB);
+    expect(hit(62, 1)?.index).toBe(NEW_TAB);
     expect(hit(98, 1)?.index).toBe(ALL_SESSIONS);
   }
 });
@@ -88,8 +91,8 @@ test("hovered titles scroll after a pause, show the end and reset when unhovered
   expect(later).toEqual(first);
   expect(row(buf, 1)).not.toBe(original);
   expect(buf.chars[99]).toBe(" ");
-  expect(buf.bg[99]).toBe(surfaces(null).tabSelected);
-  expect(buf.chars[97]).toBe("×");
+  expect(buf.fg[at(buf, 3, 1)]).toBe(-1);
+  expect(buf.chars[98]).toBe("×");
   buf.clear();
   drawTabs(buf, 0, 0, 80, info, 0, "~/x", null, 2000);
   expect(row(buf, 1)).toContain("A very long t…");
@@ -101,14 +104,14 @@ test("fixed-width active tabs and overflow controls fit a narrow terminal", () =
   expect(l.plusX + 3).toBeLessThanOrEqual(l.moreX);
 });
 
-test("image titles keep both rows clickable; only the text image changes during marquee", () => {
+test("image tabs keep both rows clickable, side by side over a baseline; only the text image changes during marquee", () => {
   const buf = new CellBuffer(100, 4);
   const images: PixelImage[] = [];
   const info = tabs(3, "a long title that scrolls");
   const hits = drawTabs(buf, 1, 0, 98, info, 0, "", 1, 0, surfaces(null), { cell: { width: 10, height: 22 }, images });
-  expect(images).toHaveLength(4);
-  expect(images.slice(0, 3).map((image) => [image.x, image.y, image.columns, image.rows, image.slot])).toEqual([
-    [1, 0, 20, 2, 1], [22, 0, 20, 2, 2], [43, 0, 20, 2, 3],
+  expect(images).toHaveLength(5);
+  expect(images.slice(0, 4).map((image) => [image.x, image.y, image.columns, image.rows, image.slot])).toEqual([
+    [2, 0, 20, 2, 1], [22, 0, 20, 2, 2], [42, 0, 20, 2, 3], [1, 0, 98, 2, 99], // the tabs one cell in, then the baseline under the bar
   ]);
   expect(buf.bg.every((color) => color === -1)).toBe(true);
   expect(row(buf, 0)).toBe("");
@@ -118,9 +121,9 @@ test("image titles keep both rows clickable; only the text image changes during 
   const later: PixelImage[] = [];
   buf.clear();
   drawTabs(buf, 1, 0, 98, info, 0, "", 1, 2000, surfaces(null), { cell: { width: 10, height: 22 }, images: later });
-  expect(later.slice(0, 3)).toEqual(images.slice(0, 3));
-  expect(later[3]!.data).not.toBe(images[3]!.data);
-  expect(later[3]!.compression).toBe("zlib");
+  expect(later.slice(0, 4)).toEqual(images.slice(0, 4));
+  expect(later[4]!.data).not.toBe(images[4]!.data);
+  expect(later[4]!.compression).toBe("zlib");
 });
 
 test("English and Chinese image titles stay centered with padding inside compact frames", () => {
@@ -147,7 +150,7 @@ test("English and Chinese image titles stay centered with padding inside compact
       const borderRows = Array.from({ length: frame.height }, (_, y) => y)
         .filter((y) => outline[(y * frame.width + frame.width / 2) * 4 + 3]! > 30);
       expect(occupied[0]! - borderRows[0]!).toBeGreaterThan(cell.height * 0.15);
-      expect(borderRows.at(-1)! - occupied.at(-1)!).toBeGreaterThan(cell.height * 0.15);
+      expect(frame.height - 1 - occupied.at(-1)!).toBeGreaterThan(cell.height * 0.15); // the outline is open at the bottom edge
     }
   }
 });

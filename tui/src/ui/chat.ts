@@ -2,16 +2,18 @@
 // The conversation transcript: a list of messages rendered into wrapped,
 // styled lines with a one-glyph gutter, scrollable from the bottom.
 
+import type { ChangeSet } from "../agent/changes";
 import type { CellBuffer, Style } from "../render/buffer";
 import { mix } from "../render/color";
 import { palette, surfaces, type Surfaces } from "../theme";
 import { stringWidth, truncate } from "../unicode/width";
+import { drawSummary, summaryWidth, TRANSCRIPT_SLOT, type Graphics } from "./changes";
 import { contextRows, formatTokens, type ContextReport } from "./context";
 import { renderMarkdown, slice } from "./markdown";
 import { formatElapsed } from "./status";
 import { wrapText } from "./wrap";
 
-export type Role = "user" | "assistant" | "thinking" | "tool" | "subagent" | "error" | "info" | "context";
+export type Role = "user" | "assistant" | "thinking" | "tool" | "subagent" | "error" | "info" | "context" | "changes";
 
 /** A tool call made by a subagent, shown nested under it. */
 export interface Step {
@@ -42,6 +44,8 @@ export interface Message {
   stopped?: boolean;
   /** /context: what it measured; laid out again at each width. */
   context?: ContextReport;
+  /** The files a turn changed, shown when it ends; a click shows their diffs. */
+  changes?: ChangeSet;
   version: number;
 }
 
@@ -89,6 +93,9 @@ interface Line {
   foldRow?: number;
   /** First line of a message: draws the gutter glyph. */
   head?: boolean;
+  /** One of a change summary's two rows, `card` cells from its offset: drawn by ui/changes.ts, a click target. */
+  card?: number;
+  cardRow?: number;
 }
 
 const GUTTER = 2;
@@ -251,6 +258,13 @@ function titleLine(title: string, color: number, rest: string, width: number, pa
   return line;
 }
 
+/** A turn's change summary: two right-aligned rows, drawn at render time (ui/changes.ts). */
+function changeLines(changes: ChangeSet, width: number): Line[] {
+  const card = summaryWidth(changes);
+  const offset = Math.max(0, width - card);
+  return [0, 1].map((cardRow) => ({ offset, card, cardRow, spans: [] }));
+}
+
 function linesFor(m: Message, width: number, showThinking: boolean, expanded: boolean): Line[] {
   // Searchable strings are numbered the same way whatever is folded, so a hit
   // found in the unfolded layout names the same text in the one on screen.
@@ -259,6 +273,8 @@ function linesFor(m: Message, width: number, showThinking: boolean, expanded: bo
   switch (m.role) {
     case "user":
       return userLines(m.text, width, part);
+    case "changes":
+      return m.changes ? changeLines(m.changes, width) : [];
     case "assistant":
       lines = markdownLines(m.text, width, part);
       break;
@@ -324,6 +340,8 @@ function gutterFor(m: Message, spin: string): Span {
       return { text: "·", style: { fg: palette.faint } };
     case "context":
       return { text: "◔", style: { fg: palette.accent } };
+    case "changes":
+      return { text: "", style: {} };
   }
 }
 
@@ -388,6 +406,7 @@ export class ChatView {
   #lastLayout = { lines: 0, width: 0 };
   #expanded = new WeakSet<Message>();
   #foldHits: Array<{ x0: number; x1: number; y: number; row: number; msg: Message; outputRow: number }> = [];
+  #cardHits: Array<{ x0: number; x1: number; y: number; msg: Message }> = []; // change summaries on screen
   #pointer: { x: number; y: number } | null = null;
   #foldAnchor: { msg: Message; outputRow: number; row: number } | null = null;
   #breathingMessage: Message | null = null;
@@ -441,6 +460,7 @@ export class ChatView {
   /** Forget targets when an overlay or a tiny terminal hides the transcript. */
   resetInteractions(): void {
     this.#foldHits = [];
+    this.#cardHits = [];
     this.#pointer = null;
     this.hasVisibleAnimation = false;
   }
@@ -457,6 +477,11 @@ export class ChatView {
     this.#foldAnchor = { msg: hit.msg, outputRow: opening ? hit.outputRow : Math.min(hit.outputRow, controlRow(hit.msg)), row };
     this.#foldHits = []; // a second queued click must not hit the old layout
     return true;
+  }
+
+  /** The change summary at a point: the turn's changes. */
+  changesAt(x: number, y: number): ChangeSet | undefined {
+    return this.#cardHits.find((h) => h.y === y && x >= h.x0 && x < h.x1)?.msg.changes;
   }
 
   #foldAt(x: number, y: number) {
@@ -590,8 +615,13 @@ export class ChatView {
     if (line?.foldRow !== undefined && line.foldRow >= hiddenFrom(hit.msg)) this.#expanded.add(hit.msg);
   }
 
-  render(buf: CellBuffer, r: Rect, spin: string, now = performance.now(), colors: Surfaces = DEFAULT_SURFACES): void {
+  /**
+   * `open`: the changes whose diffs are shown; their summary stays lit.
+   * `graphics`: where the change summaries' pixel outlines go, when shown.
+   */
+  render(buf: CellBuffer, r: Rect, spin: string, now = performance.now(), colors: Surfaces = DEFAULT_SURFACES, open?: ChangeSet, graphics?: Graphics): void {
     this.#foldHits = [];
+    this.#cardHits = [];
     this.hasVisibleAnimation = false;
     const latestUser = this.#messages.findLast((m) => m.role === "user") ?? null;
     if (latestUser !== this.#breathingMessage) {
@@ -668,6 +698,12 @@ export class ChatView {
       if (x1 > x0) this.#foldHits.push({ x0, x1, y: r.y + row, row, msg, outputRow: line.foldRow! });
     }
     const hovered = this.#pointer ? this.#foldAt(this.#pointer.x, this.#pointer.y)?.msg : undefined;
+    for (let row = 0; row < r.h && first + row < all.length; row++) {
+      const { line, msg } = all[first + row]!;
+      if (!line.card || !msg) continue;
+      const x0 = r.x + GUTTER + (line.offset ?? 0);
+      this.#cardHits.push({ x0, x1: Math.min(r.x + r.w, x0 + line.card), y: r.y + row, msg });
+    }
 
     for (let row = 0; row < r.h && first + row < all.length; row++) {
       const { line, msg } = all[first + row]!;
@@ -686,6 +722,22 @@ export class ChatView {
         x = buf.text(x, y, s.text, style, r.x + r.w);
       }
       if (found && msg && line.src) this.#paintHits(buf, line, msg, r.x + GUTTER + (line.offset ?? 0), y, r.x + r.w, current, colors);
+    }
+
+    // Change summaries: in pixels when both rows are on screen, else the text of the lower row.
+    const pointed = this.#pointer ? this.changesAt(this.#pointer.x, this.#pointer.y) : undefined;
+    let slot = TRANSCRIPT_SLOT;
+    for (const [i, h] of this.#cardHits.entries()) {
+      const row = all[first + h.y - r.y]!.line.cardRow;
+      const next = this.#cardHits[i + 1];
+      const whole = row === 0 && next?.msg === h.msg;
+      if (row === 1 && this.#cardHits[i - 1]?.msg === h.msg) continue; // drawn with its first row
+      if (row === 0 && !whole) continue; // the lower row, which holds the text, is off screen
+      const changes = h.msg.changes!;
+      const lit = changes === pointed || changes === open;
+      const y = row === 0 ? h.y : h.y - 1;
+      drawSummary(buf, h.x0, y, changes, lit, colors, whole ? graphics : undefined, slot, 1);
+      slot += 2;
     }
 
     if (this.#scroll > 0) {

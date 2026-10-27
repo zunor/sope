@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: MIT
-// The tab bar: fixed-width sessions in two-row image outlines, with a text fallback.
+// The tab bar: fixed-width sessions drawn like a browser's, two rows tall in
+// pixels, with a text fallback.
 //
-//    explain the thread pool     fix grep context ×    +    ~/src/app  ⋯
+//   ╭──────────────────────────╮
+//   │ explain the thread pool  │  fix grep context ×  │  +    ~/src/app  ⋯
+//  ─╯                          ╰──────────────────────────────────────────────
 //
-// All titles use regular weight; the active tab has a white outline.
+// The active tab is a grey outline, like the input box's, whose feet flare into a grey baseline,
+// a hovered one a subtle rounded ground; thin grey separators stand between
+// the others; the bar keeps the terminal's background. All titles use
+// regular weight.
 // Hovering a tab shows × to close it. ? marks a tab waiting for approval,
 // • one that finished in the background. ⋯ at the far right lists every
 // saved session. Fixed-width tabs truncate long titles; hovering scrolls the
@@ -11,7 +17,7 @@
 
 import type { CellBuffer } from "../render/buffer";
 import type { PixelImage } from "../render/graphics";
-import { tabFrame, type CellSize } from "./tab-frame";
+import { chromeTab, tabBaseline, type CellSize } from "./tab-frame";
 import { imageTextAvailable, tabTextImage, type LabelRegion } from "./tab-text";
 import { luminance } from "../render/color";
 import { palette, surfaces, type Surfaces } from "../theme";
@@ -62,7 +68,9 @@ const MORE = " ⋯ ";
 
 /** Rows the bar takes. */
 export const TAB_ROWS = 2;
-const TAB_GAP = 1;
+const BASELINE_SLOT = 99; // the tabs take 1…, their titles 100
+const LEAD = 1;
+const TAB_GAP = 0; // side by side, like a browser's; a separator stands in each one's last column
 const overflowLabel = (n: number, left: boolean, w: number) =>
   w < 30 ? (left ? "‹" : "›") : left ? `‹ ${n}` : `${n} ›`;
 
@@ -155,7 +163,8 @@ export function drawTabs(
   graphics?: { cell: CellSize; images: PixelImage[] },
 ): TabHit[] {
   if (graphics && !imageTextAvailable()) graphics = undefined;
-  const l = layoutTabs(tabs, active, x, w, dir);
+  // One cell in, so the first tab's foot has baseline to curve into.
+  const l = layoutTabs(tabs, active, x + LEAD, w - LEAD, dir);
   const hits: TabHit[] = [];
   const regions: LabelRegion[] = [];
   const textY = y + 1;
@@ -163,21 +172,27 @@ export function drawTabs(
   // The scroll markers step to the nearest hidden tab.
   if (l.hiddenLeft) {
     const label = overflowLabel(l.hiddenLeft, true, w);
-    const end = buf.text(x, textY, label, { fg: palette.faint });
-    regions.push({ column: 0, columns: end - x, text: label });
-    hits.push({ x0: x, x1: end, y0: graphics ? y : textY, y1: y + TAB_ROWS, index: l.hiddenLeft - 1 });
+    const end = buf.text(x + LEAD, textY, label, { fg: palette.faint });
+    regions.push({ column: LEAD, columns: end - x - LEAD, text: label });
+    hits.push({ x0: x + LEAD, x1: end, y0: graphics ? y : textY, y1: y + TAB_ROWS, index: l.hiddenLeft - 1 });
   }
-  for (const p of l.tabs) {
+  // A separator follows each tab unless the active or hovered tab is on either side of it.
+  const raised = (i: number) => i === active || i === hover;
+  const separators: number[] = []; // text fallback, drawn last
+  for (const [n, p] of l.tabs.entries()) {
     const t = tabs[p.index]!;
     const on = p.index === active;
     regions.push({ column: p.x - x, columns: p.width, text: t.title });
     const end = p.x + p.width - 1;
-    const bg = graphics ? undefined : on ? colors.tabSelected : p.index === hover ? colors.tabHover : colors.tab;
+    const ground = !on && p.index === hover ? colors.tabHover : null;
+    const next = l.tabs[n + 1];
+    const divider = raised(p.index) || (next && raised(next.index)) ? null : palette.faint;
+    const bg = graphics ? undefined : (ground ?? undefined);
     if (graphics) {
-      const color = on ? 0xffffff : p.index === hover ? palette.muted : palette.faint;
-      graphics.images.push(tabFrame(p.x, y, p.width, p.index + 1, color, graphics.cell));
+      graphics.images.push(chromeTab(p.x, y, p.width, p.index + 1, { fill: ground, outline: on ? palette.faint : null, divider }, graphics.cell));
     } else {
-      buf.fill(p.x, textY, p.width, 1, { bg });
+      if (bg !== undefined) buf.fill(p.x, textY, p.width, 1, { bg });
+      if (divider !== null) separators.push(p.x + p.width - 1);
     }
     let cx = p.x + 2;
     if (t.state === "waiting") cx = buf.text(cx, textY, "? ", { fg: palette.tool, bg });
@@ -209,7 +224,11 @@ export function drawTabs(
     regions.push({ column: l.dir.x - x, columns: stringWidth(l.dir.text), text: l.dir.text });
   }
   button(l.moreX, MORE, ALL_SESSIONS);
+  for (const sx of separators) buf.text(sx, textY, "│", { fg: palette.faint });
   if (graphics) {
+    const shown = l.tabs.find((p) => p.index === active);
+    const gap = shown ? { column: shown.x - x, columns: shown.width } : null;
+    graphics.images.push(tabBaseline(x, y, w, BASELINE_SLOT, palette.faint, gap, graphics.cell));
     const foreground = luminance(colors.tab) > 0.5 ? 0x20212a : 0xe5e7eb;
     graphics.images.push(tabTextImage(buf, x, y, w, graphics.cell, foreground, regions));
     // Do not draw a second, row-aligned copy behind the centered glyphs.

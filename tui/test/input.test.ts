@@ -77,6 +77,18 @@ test("SGR mouse wheel and drag", () => {
   expect(parse("\x1b[<0;3;2M\x1b[<32;9;4M\x1b[<0;9;4m")).toEqual(["mouse:press", "mouse:drag", "mouse:release"]);
 });
 
+test("horizontal and modified wheel reports keep their axis across split reads", () => {
+  expect(parse("\x1b[<66;10;5M\x1b[<67;10;5M")).toEqual(["mouse:wheel-left", "mouse:wheel-right"]);
+  expect(parse("\x1b[<64;10;5M\x1b[<6", "6;10;5M\x1b[<64;10;5M\x1b[<67;10;5M"))
+    .toEqual(["mouse:wheel-up", "mouse:wheel-left", "mouse:wheel-up", "mouse:wheel-right"]);
+  const p = new InputParser();
+  for (const [button, action] of [[64, "wheel-up"], [65, "wheel-down"], [66, "wheel-left"], [67, "wheel-right"]] as const) {
+    expect(p.feed(enc.encode(`\x1b[<${button + 4 + 8 + 16};12;8M`))).toEqual([
+      { type: "mouse", action, button: button & 3, x: 11, y: 7, shift: true, alt: true, ctrl: true },
+    ]);
+  }
+});
+
 test("OSC replies (background color) are recognized, split or whole", () => {
   expect(parse("\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\x")).toEqual(["osc:11;rgb:1e1e/1e1e/1e1e", "text:x"]);
   expect(parse("\x1b]11;rgb:ffff/ffff/ffff\x07")).toEqual(["osc:11;rgb:ffff/ffff/ffff"]);

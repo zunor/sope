@@ -4,7 +4,8 @@ import { KittyGraphics } from "../src/render/graphics";
 import { Renderer } from "../src/render/renderer";
 import { InputParser } from "../src/term/input";
 import { meteorPixels, pixelMeteor, METEOR_ORBIT_MS } from "../src/ui/pixel-meteor";
-import { tabFrame } from "../src/ui/tab-frame";
+import type { PixelImage } from "../src/render/graphics";
+import { chromeTab, tabBaseline, tabFrame } from "../src/ui/tab-frame";
 
 function supportedGraphics(): KittyGraphics {
   const graphics = new KittyGraphics();
@@ -140,4 +141,36 @@ test("rounded frames fit the measured cells and leave their interior and corners
     expect(alpha(frame.width / 2, frame.height - 1 - edge)).toBeGreaterThan(100);
     expect(alpha(frame.width / 2, frame.height - 2)).toBe(0);
   }
+});
+
+test("browser-style tabs within two rows: an active outline whose feet curve into the baseline, a separator in the last column of the others", () => {
+  const cell = { width: 10, height: 22 }; // the feet end 0.2 rows above the bottom: at y 39.6
+  const alpha = (image: PixelImage, x: number, y: number) => Buffer.from(image.data, "base64")[(y * image.width + x) * 4 + 3]!;
+  const active = chromeTab(1, 0, 20, 1, { fill: null, outline: 0xa78bfa, divider: null }, cell);
+  expect([active.columns, active.rows, active.width, active.height]).toEqual([20, 2, 200, 44]);
+  const top = Array.from({ length: 44 }, (_, y) => y).find((y) => alpha(active, 100, y) > 100)!;
+  expect(top).toBeGreaterThan(5); // a third of a row below the top of the bar
+  expect(alpha(active, 100, top + 4)).toBe(0); // the inside keeps the background
+  expect(alpha(active, 100, 39)).toBe(0); // open at the bottom
+  expect(alpha(active, 4, 8)).toBe(0); // the rounded top corner
+  const foot = Array.from({ length: 12 }, (_, x) => x).filter((x) => alpha(active, x, 39) > 100);
+  expect(foot[0]).toBe(0); // the foot meets the baseline at the tab's edge
+  expect(foot.every((x) => x < 8)).toBe(true);
+  expect(Array.from({ length: 200 }, (_, x) => alpha(active, x, 41)).every((a) => a === 0)).toBe(true);
+  expect(alpha(active, 195, 22)).toBe(0); // no separator in it
+  const hovered = chromeTab(21, 0, 20, 2, { fill: 0x2a2c33, outline: null, divider: null }, cell);
+  expect(alpha(hovered, 100, 22)).toBe(255); // a filled ground
+  const plain = chromeTab(21, 0, 20, 2, { fill: null, outline: null, divider: 0x565b69 }, cell);
+  expect(alpha(plain, 100, 22)).toBe(0); // the ground stays the terminal's
+  expect(alpha(plain, 195, 22)).toBeGreaterThan(100); // the separator, centered in the last column
+  expect(alpha(plain, 195, 4)).toBe(0); // shorter than the tab
+
+  const base = tabBaseline(1, 0, 60, 99, 0xa78bfa, { column: 20, columns: 20 }, cell);
+  const row = (y: number) => Array.from({ length: base.width }, (_, x) => alpha(base, x, y));
+  expect(row(39).slice(0, 200).every((a) => a > 100)).toBe(true); // up to where the active tab's foot ends
+  expect(row(39).slice(200, 400).every((a) => a === 0)).toBe(true); // open under the tab
+  expect(row(39).slice(400).every((a) => a > 100)).toBe(true);
+  expect(row(41).every((a) => a === 0)).toBe(true); // clear of the bottom
+  // At the joint the foot's stroke and the baseline's cover the same rows.
+  expect([38, 39, 40].map((y) => alpha(active, 0, y) > 0)).toEqual([38, 39, 40].map((y) => alpha(base, 199, y) > 0));
 });

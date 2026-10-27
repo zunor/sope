@@ -5,6 +5,15 @@ import { describeCall, formatTodos, previewFor, todosOf } from "../src/agent/too
 import { CliError, parseArgs } from "../src/cli";
 import { agentOptions, contextOptions, loadConfig, parseEnvFile } from "../src/config";
 
+test("wheel speed defaults to one row and accepts a positive integer override", () => {
+  expect(loadConfig({}, {}, {}).scrollSpeed).toBe(1);
+  expect(loadConfig({}, {}, { SOPE_SCROLL_SPEED: "3" }).scrollSpeed).toBe(3);
+  expect(loadConfig({}, { SOPE_SCROLL_SPEED: "2" }, { SOPE_SCROLL_SPEED: "3" }).scrollSpeed).toBe(2);
+  for (const value of ["0", "-1", "0.5", "NaN", "Infinity", "invalid", "9007199254740992"]) {
+    expect(loadConfig({}, { SOPE_SCROLL_SPEED: value }, {}).scrollSpeed).toBe(1);
+  }
+});
+
 test("parses flags and the prompt", () => {
   expect(parseArgs([])).toEqual({ print: false, images: [], version: false, help: false });
   expect(parseArgs(["-i", "a.png", "--image=b.jpg", "why?"])).toMatchObject({ images: ["a.png", "b.jpg"], prompt: "why?" });

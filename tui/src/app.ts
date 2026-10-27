@@ -14,8 +14,12 @@
 //   ◆ agent · general-purpose  explain thread pools          12s · 7 tools
 //                                    (one row; a click shows its calls and report)
 //
-//   ⠉⠉ Thinking… (1m 4s · 38 tok/s · tip: …)  (while a turn runs: a
-//                                                    meteor circles a one-row square)
+//   ⠉⠉ Thinking… (1m 4s · 38 tok/s)        ╭─────────────────────────╮
+//      tip: …                              ╰ 2 files changed +42 -7 ─╯
+//                   (while a turn runs: a meteor circles a one-row square;
+//                    the files the turn changed, which the transcript keeps
+//                    when it ends: a click opens their diff on the right of
+//                    the screen, ui/changes.ts)
 //   ──────────────────────────────────────────────────────────────────────
 //   › input                         (or a popup in its place: the permission
 //   ───────────────────────────────  prompt, the permission modes, the models,
@@ -39,12 +43,15 @@ import type { Config } from "./config";
 import type { CellBuffer } from "./render/buffer";
 import { parseOscColor } from "./render/color";
 import { Renderer } from "./render/renderer";
+import { FrameScheduler } from "./render/scheduler";
 import { InputParser, keyId, type InputEvent, type MouseEvent as MouseInput } from "./term/input";
 import { Terminal } from "./term/terminal";
 import { Session } from "./session";
 import { Store, type StoredSession } from "./store";
 import { palette, SPINNER, SPINNER_MS, surfaces, type Surfaces } from "./theme";
 import { ApprovalPrompt } from "./ui/approval";
+import type { ChangeSet } from "./agent/changes";
+import { ChangesPanel, drawChangeSummary, type Graphics } from "./ui/changes";
 import { CommandSuggestions } from "./ui/commands";
 import { formatTokens } from "./ui/context";
 import { EffortPicker } from "./ui/effort";
@@ -57,7 +64,7 @@ import { drawBox, step, type ChoiceHit, type Popup } from "./ui/popup";
 import { SearchBar } from "./ui/search";
 import { copyToClipboard, Selection } from "./ui/selection";
 import { SessionList } from "./ui/sessions";
-import { drawStatus, tipAt } from "./ui/status";
+import { drawStatus, drawTip, tipAt } from "./ui/status";
 import { ALL_SESSIONS, drawTabs, NEW_TAB, TAB_ROWS, type TabHit, type TabInfo } from "./ui/tabs";
 import { drawTaskSummary, TaskPanel } from "./ui/tasks";
 import { stringWidth, truncate } from "./unicode/width";
@@ -92,6 +99,7 @@ function guessBackground(env = process.env): number | null {
 export class App {
   #term = new Terminal();
   #renderer = new Renderer((s) => this.#term.write(s), this.#term.truecolor, this.#term.graphics);
+  #frames = new FrameScheduler(() => this.#render(), () => this.#term.writable);
   #parser = new InputParser();
   #selection = new Selection();
   #notice: string | null = null;
@@ -122,6 +130,9 @@ export class App {
   #hover: number | null = null; // tab bar item under the pointer
   #modeHit = { x0: 0, x1: 0 }; // the mode in the footer: a click opens the popup
   #tasksHit: { x0: number; x1: number } | null = null; // the task summary in the footer: a click opens the panel
+  #changesHit: { x0: number; x1: number; y0: number; y1: number } | null = null; // the change summary's box: a click opens the diff
+  #changesLit = false; // the pointer is on it
+  #changes: ChangesPanel | null = null; // the diff panel, while open: the right of the screen
 
   #showThinking = false;
   #showTrace = false;
@@ -129,7 +140,6 @@ export class App {
   #ticker: ReturnType<typeof setInterval> | null = null;
   #tickInterval = 0;
   #escTimer: ReturnType<typeof setTimeout> | null = null;
-  #renderQueued = false;
   #frame = { ms: 0, bytes: 0 };
   #quitting = false;
 
@@ -159,26 +169,29 @@ export class App {
   start(): void {
     void this.#fetchModels().catch(() => {}); // the model popup asks again and shows the error
     this.#term.onInput((data) => this.#onInput(data));
+    this.#term.onDrain(() => this.#frames.resume());
     this.#term.enter();
     this.#term.onResize(() => {
       this.#renderer.invalidate();
-      this.#render();
+      this.#scheduleRender();
     });
     if (this.#initialPrompt) {
       const numbers = this.#initialImages.map((img) => this.#session.addImage(img));
       this.#send([this.#initialPrompt, ...numbers.map((n) => `[Image #${n}]`)].join(" "));
     }
-    this.#render();
+    this.#scheduleRender();
   }
 
   /** Puts the terminal back to normal; safe to call from crash handlers. */
   restoreTerminal(): void {
+    this.#frames.stop();
     this.#term.leave();
   }
 
   async quit(): Promise<void> {
     if (this.#quitting) return;
     this.#quitting = true;
+    this.#frames.stop();
     this.#tick(false);
     await Promise.all(this.#tabs.sessions.map((s) => s.shutdown()));
     this.#tabs.store?.close();
@@ -277,6 +290,7 @@ export class App {
       return app.#showThinking;
     },
     toggleTrace: () => (app.#showTrace = !app.#showTrace),
+    toggleChanges: () => app.#toggleChanges(),
     toggleMouse: () => {
       app.#term.setMouse(!app.#term.mouse);
       return app.#term.mouse;
@@ -399,7 +413,8 @@ export class App {
         else e.deleteForward();
         return;
       case "escape":
-        if (s.busy) s.cancel();
+        if (this.#changes) this.#changes = null; // the diff panel first, then the turn
+        else if (s.busy) s.cancel();
         return;
       case "ctrl+t":
       case "f2":
@@ -434,6 +449,9 @@ export class App {
   }
 
   #handleMouse(ev: MouseInput): void {
+    // These panes only scroll vertically. A diagonal trackpad gesture must
+    // never turn its horizontal reports into downward motion or a click.
+    if (ev.action === "wheel-left" || ev.action === "wheel-right") return;
     const p = { x: ev.x, y: ev.y };
     this.#session.chat.hover(null);
     if (ev.action === "move" || ev.action === "drag") this.#setHover(this.#tabAt(ev.x, ev.y)?.index ?? null);
@@ -466,6 +484,9 @@ export class App {
       if (ev.action === "press") this.#handleKey("enter");
       return;
     }
+    const summary = this.#changesHit;
+    this.#changesLit = !!summary && ev.y >= summary.y0 && ev.y < summary.y1 && ev.x >= summary.x0 && ev.x < summary.x1;
+    if (this.#changesLit && ev.action === "press" && ev.button === 0) return void this.#toggleChanges(this.#session.changes);
     const tasks = this.#tasksHit;
     if (ev.action === "press" && ev.button === 0 && tasks && ev.y === this.#term.rows - 1 && ev.x >= tasks.x0 && ev.x < tasks.x1) return this.#openTasks();
     if (ev.action === "press" && ev.button === 0 && ev.y === this.#term.rows - 1 && ev.x >= this.#modeHit.x0 && ev.x < this.#modeHit.x1) {
@@ -481,9 +502,10 @@ export class App {
       case "wheel-up":
       case "wheel-down": {
         const by = ev.action === "wheel-up" ? -1 : 1;
+        if (this.#changes?.contains(ev.x, ev.y)) return this.#changes.wheel(ev.y, by, this.#config.scrollSpeed);
         if (popup?.wheel && ev.y >= this.#term.rows - 1 - this.#popupRows) return popup.wheel(by);
         this.#selection.clear(); // it is in screen cells: the text under it is about to move
-        return this.#session.chat.scrollBy(-3 * by);
+        return this.#session.chat.scrollBy(-this.#config.scrollSpeed * by);
       }
       case "press": {
         if (ev.button !== 0) return;
@@ -493,6 +515,13 @@ export class App {
           if (hit.index === ALL_SESSIONS) return this.#openList();
           return hit.close ? this.#closeSession(hit.index) : this.#switchTo(hit.index);
         }
+        const panel = this.#changes?.contains(ev.x, ev.y) ? this.#changes.click(ev.x, ev.y) : null;
+        if (panel) {
+          if (panel === "close") this.#changes = null;
+          return;
+        }
+        const card = this.#session.chat.changesAt(ev.x, ev.y);
+        if (card) return void this.#toggleChanges(card);
         if (this.#session.chat.toggleAt(ev.x, ev.y)) {
           this.#selection.clear();
           return;
@@ -509,7 +538,7 @@ export class App {
 
   #handleListMouse(ev: MouseInput): void {
     const list = this.#list!;
-    if (ev.action === "wheel-up" || ev.action === "wheel-down") return list.move(ev.action === "wheel-up" ? -3 : 3);
+    if (ev.action === "wheel-up" || ev.action === "wheel-down") return list.move((ev.action === "wheel-up" ? -1 : 1) * this.#config.scrollSpeed);
     if (ev.action !== "press" || ev.button !== 0) return;
     // ⋯ again closes it.
     if (this.#tabAt(ev.x, ev.y)?.index === ALL_SESSIONS || list.click(ev.x, ev.y) === "close") this.#list = null;
@@ -579,6 +608,16 @@ export class App {
     const before = e.text.slice(0, e.cursor);
     e.insert(`${before && !/\s$/.test(before) ? " " : ""}[Image #${n}] `);
     this.#flash(`attached [Image #${n}] ${describeImage(img)}`);
+  }
+
+  /** /diff, a click on the change summary: the diff panel on the right of the transcript. */
+  #toggleChanges(changes?: ChangeSet): boolean {
+    const s = this.#session;
+    // /diff: the running turn's, else the last turn that changed files.
+    changes ??= s.busy ? s.changes : (s.chat.messages.findLast((m) => m.changes)?.changes ?? s.changes);
+    const showing = this.#changes?.changes() === changes;
+    this.#changes = showing ? null : new ChangesPanel(() => changes);
+    return !!this.#changes;
   }
 
   /** ↓, /tasks, a click on the footer's task summary: the task panel takes the input's place. */
@@ -690,22 +729,36 @@ export class App {
   }
 
   #scheduleRender(): void {
-    if (this.#renderQueued || this.#quitting) return;
-    this.#renderQueued = true;
-    setTimeout(() => {
-      this.#renderQueued = false;
-      this.#render();
-    }, 8);
+    if (!this.#quitting) this.#frames.request();
   }
 
   #render(): void {
     const t0 = performance.now();
-    const W = this.#term.cols;
+    const cols = this.#term.cols;
     const H = this.#term.rows;
-    const buf = this.#renderer.begin(W, H);
+    const buf = this.#renderer.begin(cols, H);
     this.#commandHits = [];
     this.#commandBounds = null;
+    this.#changesHit = null;
     const s = this.#session;
+
+    // The diff panel takes the right half and everything else fits in the left;
+    // on a narrow terminal it takes the whole screen.
+    const panelW = this.#changes ? (cols >= 80 ? Math.floor(cols / 2) : cols) : 0;
+    const W = cols - panelW;
+    if (this.#changes && W < 24) {
+      s.chat.resetInteractions();
+      this.#renderer.image = null;
+      this.#renderer.cursor = { x: 0, y: 0, visible: false };
+      this.#changes.render(buf, { x: PAD, y: 1, w: cols - 2 * PAD, h: H - 2 }, this.#colors);
+      this.#renderer.end();
+      this.#tick(this.#busy);
+      return;
+    }
+    if (this.#changes) {
+      for (let y = 0; y < H; y++) buf.text(W, y, "│", { fg: palette.faint });
+      this.#changes.render(buf, { x: W + 2, y: 1, w: panelW - 2 - PAD, h: H - 2 }, this.#colors);
+    }
 
     if (W < 24 || H < 10) {
       s.chat.resetInteractions();
@@ -721,7 +774,10 @@ export class App {
     const layout = s.editor.layout(this.#inputWidth);
     // A popup takes the input's place, its box where the two rules were.
     const popup = this.#docked;
-    const room = H - TAB_ROWS - 2 - (s.busy ? 1 : 0) - 1 - 2 - 1; // tab bar, transcript, status gap, status, box edges, footer
+    // Between the transcript and the input: a blank row, then while a turn
+    // runs the status and the tip below it, its change summary beside both.
+    const band = s.busy ? 1 + METEOR_ROWS + 1 : 1;
+    const room = H - TAB_ROWS - 2 - band - 2 - 1; // tab bar, transcript, band, box edges, footer
     const inputRows = popup ? popup.height(room) : Math.max(1, Math.min(MAX_INPUT_ROWS, room, layout.rows.length));
     this.#popupRows = popup ? inputRows + 2 : 0;
 
@@ -729,15 +785,21 @@ export class App {
     const ruleBottomY = footerY - 1;
     const inputY = ruleBottomY - inputRows;
     const ruleTopY = inputY - 1;
-    const statusY = ruleTopY - (s.busy ? METEOR_ROWS : 1); // a blank row when idle
+    const bandY = ruleTopY - band;
+    const statusY = bandY + 1;
     const bodyY = TAB_ROWS; // immediately below the two-row tab bar
-    const bodyH = Math.max(1, statusY - bodyY - (s.busy ? 1 : 0)); // one blank row above the running status
+    const bodyH = Math.max(1, bandY - bodyY); // the band starts with a blank row
 
     const tabGraphics = this.#term.graphics.supported && this.#term.cellSize
       ? { cell: this.#term.cellSize, images: this.#renderer.images } : undefined;
     this.#tabHits = drawTabs(buf, PAD, 0, inner, this.#tabInfo(), this.#tabs.active, this.#dir, this.#hover, t0 - this.#hoverStarted, this.#colors, tabGraphics);
-    this.#drawBody(buf, { x: PAD, y: bodyY, w: inner, h: bodyH }, t0);
-    if (s.busy) this.#drawStatus(buf, statusY, inner, t0);
+    this.#drawBody(buf, { x: PAD, y: bodyY, w: inner, h: bodyH }, t0, tabGraphics);
+    if (s.busy) {
+      // Its right edge over the input box's.
+      const lit = this.#changesLit || this.#changes?.changes() === s.changes;
+      this.#changesHit = drawChangeSummary(buf, PAD, PAD + inner, statusY, s.changes, lit, this.#colors, tabGraphics);
+      this.#drawStatus(buf, statusY, this.#changesHit ? this.#changesHit.x0 - 2 - PAD : inner, t0);
+    }
     this.#choiceHits = [];
     if (popup) {
       const box = drawBox(buf, PAD, ruleTopY, inner, inputRows + 2, popup.color, popup.title, popup.hints);
@@ -779,34 +841,37 @@ export class App {
     }));
   }
 
-  #drawBody(buf: CellBuffer, r: { x: number; y: number; w: number; h: number }, now: number): void {
+  #drawBody(buf: CellBuffer, r: { x: number; y: number; w: number; h: number }, now: number, graphics?: Graphics): void {
     const { chat, trace } = this.#session;
     const spin = SPINNER[Math.floor(now / SPINNER_MS) % SPINNER.length]!;
-    if (!this.#showTrace) return chat.render(buf, r, spin, now, this.#colors);
+    const open = this.#changes?.changes(); // its summary stays lit
+    if (!this.#showTrace) return chat.render(buf, r, spin, now, this.#colors, open, graphics);
 
     const stats = `${trace.count} · ${this.#frame.ms.toFixed(1)}ms ${this.#frame.bytes}B`;
     if (r.w >= 100) {
       const traceW = Math.min(64, Math.floor(r.w * 0.42));
       const chatW = r.w - traceW - 3;
-      chat.render(buf, { ...r, w: chatW }, spin, now, this.#colors);
+      chat.render(buf, { ...r, w: chatW }, spin, now, this.#colors, open, graphics);
       for (let y = r.y; y < r.y + r.h; y++) buf.text(r.x + chatW + 1, y, "│", { fg: palette.faint });
       trace.render(buf, { x: r.x + chatW + 3, y: r.y, w: traceW, h: r.h }, stats);
     } else {
       const traceH = Math.max(3, Math.floor(r.h * 0.45));
       const chatH = r.h - traceH - 1;
-      chat.render(buf, { ...r, h: chatH }, spin, now, this.#colors);
+      chat.render(buf, { ...r, h: chatH }, spin, now, this.#colors, open, graphics);
       buf.text(r.x, r.y + chatH, "┄".repeat(r.w), { fg: palette.faint });
       trace.render(buf, { x: r.x, y: r.y + chatH + 1, w: r.w, h: traceH }, stats);
     }
   }
 
-  #drawStatus(buf: CellBuffer, y: number, inner: number, now: number): void {
+  /** The status in `width` cells of row y, the tip in the row below. */
+  #drawStatus(buf: CellBuffer, y: number, width: number, now: number): void {
     const s = this.#session;
     const elapsedMs = now - s.turnStarted;
     const activity = s.activity();
     const pixel = this.#term.graphics.supported;
     if (pixel) this.#renderer.image = pixelMeteor(PAD, y, activity.color, now);
-    drawStatus(buf, PAD, y, inner, { ...activity, elapsedMs, rate: s.rate.rate(now), tip: tipAt(elapsedMs, s.turnCount) }, now, pixel);
+    drawStatus(buf, PAD, y, width, { ...activity, elapsedMs, rate: s.rate.rate(now) }, now, pixel);
+    drawTip(buf, PAD, y + METEOR_ROWS, width, tipAt(elapsedMs, s.turnCount));
   }
 
   #drawInput(buf: CellBuffer, y: number, rows: number, layout: ReturnType<Editor["layout"]>, promptWidth: number): void {

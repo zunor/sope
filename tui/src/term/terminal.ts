@@ -76,6 +76,14 @@ export class Terminal {
     process.stdin.on("data", cb);
   }
 
+  get writable(): boolean {
+    return !process.stdout.writableNeedDrain;
+  }
+
+  onDrain(cb: () => void): void {
+    process.stdout.on("drain", cb);
+  }
+
   onResize(cb: () => void): void {
     process.stdout.on("resize", () => {
       this.cellSize = null;

@@ -20,7 +20,7 @@ export function imageTextAvailable(): boolean {
 }
 
 /** Capture the lower text row, then position its glyphs at the image center. */
-export function tabTextImage(buf: CellBuffer, x: number, y: number, columns: number, cell: CellSize, foreground: number, regions: LabelRegion[]): PixelImage {
+export function tabTextImage(buf: CellBuffer, x: number, y: number, columns: number, cell: CellSize, foreground: number, regions: LabelRegion[], slot = 100): PixelImage {
   const width = columns * cell.width, height = 2 * cell.height;
   const start = (y + 1) * buf.width + x;
   const chars = buf.chars.slice(start, start + columns);
@@ -63,5 +63,5 @@ export function tabTextImage(buf: CellBuffer, x: number, y: number, columns: num
     if (cache.size >= 32) cache.delete(cache.keys().next().value!);
     cache.set(key, data);
   }
-  return { x, y, columns, rows: 2, width, height, data, slot: 100, z: 0, compression: "zlib" };
+  return { x, y, columns, rows: 2, width, height, data, slot, z: 0, compression: "zlib" };
 }

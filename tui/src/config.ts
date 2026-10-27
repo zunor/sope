@@ -20,6 +20,8 @@
 //                           how long the model thinks (default: the model's)
 //   SOPE_MOUSE              0 leaves the mouse to the terminal (default: the TUI
 //                           takes it for wheel scrolling and drag-to-copy)
+//   SOPE_SCROLL_SPEED       rows per vertical wheel report (positive integer,
+//                           default 1; terminals already accelerate trackpads)
 //   SOPE_PERMISSIONS        ask | auto | full: who approves edits, commands and
 //                           fetches (default auto, "Approve for me")
 
@@ -53,6 +55,7 @@ export interface Config {
   /** Reasoning effort; "" leaves it to the model. */
   effort: Effort;
   mouse: boolean;
+  scrollSpeed: number;
   /** Who approves built-in tools that change things (agent/permissions.ts). */
   permissions: PermissionMode;
 }
@@ -97,6 +100,7 @@ export function loadConfig(
   const provider = overrides.provider || get("SOPE_PROVIDER") || (apiKey ? "openai" : "mock");
   const threshold = Number(get("SOPE_COMPACT_THRESHOLD") ?? NaN);
   const window = Number(get("SOPE_CONTEXT_WINDOW") ?? 0);
+  const scrollSpeed = Number(get("SOPE_SCROLL_SPEED") ?? 1);
   const baseUrl = overrides.baseUrl || get("SOPE_BASE_URL") || DEFAULT_BASE_URL;
   const imageModel = get("SOPE_IMAGE_MODEL") ?? (provider === "openai" && baseUrl === DEFAULT_BASE_URL ? DEFAULT_IMAGE_MODEL : "");
   return {
@@ -109,6 +113,7 @@ export function loadConfig(
     contextWindow: Number.isInteger(window) && window >= 0 && window <= 0xffffffff ? window : 0,
     effort: overrides.effort ?? parseEffort(get("SOPE_REASONING_EFFORT") ?? "") ?? "",
     mouse: !/^(0|false|off|no)$/i.test(get("SOPE_MOUSE") ?? ""),
+    scrollSpeed: Number.isSafeInteger(scrollSpeed) && scrollSpeed > 0 ? scrollSpeed : 1,
     permissions: overrides.permissions ?? parseMode(get("SOPE_PERMISSIONS") ?? "") ?? DEFAULT_MODE,
   };
 }

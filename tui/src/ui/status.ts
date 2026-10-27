@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
-// The line above the input while a turn runs:
+// The two lines above the input while a turn runs:
 //
-//   ⠉⠉ Thinking… (1m 4s · 38 tok/s · tip: ctrl+t shows the ABI trace)
+//   ⠉⠉ Thinking… (1m 4s · 38 tok/s)
+//      tip: ctrl+t shows the ABI trace
 //
-// One row: a meteor circles a tiny Braille square (meteor.ts), the verb shimmers (a highlight sweeps
-// across it), the time counts up in seconds, the rate is the model's recent
-// output speed, and a tip shows up now and then.
+// A meteor circles a tiny Braille square (meteor.ts), the verb shimmers (a
+// highlight sweeps across it), the time counts up in seconds, the rate is
+// the model's recent output speed; below the verb a tip, another every
+// TIP_CYCLE_S seconds.
 
 import type { CellBuffer } from "../render/buffer";
 import { mix } from "../render/color";
@@ -20,8 +22,7 @@ const SHIMMER_BAND = 3; // cells on each side of the highlight's center
 const RATE_WINDOW_MS = 3000;
 const RATE_IDLE_MS = 1500;
 
-/** A tip shows for the middle third of every TIP_CYCLE_S seconds. */
-const TIP_CYCLE_S = 30;
+const TIP_CYCLE_S = 20;
 export const TIPS = [
   "esc cancels the turn",
   "ctrl+t shows the ABI trace",
@@ -91,11 +92,9 @@ export class TokenRate {
   }
 }
 
-/** The tip to show `elapsedMs` into a turn, or null between tips. */
-export function tipAt(elapsedMs: number, turn: number): string | null {
+/** The tip to show `elapsedMs` into a turn. */
+export function tipAt(elapsedMs: number, turn: number): string {
   const s = Math.floor(elapsedMs / 1000);
-  const phase = s % TIP_CYCLE_S;
-  if (phase < TIP_CYCLE_S / 3 || phase >= (2 * TIP_CYCLE_S) / 3) return null;
   return TIPS[(turn + Math.floor(s / TIP_CYCLE_S)) % TIPS.length]!;
 }
 
@@ -105,7 +104,6 @@ export interface Status {
   color: number;
   elapsedMs: number;
   rate: number | null;
-  tip: string | null;
 }
 
 /** How bright cell `i` of a `len`-cell text is at time `now` (0..1). */
@@ -130,8 +128,14 @@ export function drawStatus(buf: CellBuffer, x: number, y: number, width: number,
 
   const parts = [formatElapsed(s.elapsedMs)];
   if (s.rate !== null) parts.push(`${Math.round(s.rate)} tok/s`);
-  const short = ` (${parts.join(" · ")})`;
-  const full = s.tip ? ` (${[...parts, `tip: ${s.tip}`].join(" · ")})` : short;
+  buf.text(x, y, truncate(` (${parts.join(" · ")})`, end - x), { fg: palette.muted }, end);
+}
+
+/** The tip under the status, lined up with its verb. */
+export function drawTip(buf: CellBuffer, x: number, y: number, width: number, tip: string): void {
+  const end = x + width;
+  x += METEOR_WIDTH + 1;
+  const text = `tip: ${tip}`;
   // A tip that does not fit is left out rather than cut off.
-  buf.text(x, y, x + stringWidth(full) <= end ? full : truncate(short, end - x), { fg: palette.muted }, end);
+  if (x + stringWidth(text) <= end) buf.text(x, y, text, { fg: palette.muted }, end);
 }

@@ -11,6 +11,7 @@ import { Agent, type ContextUsage, type Shell, type SopeEvent } from "sope";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { AgentBridge } from "./agent/bridge";
+import { ChangeTracker, COMMAND_TOOLS, EDIT_TOOLS } from "./agent/changes";
 import { HostToolRunner } from "./agent/runner";
 import { effortLabel, parseEffort, type Effort } from "./agent/effort";
 import { describeImage, type ImageFile } from "./agent/images";
@@ -74,6 +75,8 @@ export class Session {
   readonly editor = new Editor();
   readonly trace = new EventLog();
   readonly rate = new TokenRate();
+  /** The files sope changed in the running turn; the transcript keeps them when it ends. */
+  readonly changes = new ChangeTracker();
   readonly hostTools: HostTool[];
   title = UNTITLED;
   provider: string;
@@ -103,6 +106,7 @@ export class Session {
   #assistant = new Map<number, Message>(); // turn id → reply being streamed
   #thinking = new Map<number, Message>(); // turn id → reasoning being streamed
   #toolCalls = new Map<number, ToolTarget>(); // call id → where its result goes
+  #changing = new Map<number, { name: string; path: string }>(); // call id → a waiting call that changes files
   #subagents = new Map<number, Message>(); // spawning call id (= agent id) → subagent message
   #agents: Message[] = []; // the subagents of the latest turn that launched any, running or not
   #agentsTurn = 0;
@@ -443,6 +447,7 @@ export class Session {
 
   #onPermission(callId: number, turnId: number, name: string, rawInput: string, agentId = 0, subagent?: string): void {
     const input = parseInput(rawInput);
+    if (EDIT_TOOLS.has(name) || COMMAND_TOOLS.has(name)) this.#changing.set(callId, { name, path: String(input.file_path ?? "") });
     const v = this.#verdict(name, input);
     if (v.allow) {
       this.trace.note(`approved ${name} for you: ${v.reason}`);
@@ -465,6 +470,16 @@ export class Session {
   }
 
   #permit(callId: number, allow: boolean): void {
+    // The call runs once allowed: keep what it may change as it is now.
+    const changing = this.#changing.get(callId);
+    this.#changing.delete(callId);
+    if (allow && changing) {
+      if (EDIT_TOOLS.has(changing.name)) this.changes.track(changing.path);
+      else {
+        if (this.#shellsSeen) this.changes.detect(); // what background commands did since, before it is the baseline
+        this.changes.snapshot();
+      }
+    }
     try {
       this.#agent.permit(callId, allow);
       this.trace.call("sope_permit", `#${callId} ${allow ? "allow" : "deny"}`);
@@ -480,6 +495,7 @@ export class Session {
   /** A turn ended: libsope dropped its pending requests. Subagent turns are keyed by -agentId. */
   #dropApprovals(turnId: number, agentId: number): void {
     const key = agentId ? -agentId : turnId;
+    for (const a of this.approvals) if (a.turnId === key) this.#changing.delete(a.callId);
     this.approvals = this.approvals.filter((a) => a.turnId !== key);
   }
 
@@ -522,6 +538,7 @@ export class Session {
         this.#openTurns.add(ev.turnId);
         this.turnStarted = performance.now();
         this.turnCount++;
+        this.changes.reset();
         return;
       case "thinking_delta": {
         let m = this.#thinking.get(ev.turnId);
@@ -622,7 +639,9 @@ export class Session {
           this.#toolCalls.delete(callId);
         }
         this.#openTurns.delete(ev.turnId);
+        this.changes.detect(); // background commands keep running
         if (ev.stopReason === "cancelled") this.chat.add({ role: "info", text: "turn cancelled" });
+        if (this.changes.files.length) this.chat.add({ role: "changes", text: "", changes: this.changes.toSet() });
         try {
           this.context = this.#agent.context().used; // what the next request starts from
         } catch {
@@ -704,6 +723,8 @@ export class Session {
       if (!isError && result.startsWith("Started in the background")) this.#shellsSeen = true;
       this.#shellsAt = -Infinity; // bash_output and bash_kill change them too
     }
+    if (EDIT_TOOLS.has(name)) this.changes.refresh();
+    else if (COMMAND_TOOLS.has(name) || name.startsWith("bash")) this.changes.detect();
     const target = this.#toolCalls.get(callId);
     this.#dropApproval(callId);
     if (!target) return;

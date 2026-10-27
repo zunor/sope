@@ -61,6 +61,8 @@ jobs:
           python3 -m venv build-ci/venv
           build-ci/venv/bin/pip install pyte==0.8.2
           build-ci/venv/bin/python scripts/ci/tui-smoke.py
+          build-ci/venv/bin/python scripts/ci/tui-scroll.py
+          build-ci/venv/bin/python scripts/ci/tui-scroll.py --graphics
           bun scripts/bench-tui-review.ts | tee build-ci/benchmark.txt
       - name: Diagnostics
         if: always()
